@@ -1,0 +1,230 @@
+{
+  "architecture": "native_function_calls",
+  "clock": "replay",
+  "checks": [
+    {
+      "prompt": "turn around",
+      "before": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 0.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "after": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 180.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "decisions": [
+        {
+          "response": {
+            "say": "",
+            "actions": [
+              {
+                "tool": "spin",
+                "args": {
+                  "angle_deg": 180
+                },
+                "call_id": "Z6Nv09zY8sng7mtAevtZ88TMtp7GG9KZ"
+              }
+            ],
+            "status": "continue",
+            "next_wake_s": null
+          },
+          "native": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "Z6Nv09zY8sng7mtAevtZ88TMtp7GG9KZ",
+                "type": "function",
+                "function": {
+                  "name": "spin",
+                  "arguments": "{\"angle_deg\": 180}"
+                }
+              }
+            ]
+          },
+          "prompt_tokens": 1375
+        },
+        {
+          "response": {
+            "say": "I'm turning around now and will face the new direction you requested.",
+            "actions": [],
+            "status": "completed",
+            "next_wake_s": null
+          },
+          "native": {
+            "role": "assistant",
+            "content": "I'm turning around now and will face the new direction you requested."
+          },
+          "prompt_tokens": 1575
+        }
+      ],
+      "executed": [
+        {
+          "command_id": "dfd6e03280",
+          "tool": "spin",
+          "status": "completed",
+          "message": "Spun 180 degrees.",
+          "pose": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 180.0,
+            "head_tilt_deg": 0.0,
+            "linear_vel_mm_s": 0.0,
+            "angular_vel_deg_s": 0.0
+          },
+          "warnings": [],
+          "details": {
+            "applied_deg": 180.0,
+            "observed_objects": [
+              "Blue Cube",
+              "Cardboard Box",
+              "Charging Dock",
+              "Green Mug",
+              "Red Ball",
+              "Yellow Toy Duck"
+            ],
+            "rotation_deg": 180.0
+          }
+        }
+      ],
+      "final": {
+        "objective": "turn around",
+        "status": "completed",
+        "step": 2,
+        "correlation_id": "42591c6587cb42bf93c2ad88d5abf591",
+        "origin": "user"
+      }
+    },
+    {
+      "prompt": "check around the room",
+      "before": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 180.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "after": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 0.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "decisions": [
+        {
+          "response": {
+            "say": "",
+            "actions": [],
+            "status": "continue",
+            "next_wake_s": 5
+          },
+          "native": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "3m1c7YK2dLpnHD1DrRHGIYQ5g9fDv0Lt",
+                "type": "function",
+                "function": {
+                  "name": "schedule_wake",
+                  "arguments": "{\"delay_s\": 5}"
+                }
+              }
+            ]
+          },
+          "prompt_tokens": 1365
+        },
+        {
+          "response": {
+            "say": "",
+            "actions": [
+              {
+                "tool": "spin",
+                "args": {
+                  "angle_deg": 180
+                },
+                "call_id": "lzYXSZLtE3ypuJlLj3E5xjSRwpKmTD25"
+              }
+            ],
+            "status": "continue",
+            "next_wake_s": null
+          },
+          "native": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "lzYXSZLtE3ypuJlLj3E5xjSRwpKmTD25",
+                "type": "function",
+                "function": {
+                  "name": "spin",
+                  "arguments": "{\"angle_deg\": 180}"
+                }
+              }
+            ]
+          },
+          "prompt_tokens": 1523
+        },
+        {
+          "response": {
+            "say": "I've turned around and am now facing the opposite direction. What would you like to check next?",
+            "actions": [],
+            "status": "completed",
+            "next_wake_s": null
+          },
+          "native": {
+            "role": "assistant",
+            "content": "I've turned around and am now facing the opposite direction. What would you like to check next?"
+          },
+          "prompt_tokens": 1644
+        }
+      ],
+      "executed": [
+        {
+          "command_id": "fdbd99f4ff",
+          "tool": "spin",
+          "status": "completed",
+          "message": "Spun 180 degrees.",
+          "pose": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0,
+            "linear_vel_mm_s": 0.0,
+            "angular_vel_deg_s": 0.0
+          },
+          "warnings": [],
+          "details": {
+            "applied_deg": 180.0,
+            "observed_objects": [
+              "Blue Cube",
+              "Cardboard Box",
+              "Charging Dock",
+              "Green Mug",
+              "Red Ball"
+            ],
+            "rotation_deg": 180.0
+          }
+        }
+      ],
+      "final": {
+        "objective": "check around the room",
+        "status": "completed",
+        "step": 3,
+        "correlation_id": "6785f9b72a614f169dc1915a818f4c9e",
+        "origin": "user"
+      }
+    }
+  ]
+}

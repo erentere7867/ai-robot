@@ -1,0 +1,175 @@
+<mujoco model="companion_r1_sandbox">
+  <compiler angle="degree" meshdir="meshes" autolimits="true"/>
+
+  <option timestep="0.005" gravity="0 0 -9.81"/>
+
+  <visual>
+    <global offwidth="1280" offheight="720" elevation="-22" azimuth="140"/>
+    <quality shadowsize="2048" offsamples="4"/>
+    <headlight ambient="0.32 0.35 0.40" diffuse="0.55 0.58 0.62" specular="0.3 0.3 0.3"/>
+    <map znear="0.02" zfar="15.0" shadowclip="4.5"/>
+    <rgba haze="0.07 0.10 0.16 1"/>
+  </visual>
+
+  <asset>
+    <!-- Procedural 3D Skybox & Checkered Studio Floor Texture -->
+    <texture name="skybox" type="skybox" builtin="gradient" rgb1="0.10 0.15 0.24" rgb2="0.04 0.06 0.10" width="512" height="512"/>
+    <texture name="floor_tex" type="2d" builtin="checker" rgb1="0.15 0.20 0.28" rgb2="0.11 0.15 0.22" mark="edge" markrgb="0.24 0.34 0.48" width="512" height="512"/>
+    <material name="mat_floor" texture="floor_tex" texrepeat="6 6" texuniform="true" reflectance="0.12" specular="0.25" shininess="0.4"/>
+    <material name="mat_wall" rgba="0.16 0.22 0.32 1" specular="0.2" shininess="0.3"/>
+    <material name="mat_cliff" rgba="0.88 0.18 0.22 0.0" emission="0.4"/>
+
+    <!-- CAD Materials from companion_r1.step -->
+    <material name="mat_shell" rgba="0.85 0.87 0.85 1" specular="0.55" shininess="0.65" reflectance="0.06"/>
+    <material name="mat_aluminum" rgba="0.66 0.70 0.75 1" specular="0.75" shininess="0.8" reflectance="0.15"/>
+    <material name="mat_dark_teal" rgba="0.14 0.20 0.24 1" specular="0.4" shininess="0.5"/>
+    <material name="mat_copper_rim" rgba="0.82 0.47 0.25 1" specular="0.8" shininess="0.85" reflectance="0.15"/>
+    <material name="mat_rubber" rgba="0.17 0.19 0.21 1" specular="0.15" shininess="0.2"/>
+    <material name="mat_lens" rgba="0.05 0.09 0.14 1" specular="0.9" shininess="0.95" reflectance="0.25"/>
+    <material name="mat_pcb" rgba="0.12 0.50 0.29 1" specular="0.4" shininess="0.5"/>
+    <material name="mat_eye_glow" rgba="0.0 0.90 1.0 1" emission="0.9" specular="0.9"/>
+    <material name="mat_shiny_obj" rgba="1 1 1 1" specular="0.7" shininess="0.8"/>
+    <material name="mat_matte_obj" rgba="1 1 1 1" specular="0.2" shininess="0.25"/>
+    <material name="mat_led_glow" rgba="0.18 0.92 0.54 1" emission="0.85" specular="0.8"/>
+
+    <!-- Tessellated CAD Meshes (vertices in mm -> scaled 0.001 to meters) -->
+    <mesh name="base_plate" file="base_plate.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="battery_tray" file="battery_tray.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="electronics_deck" file="electronics_deck.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="upper_cover" file="upper_cover.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mast" file="mast.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="frame_hardware" file="frame_hardware.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rpi5_board" file="rpi5_board.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="head_shell" file="head_shell.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="head_lens" file="head_lens.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="head_display" file="head_display.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="fl_tire" file="fl_tire.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="fl_rim" file="fl_rim.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="fr_tire" file="fr_tire.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="fr_rim" file="fr_rim.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rl_tire" file="rl_tire.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rl_rim" file="rl_rim.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rr_tire" file="rr_tire.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rr_rim" file="rr_rim.stl" scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <worldbody>
+    <!-- Studio Lighting with Cast Shadows -->
+    <light name="key_light" pos="0.8 -1.2 2.4" dir="-0.25 0.35 -0.9" diffuse="0.85 0.85 0.88" specular="0.4 0.4 0.4" castshadow="true"/>
+    <light name="fill_light" pos="-1.2 1.4 2.0" dir="0.35 -0.35 -0.85" diffuse="0.38 0.44 0.54" specular="0.15 0.15 0.2" castshadow="false"/>
+
+    <!-- 3m x 3m Indoor Room Floor & Low Perimeter Walls -->
+    <geom name="floor" type="plane" size="1.5 1.5 0.05" material="mat_floor"/>
+    <geom name="wall_north" type="box" pos="1.52 0 0.14" size="0.02 1.54 0.14" material="mat_wall"/>
+    <geom name="wall_south" type="box" pos="-1.52 0 0.14" size="0.02 1.54 0.14" material="mat_wall"/>
+    <geom name="wall_west" type="box" pos="0 1.52 0.14" size="1.50 0.02 0.14" material="mat_wall"/>
+    <geom name="wall_east" type="box" pos="0 -1.52 0.14" size="1.50 0.02 0.14" material="mat_wall"/>
+    <geom name="cliff_zone_geom" type="box" pos="1.225 0 0.002" size="0.275 0.60 0.002" material="mat_cliff" contype="0" conaffinity="0"/>
+
+    <!-- Orbiting / Third-Person 3D Overview Camera -->
+    <camera name="overview_cam" pos="-0.65 -0.85 0.82" xyaxes="0.78 -0.62 0 0.34 0.43 0.84" fovy="48"/>
+
+    <!-- COMPANION_R1 3D CAD ROBOT -->
+    <body name="robot_base" pos="0 0 0">
+      <joint name="base_x" type="slide" axis="1 0 0" damping="10"/>
+      <joint name="base_y" type="slide" axis="0 1 0" damping="10"/>
+      <joint name="base_yaw" type="hinge" axis="0 0 1" damping="5"/>
+
+      <!-- Chassis CAD Meshes -->
+      <geom name="g_base_plate" type="mesh" mesh="base_plate" material="mat_aluminum" contype="0" conaffinity="0"/>
+      <geom name="g_battery_tray" type="mesh" mesh="battery_tray" material="mat_dark_teal" contype="0" conaffinity="0"/>
+      <geom name="g_electronics_deck" type="mesh" mesh="electronics_deck" material="mat_aluminum" contype="0" conaffinity="0"/>
+      <geom name="g_upper_cover" type="mesh" mesh="upper_cover" material="mat_shell" contype="0" conaffinity="0"/>
+      <geom name="g_mast" type="mesh" mesh="mast" material="mat_dark_teal" contype="0" conaffinity="0"/>
+      <geom name="g_frame_hardware" type="mesh" mesh="frame_hardware" material="mat_aluminum" contype="0" conaffinity="0"/>
+      <geom name="g_rpi5_board" type="mesh" mesh="rpi5_board" material="mat_pcb" contype="0" conaffinity="0"/>
+      <!-- Front ToF Sensor Lens Indicator on Front Bumper -->
+      <geom name="g_tof_sensor" type="box" pos="0.141 0 0.065" size="0.003 0.016 0.007" rgba="0.0 0.90 1.0 1" contype="0" conaffinity="0"/>
+      <site name="front_tof_site" pos="0.141 0 0.065" zaxis="1 0 0"/>
+
+      <!-- 4 Articulated Wheels from CAD -->
+      <body name="fl_wheel" pos="0.090 0.135 0.060">
+        <joint name="fl_spin" type="hinge" axis="0 -1 0"/>
+        <geom type="mesh" mesh="fl_tire" material="mat_rubber" contype="0" conaffinity="0"/>
+        <geom type="mesh" mesh="fl_rim" material="mat_copper_rim" contype="0" conaffinity="0"/>
+      </body>
+      <body name="fr_wheel" pos="0.090 -0.135 0.060">
+        <joint name="fr_spin" type="hinge" axis="0 -1 0"/>
+        <geom type="mesh" mesh="fr_tire" material="mat_rubber" contype="0" conaffinity="0"/>
+        <geom type="mesh" mesh="fr_rim" material="mat_copper_rim" contype="0" conaffinity="0"/>
+      </body>
+      <body name="rl_wheel" pos="-0.090 0.135 0.060">
+        <joint name="rl_spin" type="hinge" axis="0 -1 0"/>
+        <geom type="mesh" mesh="rl_tire" material="mat_rubber" contype="0" conaffinity="0"/>
+        <geom type="mesh" mesh="rl_rim" material="mat_copper_rim" contype="0" conaffinity="0"/>
+      </body>
+      <body name="rr_wheel" pos="-0.090 -0.135 0.060">
+        <joint name="rr_spin" type="hinge" axis="0 -1 0"/>
+        <geom type="mesh" mesh="rr_tire" material="mat_rubber" contype="0" conaffinity="0"/>
+        <geom type="mesh" mesh="rr_rim" material="mat_copper_rim" contype="0" conaffinity="0"/>
+      </body>
+
+      <!-- Articulated Head Shell + Visor Display + Glowing Animated Eyes + First-Person Camera -->
+      <body name="head_assembly" pos="0.025 0 0.196">
+        <joint name="head_tilt" type="hinge" axis="0 -1 0" range="-25 35"/>
+        <geom name="g_head_shell" type="mesh" mesh="head_shell" material="mat_shell" contype="0" conaffinity="0"/>
+        <geom name="g_head_lens" type="mesh" mesh="head_lens" material="mat_lens" contype="0" conaffinity="0"/>
+        <geom name="g_head_display" type="mesh" mesh="head_display" material="mat_lens" contype="0" conaffinity="0"/>
+
+        <!-- Live Glowing Eyes & Mouth on the Front Visor (X = +44.5mm from pivot = +69.5mm world) -->
+        <geom name="g_eye_left" type="box" pos="0.0445 0.024 0.052" size="0.0015 0.013 0.015" material="mat_eye_glow" contype="0" conaffinity="0"/>
+        <geom name="g_eye_right" type="box" pos="0.0445 -0.024 0.052" size="0.0015 0.013 0.015" material="mat_eye_glow" contype="0" conaffinity="0"/>
+        <geom name="g_mouth" type="box" pos="0.0445 0.0 0.026" size="0.0015 0.010 0.003" material="mat_eye_glow" contype="0" conaffinity="0"/>
+
+        <!-- First-Person Camera mounted at top-center of head_shell (Z=286mm) -->
+        <geom name="g_cam_bezel" type="cylinder" pos="0.043 0 0.086" zaxis="1 0 0" size="0.006 0.002" rgba="0.1 0.12 0.15 1" contype="0" conaffinity="0"/>
+        <camera name="head_cam" pos="0.045 0 0.088" xyaxes="0 -1 0 0.16 0 0.987" fovy="52"/>
+      </body>
+    </body>
+
+    <!-- 3D Interactive Sandbox Objects (Mocap bodies for instant 3D positioning & dragging) -->
+    <body name="obj_red_ball" mocap="true" pos="0.68 0.16 0.048">
+      <geom name="geom_red_ball" type="sphere" size="0.048" material="mat_shiny_obj" rgba="0.96 0.25 0.37 1"/>
+    </body>
+
+    <body name="obj_blue_cube" mocap="true" pos="0.62 -0.21 0.055">
+      <geom name="geom_blue_cube" type="box" size="0.055 0.055 0.055" material="mat_shiny_obj" rgba="0.23 0.51 0.96 1"/>
+    </body>
+
+    <body name="obj_yellow_duck" mocap="true" pos="0.47 0.34 0.0">
+      <geom name="geom_duck_body" type="ellipsoid" pos="0 0 0.036" size="0.046 0.036 0.034" material="mat_shiny_obj" rgba="0.95 0.78 0.08 1"/>
+      <geom name="geom_duck_head" type="sphere" pos="0.024 0 0.072" size="0.025" material="mat_shiny_obj" rgba="0.95 0.78 0.08 1"/>
+      <geom name="geom_duck_beak" type="box" pos="0.050 0 0.068" size="0.012 0.011 0.005" material="mat_shiny_obj" rgba="0.98 0.45 0.09 1"/>
+    </body>
+
+    <body name="obj_green_mug" mocap="true" pos="0.84 -0.03 0.058">
+      <geom name="geom_green_mug" type="cylinder" size="0.043 0.058" material="mat_shiny_obj" rgba="0.06 0.73 0.51 1"/>
+      <geom name="geom_mug_handle" type="box" pos="-0.046 0 0" size="0.012 0.008 0.034" material="mat_shiny_obj" rgba="0.06 0.73 0.51 1"/>
+    </body>
+
+    <body name="obj_cardboard_box" mocap="true" pos="1.12 0.28 0.095">
+      <geom name="geom_cardboard_box" type="box" size="0.11 0.11 0.095" material="mat_matte_obj" rgba="0.82 0.54 0.24 1"/>
+      <geom name="geom_box_tape" type="box" pos="0 0 0.0955" size="0.111 0.018 0.001" material="mat_matte_obj" rgba="0.92 0.78 0.52 1"/>
+    </body>
+
+    <body name="obj_charging_dock" mocap="true" pos="-0.68 0.0 0.0">
+      <geom name="geom_dock_base" type="box" pos="0 0 0.008" size="0.11 0.12 0.008" material="mat_shiny_obj" rgba="0.18 0.20 0.26 1"/>
+      <geom name="geom_dock_tower" type="box" pos="-0.07 0 0.065" size="0.035 0.10 0.065" material="mat_shiny_obj" rgba="0.32 0.22 0.65 1"/>
+      <geom name="geom_dock_led" type="box" pos="-0.034 0 0.105" size="0.002 0.055 0.005" material="mat_led_glow"/>
+    </body>
+
+    <!-- Dynamic Spawn Slots (hidden under floor until spawned by user) -->
+    <body name="obj_spawn_1" mocap="true" pos="0 0 -1.0">
+      <geom name="geom_spawn_1" type="sphere" size="0.05" material="mat_shiny_obj" rgba="0.66 0.33 0.97 1" contype="0" conaffinity="0"/>
+    </body>
+    <body name="obj_spawn_2" mocap="true" pos="0 0 -1.0">
+      <geom name="geom_spawn_2" type="box" size="0.055 0.055 0.055" material="mat_shiny_obj" rgba="0.02 0.71 0.83 1" contype="0" conaffinity="0"/>
+    </body>
+    <body name="obj_spawn_3" mocap="true" pos="0 0 -1.0">
+      <geom name="geom_spawn_3" type="cylinder" size="0.048 0.06" material="mat_shiny_obj" rgba="0.98 0.45 0.09 1" contype="0" conaffinity="0"/>
+    </body>
+    <body name="obj_spawn_4" mocap="true" pos="0 0 -1.0">
+      <geom name="geom_spawn_4" type="sphere" size="0.05" material="mat_shiny_obj" rgba="0.96 0.45 0.71 1" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+</mujoco>

@@ -1,0 +1,16 @@
+{
+  "tests": {
+    "passed": 57,
+    "resource_and_unraisable_warnings": "treated as errors",
+    "elapsed_s": 10.14
+  },
+  "ruff_lint": "passed",
+  "ruff_format": "passed",
+  "python_3_11_syntax": "passed",
+  "cli_smoke": "passed",
+  "wheel_build_and_bundled_config": "passed",
+  "dashboard_js_syntax": "passed",
+  "html_escaping_probes": 4,
+  "measurement_platform": "Windows 11 / Python 3.15; Raspberry Pi hardware not available",
+  "model_tuning": "No model settings retuned; runtime benchmarks exclude model inference"
+}

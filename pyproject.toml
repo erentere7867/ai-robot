@@ -1,0 +1,47 @@
+[project]
+name = "companion-robot-harness"
+version = "0.1.0"
+description = "Local-first embodied AI robot harness with a bounded, interruptible runtime"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+    "mujoco>=3.3",
+]
+
+[project.optional-dependencies]
+audio = ["sounddevice>=0.5"]
+face = ["pygame-ce>=2.5"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pygame-ce>=2.5",
+    "ruff>=0.11",
+    "psutil>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["robot*"]
+
+[tool.setuptools.data-files]
+"share/companion-robot/config" = ["config/robot.yaml", "config/robot.pi5.yaml", "config/body.yaml", "config/SOUL.md", "config/companion_r1.xml"]
+"share/companion-robot/config/meshes" = ["config/meshes/*.stl"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "ASYNC"]
+# drain's public timeout API and startup-only path resolution are intentional.
+ignore = ["ASYNC109", "ASYNC240"]

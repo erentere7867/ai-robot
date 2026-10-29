@@ -1,0 +1,120 @@
+robot_id: "companion_r1"
+description: "Mobile 4-wheel skid-steer companion robot with tiltable head and 5-inch face display"
+
+dimensions_mm:
+  length: 282
+  width: 228
+  height: 355
+  wheel_diameter: 120
+  track_width: 208
+
+drive:
+  type: "skid_steer_4wd"
+  max_linear_speed_mm_s: 400.0
+  max_angular_speed_deg_s: 120.0
+  max_single_move_mm: 2000.0
+  max_single_spin_deg: 360.0
+  default_linear_speed_mm_s: 200.0
+  default_angular_speed_deg_s: 90.0
+
+joints:
+  head_tilt:
+    type: "revolute"
+    min_deg: -25.0
+    max_deg: 35.0
+    neutral_deg: 0.0
+    max_speed_deg_s: 90.0
+
+display:
+  type: "dsi_lcd"
+  width_px: 800
+  height_px: 480
+  size_mm: [122, 76, 8]
+
+sensors:
+  wheel_encoders:
+    enabled: true
+    ticks_per_rev: 720
+  imu:
+    enabled: true
+    axes: ["yaw", "pitch", "roll", "accel_x", "accel_y", "accel_z"]
+  front_tof:
+    enabled: true
+    min_stop_mm: 120.0
+    default_reading_mm: 1500.0
+  cliff:
+    enabled: true
+    sensors: ["front_left", "front_right", "rear_left", "rear_right"]
+  camera:
+    enabled: true
+    mount: "head_shell"
+    x_offset_mm: 67.0
+    y_offset_mm: 0.0
+    z_height_mm: 286.0
+    pivot_z_mm: 210.0
+    hfov_deg: 65.0
+    vfov_deg: 50.0
+    resolution: [320, 240]
+  microphone_array:
+    enabled: false
+
+sounds:
+  allowed:
+    - "none"
+    - "happy_trill"
+    - "curious_chirp"
+    - "soft_beep"
+    - "sleepy_yawn"
+    - "startle_pip"
+    - "ack_chirp"
+    - "sad_whimper"
+    - "angry_grumble"
+    - "giggle"
+    - "purr"
+
+emotions:
+  allowed:
+    - "neutral"
+    - "happy"
+    - "excited"
+    - "curious"
+    - "sad"
+    - "angry"
+    - "grumpy"
+    - "confused"
+    - "surprised"
+    - "sleepy"
+    - "concerned"
+    - "proud"
+    - "shy"
+    - "scared"
+    - "love"
+
+tricks:
+  nod:
+    description: "Nod head up and down in agreement"
+    duration_s: 1.0
+  shake:
+    description: "Small left-right body shimmy to say no or show frustration"
+    duration_s: 1.0
+  curious_tilt:
+    description: "Tilt head up with a curious posture"
+    duration_s: 0.8
+  wiggle:
+    description: "Playful in-place left-right wiggle"
+    duration_s: 1.4
+  dance:
+    description: "Happy spin-and-nod dance routine"
+    duration_s: 2.5
+  spin:
+    description: "Full 360-degree playful spin in place"
+    duration_s: 2.2
+  sleepy_droop:
+    description: "Droop head down gently when sleepy or sad"
+    duration_s: 1.2
+  perk_up:
+    description: "Perk head up attentively when greeted or excited"
+    duration_s: 0.7
+  stomp:
+    description: "Short forward-back stomp when angry or grumpy"
+    duration_s: 1.0

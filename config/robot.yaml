@@ -1,0 +1,50 @@
+robot:
+  name: "Sprocket"
+  wake_words: ["sprocket", "hey sprocket", "robot", "hey robot"]
+  follow_up_window_s: 8.0
+  idle_sleepy_timeout_s: 45.0
+  emotion_decay_rate_per_s: 0.08
+
+runtime:
+  runtime_dir: "~/robot-runtime"
+  database_path: "~/robot-runtime/data/memory.db"
+  recordings_dir: "~/robot-runtime/data/recordings"
+  soul_path: "config/SOUL.md"
+  body_config_path: "config/body.yaml"
+  sim_tick_hz: 20.0
+
+bus:
+  max_queue_size: 256
+  record_events: true
+
+agent:
+  max_steps: 32
+  max_actions: 200
+  timeout_s: 240.0
+
+autonomy:
+  enabled: true
+  idle_after_s: 12.0
+  observation_interval_s: 1.0
+  think_interval_s: 30.0
+
+llm:
+  native_tools: true
+  backend: "auto"
+  base_url: "http://127.0.0.1:8080"
+  model_name: "LFM3-VL-2B-Q4_K_M"
+  model_path: "~/Downloads/LFM3-VL-2B-Q4_K_M.gguf"
+  mmproj_path: "~/Downloads/mmproj-LFM3-VL-2B-Q8_0.gguf"
+  llama_server_bin: "~/robot-runtime/llama.cpp/llama-server.exe"
+  timeout_s: 25.0
+  temperature: 0.0
+  max_tokens: 220
+
+context_budget:
+  total_tokens: 2048
+  identity_tokens: 320
+  memories_tokens: 320
+  world_state_tokens: 200
+  tools_tokens: 360
+  recent_turns_tokens: 700
+  max_recent_turns: 8

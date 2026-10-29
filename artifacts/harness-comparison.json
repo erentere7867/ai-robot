@@ -1,0 +1,21 @@
+{
+  "scope": "Windows local comparison; no model; 2000 historical versions of one fact; 100 offline turns",
+  "results": {
+    "before": {
+      "import_ms": 1322.9,
+      "rss_before_snapshot_mib": 58.04,
+      "rss_after_snapshot_mib": 61.05,
+      "snapshot_2000_versions_ms": 16.414,
+      "mean_turn_ms": 15.836,
+      "cpu_s_100_turns": 0.531
+    },
+    "after": {
+      "import_ms": 787.97,
+      "rss_before_snapshot_mib": 54.68,
+      "rss_after_snapshot_mib": 54.68,
+      "snapshot_2000_versions_ms": 0.193,
+      "mean_turn_ms": 15.506,
+      "cpu_s_100_turns": 0.141
+    }
+  }
+}

@@ -1,0 +1,208 @@
+{
+  "platform": "Windows-11-10.0.26100-SP0",
+  "python": "3.15.0",
+  "scope": "Python harness only; deterministic offline backend; simulated body",
+  "turns": 1000,
+  "dashboard": true,
+  "elapsed_s": 30.913,
+  "cpu_s": 19.422,
+  "mean_turn_ms": 30.913,
+  "rss_before_mib": 55.21,
+  "rss_after_mib": 57.91,
+  "sampled_peak_rss_mib": 57.91,
+  "python_retained_growth_kib": 230.0,
+  "python_peak_kib": 752.7,
+  "retained_observations": 128,
+  "retained_history_messages": 4,
+  "pending_requests": 0,
+  "active_commands": 0,
+  "retained_episodes": 1000,
+  "bus": {
+    "published_count": 18377,
+    "dropped_count": 0,
+    "subscribers": {
+      "world:pose": {
+        "pattern": "body.pose",
+        "queued": 0,
+        "delivered": 1026,
+        "dropped": 0,
+        "errors": 0
+      },
+      "world:act_ok": {
+        "pattern": "action.completed",
+        "queued": 0,
+        "delivered": 1020,
+        "dropped": 0,
+        "errors": 0
+      },
+      "world:act_fail": {
+        "pattern": "action.failed",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "world:act_rej": {
+        "pattern": "action.rejected",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "world:expr": {
+        "pattern": "expression.updated",
+        "queued": 0,
+        "delivered": 5100,
+        "dropped": 0,
+        "errors": 0
+      },
+      "world:obs": {
+        "pattern": "perception.observation",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "attention:user_msg": {
+        "pattern": "input.user_message",
+        "queued": 0,
+        "delivered": 1020,
+        "dropped": 0,
+        "errors": 0
+      },
+      "arbiter:engaged": {
+        "pattern": "attention.engaged",
+        "queued": 0,
+        "delivered": 1020,
+        "dropped": 0,
+        "errors": 0
+      },
+      "arbiter:manual_expr": {
+        "pattern": "expression.manual",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "arbiter:reflex": {
+        "pattern": "reflex.triggered",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "arbiter:barge_in": {
+        "pattern": "audio.barge_in",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "arbiter:cancel": {
+        "pattern": "action.cancel",
+        "queued": 0,
+        "delivered": 1020,
+        "dropped": 0,
+        "errors": 0
+      },
+      "arbiter:speech_done": {
+        "pattern": "audio.speech_completed",
+        "queued": 0,
+        "delivered": 1020,
+        "dropped": 0,
+        "errors": 0
+      },
+      "sub_14": {
+        "pattern": "robot.response",
+        "queued": 0,
+        "delivered": 1020,
+        "dropped": 0,
+        "errors": 0
+      },
+      "sub_15": {
+        "pattern": "turn.cancelled",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "sub_16": {
+        "pattern": "attention.ignored",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "executor:req": {
+        "pattern": "action.request",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "executor:cancel": {
+        "pattern": "action.cancel",
+        "queued": 0,
+        "delivered": 1020,
+        "dropped": 0,
+        "errors": 0
+      },
+      "face:expr": {
+        "pattern": "expression.updated",
+        "queued": 0,
+        "delivered": 5100,
+        "dropped": 0,
+        "errors": 0
+      },
+      "face:theme": {
+        "pattern": "face.theme",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "face:mem_theme": {
+        "pattern": "memory.updated",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "audio:expr": {
+        "pattern": "expression.updated",
+        "queued": 0,
+        "delivered": 5100,
+        "dropped": 0,
+        "errors": 0
+      },
+      "audio:resp": {
+        "pattern": "robot.response",
+        "queued": 0,
+        "delivered": 1020,
+        "dropped": 0,
+        "errors": 0
+      },
+      "audio:cancel": {
+        "pattern": "action.cancel",
+        "queued": 0,
+        "delivered": 1020,
+        "dropped": 0,
+        "errors": 0
+      },
+      "audio:barge_in": {
+        "pattern": "audio.barge_in",
+        "queued": 0,
+        "delivered": 0,
+        "dropped": 0,
+        "errors": 0
+      },
+      "dashboard:tap": {
+        "pattern": "*",
+        "queued": 0,
+        "delivered": 17353,
+        "dropped": 0,
+        "errors": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "architecture": "model_owned_loop",
+  "prompt": "What do you see?",
+  "responses": [
+    {
+      "say": "I see a red ball in front of a cardboard box, and a green cylinder and blue cube to the right.",
+      "sound": "none",
+      "emotion": {
+        "name": "neutral",
+        "intensity": 0.5
+      },
+      "actions": [],
+      "memory": [],
+      "warnings": [],
+      "rejected_actions": [],
+      "clamped_notes": [],
+      "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+      "latency_ms": 3241.7,
+      "fallback_used": false,
+      "status": "continue",
+      "next_wake_s": null,
+      "action_results": [],
+      "memory_ops": [],
+      "token_budget": {
+        "system_tokens": 1006,
+        "memories_tokens": 3,
+        "world_state_tokens": 95,
+        "recent_turns_tokens": 0,
+        "user_tokens": 6,
+        "total_tokens": 1139,
+        "response_reserve_tokens": 256
+      },
+      "camera_verification": null,
+      "final": false,
+      "goal_state": {
+        "objective": "What do you see?",
+        "status": "continue",
+        "step": 1,
+        "correlation_id": "8450117721e8403fa75a0132ddaf3072",
+        "origin": "user"
+      },
+      "origin": "user"
+    },
+    {
+      "say": "I see a red ball in front of a cardboard box, and a green cylinder and blue cube to the right.",
+      "sound": "none",
+      "emotion": {
+        "name": "neutral",
+        "intensity": 0.5
+      },
+      "actions": [],
+      "memory": [],
+      "warnings": [],
+      "rejected_actions": [],
+      "clamped_notes": [],
+      "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+      "latency_ms": 2417.7,
+      "fallback_used": false,
+      "status": "completed",
+      "next_wake_s": null,
+      "action_results": [],
+      "memory_ops": [],
+      "token_budget": {
+        "system_tokens": 1006,
+        "memories_tokens": 3,
+        "world_state_tokens": 105,
+        "recent_turns_tokens": 50,
+        "user_tokens": 6,
+        "total_tokens": 1288,
+        "response_reserve_tokens": 256
+      },
+      "camera_verification": null,
+      "final": true,
+      "goal_state": {
+        "objective": "What do you see?",
+        "status": "completed",
+        "step": 2,
+        "correlation_id": "8450117721e8403fa75a0132ddaf3072",
+        "origin": "user"
+      },
+      "origin": "user"
+    }
+  ],
+  "raw_model_outputs": [
+    "{\"say\":\"I see a red ball in front of a cardboard box, and a green cylinder and blue cube to the right.\",\"actions\":[],\"status\":\"continue\"}",
+    "{\"say\":\"I see a red ball in front of a cardboard box, and a green cylinder and blue cube to the right.\", \"actions\": [], \"status\": \"completed\"}"
+  ],
+  "final_pose": {
+    "x_mm": 0.0,
+    "y_mm": 0.0,
+    "heading_deg": 0.0,
+    "head_tilt_deg": 0.0,
+    "linear_vel_mm_s": 0.0,
+    "angular_vel_deg_s": 0.0
+  },
+  "actions_executed": 0,
+  "goal": {
+    "objective": "What do you see?",
+    "status": "completed",
+    "step": 2,
+    "correlation_id": "8450117721e8403fa75a0132ddaf3072",
+    "origin": "user"
+  }
+}

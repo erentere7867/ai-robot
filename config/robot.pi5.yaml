@@ -1,0 +1,37 @@
+# Harness resource limits for Raspberry Pi 5, 4 GB RAM.
+# Model settings are deliberately left at their existing defaults.
+robot:
+  name: "Sprocket"
+  wake_words: ["sprocket", "hey sprocket", "robot", "hey robot"]
+  follow_up_window_s: 8.0
+  idle_sleepy_timeout_s: 45.0
+  emotion_decay_rate_per_s: 0.08
+runtime:
+  runtime_dir: "~/robot-runtime"
+  database_path: "~/robot-runtime/data/memory.db"
+  recordings_dir: "~/robot-runtime/data/recordings"
+  soul_path: "config/SOUL.md"
+  body_config_path: "config/body.yaml"
+  sim_tick_hz: 20.0
+  face_fps: 30.0
+bus:
+  max_queue_size: 64
+  record_events: false
+agent:
+  max_steps: 24
+  max_actions: 160
+  timeout_s: 240.0
+autonomy:
+  enabled: true
+  idle_after_s: 12.0
+  observation_interval_s: 1.0
+  think_interval_s: 45.0
+context_budget:
+  total_tokens: 2048
+  response_reserve_tokens: 256
+  identity_tokens: 180
+  memories_tokens: 160
+  world_state_tokens: 140
+  tools_tokens: 360
+  recent_turns_tokens: 320
+  max_recent_turns: 4

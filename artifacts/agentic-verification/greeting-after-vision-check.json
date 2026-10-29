@@ -1,0 +1,155 @@
+{
+  "architecture": "native_function_calls",
+  "clock": "replay",
+  "checks": [
+    {
+      "prompt": "hey",
+      "before": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 0.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "after": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 0.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "decisions": [
+        {
+          "response": {
+            "say": "Hello! How can I help you today?",
+            "actions": [],
+            "status": "completed",
+            "next_wake_s": null
+          },
+          "native": {
+            "role": "assistant",
+            "content": "Hello! How can I help you today?"
+          },
+          "prompt_tokens": 1027
+        }
+      ],
+      "executed": [],
+      "final": {
+        "objective": "hey",
+        "status": "completed",
+        "step": 1,
+        "correlation_id": "91ebe612849f4e2588bc2fb6f6b1c419",
+        "origin": "user"
+      }
+    },
+    {
+      "prompt": "what do you see",
+      "before": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 0.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "after": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 0.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "decisions": [
+        {
+          "response": {
+            "say": "",
+            "actions": [],
+            "status": "continue",
+            "next_wake_s": null
+          },
+          "native": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "235F58PtfYS0LcJlWFjrCtvnfBmzMIY8",
+                "type": "function",
+                "function": {
+                  "name": "observe",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          "prompt_tokens": 1052
+        },
+        {
+          "response": {
+            "say": "I see a scene with a cardboard box, a red ball, a green cylinder, and a blue cube on a checkered floor. What would you like to do next?",
+            "actions": [],
+            "status": "completed",
+            "next_wake_s": null
+          },
+          "native": {
+            "role": "assistant",
+            "content": "I see a scene with a cardboard box, a red ball, a green cylinder, and a blue cube on a checkered floor. What would you like to do next?"
+          },
+          "prompt_tokens": 1323
+        }
+      ],
+      "executed": [],
+      "final": {
+        "objective": "what do you see",
+        "status": "completed",
+        "step": 2,
+        "correlation_id": "42931781b3314b4bb920ea735878bd6e",
+        "origin": "user"
+      }
+    },
+    {
+      "prompt": "hey",
+      "before": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 0.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "after": {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "heading_deg": 0.0,
+        "head_tilt_deg": 0.0,
+        "linear_vel_mm_s": 0.0,
+        "angular_vel_deg_s": 0.0
+      },
+      "decisions": [
+        {
+          "response": {
+            "say": "Sure! Would you like me to move the robot toward any of these objects or perform another action?",
+            "actions": [],
+            "status": "completed",
+            "next_wake_s": null
+          },
+          "native": {
+            "role": "assistant",
+            "content": "Sure! Would you like me to move the robot toward any of these objects or perform another action?"
+          },
+          "prompt_tokens": 1100
+        }
+      ],
+      "executed": [],
+      "final": {
+        "objective": "hey",
+        "status": "completed",
+        "step": 1,
+        "correlation_id": "7d5f70e10bb14ee98500ee3b2f70b310",
+        "origin": "user"
+      }
+    }
+  ]
+}
