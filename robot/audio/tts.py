@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover
 
 _PHONON_LOCK = threading.Lock()
 _PHONON_ENGINES: dict[str, Any] = {}
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 @dataclass
@@ -195,14 +196,20 @@ def _ensure_sapi_worker() -> tuple[subprocess.Popen[str], Path] | None:
     global _SAPI_PROC, _SAPI_TMPDIR
     if _SAPI_PROC is not None and _SAPI_PROC.poll() is None and _SAPI_TMPDIR is not None:
         return _SAPI_PROC, Path(_SAPI_TMPDIR.name)
+    # Release a dead worker's pipes and WAV directory before starting its replacement.
+    _cleanup_sapi_worker()
 
     _SAPI_TMPDIR = tempfile.TemporaryDirectory(prefix="sprocket_tts_")
+    # Console.In decodes with the console's OEM code page, mangling the UTF-8 text and
+    # paths we write (curly quotes, accented names); read stdin as UTF-8 explicitly.
     ps_loop = (
         "Add-Type -AssemblyName System.Speech; "
         "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
         "$s.Rate = 2; "
+        "$in = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), "
+        "(New-Object System.Text.UTF8Encoding $false)); "
         "[Console]::Out.WriteLine('READY'); [Console]::Out.Flush(); "
-        "while (($line = [Console]::In.ReadLine()) -ne $null) { "
+        "while (($line = $in.ReadLine()) -ne $null) { "
         "  if ($line -eq 'QUIT') { break } "
         "  $p = $line -split '\\|', 2; "
         "  if ($p.Length -eq 2) { "
@@ -222,6 +229,7 @@ def _ensure_sapi_worker() -> tuple[subprocess.Popen[str], Path] | None:
             text=True,
             encoding="utf-8",
             bufsize=1,
+            creationflags=_NO_WINDOW,
         )
         watchdog = threading.Timer(4.0, proc.kill)
         watchdog.daemon = True
@@ -241,15 +249,23 @@ def _ensure_sapi_worker() -> tuple[subprocess.Popen[str], Path] | None:
 
 def _cleanup_sapi_worker() -> None:
     global _SAPI_PROC, _SAPI_TMPDIR
-    if _SAPI_PROC is not None and _SAPI_PROC.poll() is None:
+    proc, _SAPI_PROC = _SAPI_PROC, None
+    if proc is not None:
         try:
-            if _SAPI_PROC.stdin:
-                _SAPI_PROC.stdin.write("QUIT\n")
-                _SAPI_PROC.stdin.flush()
-            _SAPI_PROC.terminate()
+            if proc.poll() is None:
+                if proc.stdin:
+                    proc.stdin.write("QUIT\n")
+                    proc.stdin.flush()
+                proc.terminate()
+                proc.wait(timeout=2.0)
         except Exception:
             pass
-    _SAPI_PROC = None
+        for pipe in (proc.stdin, proc.stdout):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except Exception:
+                pass
     if _SAPI_TMPDIR is not None:
         try:
             _SAPI_TMPDIR.cleanup()
@@ -387,7 +403,7 @@ class RobotTTSEngine:
                 str(wav_path),
             ]
             try:
-                subprocess.run(cmd, check=True, capture_output=True, timeout=15.0)
+                subprocess.run(cmd, check=True, capture_output=True, timeout=15.0, creationflags=_NO_WINDOW)
                 if wav_path.exists() and wav_path.stat().st_size > 200:
                     return _read_wav_mono_float32(wav_path)
             except Exception:

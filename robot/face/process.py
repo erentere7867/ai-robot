@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from robot.core.bus import EventBus
@@ -87,13 +88,17 @@ class FaceProcessBridge:
             self._sock.close()
             self._sock = None
 
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-            self._proc = None
+        proc, self._proc = self._proc, None
+        if proc is not None and proc.poll() is None:
+            # Waiting for the window to exit must not freeze the event loop (and reflexes) for seconds.
+            for escalate in (None, proc.terminate, proc.kill):
+                if escalate is not None:
+                    escalate()
+                try:
+                    await asyncio.to_thread(proc.wait, 1.0)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
 
     async def health(self) -> ServiceHealth:
         proc_ok = self._tick_task is not None and not self._tick_task.done()
@@ -130,7 +135,8 @@ class FaceProcessBridge:
             "--port",
             str(self.udp_port),
         ]
-        self._proc = subprocess.Popen(cmd)
+        # `-m robot.face.process` resolves from the child's cwd; pin it to the package root.
+        self._proc = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parents[2]))
 
     def _send_udp(self, payload: dict[str, Any]) -> None:
         if self._sock is None:
@@ -233,8 +239,9 @@ def run_standalone_face_loop(
             # Drain all pending UDP state packets without blocking
             while True:
                 try:
-                    data, _addr = sock.recvfrom(4096)
-                except (BlockingIOError, ConnectionResetError):
+                    data, _addr = sock.recvfrom(65535)
+                except OSError:
+                    # Empty queue, ICMP reset, or (Windows) an oversized datagram: never crash the face.
                     break
                 try:
                     msg = json.loads(data.decode("utf-8"))
