@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 
@@ -10,7 +11,9 @@ from robot.skills.base import Skill, SkillContext, SkillError, SkillResult
 from robot.skills.perception import look_around, perceive
 from robot.world.spatial_map import TrackedObject
 
-ROBOT_CLEARANCE_MM = 220.0  # from an object's surface to my centre: half my length plus a margin
+# From an object's surface to my centre: half my length (141 mm) plus more than the 120 mm range-sensor
+# stop distance, so approaching an object does not trip the obstacle reflex.
+ROBOT_CLEARANCE_MM = 300.0
 ARRIVE_TOLERANCE_MM = 120.0
 MAX_SEGMENT_MM = 600.0
 START_WORDS = {"start", "start point", "starting point", "home", "where i started", "where you started", "origin"}
@@ -21,12 +24,17 @@ def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-def _resolve(ctx: SkillContext, target: str) -> TrackedObject:
+async def _resolve(ctx: SkillContext, target: str) -> TrackedObject:
+    """Find a target in the map, searching all around for it first if it is not known yet."""
     obj = ctx.spatial_map.resolve(target, ctx.pose())
+    if obj is not None:
+        return obj
+    query = re.sub(r"_\d+$", "", target.strip().lower()).replace("_", " ")
+    await look_around(ctx, query)
+    obj = ctx.spatial_map.resolve(target, ctx.pose()) or ctx.spatial_map.resolve(query, ctx.pose())
     if obj is None:
-        known = ", ".join(sorted(ctx.spatial_map.objects)) or "nothing yet"
-        raise SkillError(f"I don't know where '{target}' is (known: {known}). "
-                         "Use observe or look_around to find it first.")
+        known = ", ".join(sorted(ctx.spatial_map.objects)) or "nothing"
+        raise SkillError(f"I looked all around and could not find '{target}'. Objects I know: {known}.")
     return obj
 
 
@@ -125,7 +133,7 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
         msg = "I'm back at my start point." if ok else f"I couldn't get back to my start point: {why}."
         return SkillResult(ok, msg, {"distance_to_goal_m": round(_dist((ctx.pose().x_mm, ctx.pose().y_mm),
                                                                          goal) / 1000, 2)})
-    obj = _resolve(ctx, target)
+    obj = await _resolve(ctx, target)
     ox, oy = obj.x_mm, obj.y_mm
     dx, dy = ox - pose.x_mm, oy - pose.y_mm
     norm = math.hypot(dx, dy)
@@ -139,7 +147,7 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
     if relation == "between":
         if not other:
             raise SkillError("relation 'between' needs the other object in 'other'.")
-        second = _resolve(ctx, other)
+        second = await _resolve(ctx, other)
         if second.id == obj.id:
             raise SkillError("'between' needs two different objects.")
         clear = _dist((ox, oy), (second.x_mm, second.y_mm)) - obj.radius_mm - second.radius_mm
@@ -178,7 +186,8 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
                      else f" I'm beside {obj.id} rather than behind it.")
     target_txt = f"{obj.id}" + (f" and {other}" if relation == "between" else "")
     if ok or holds:
-        msg = f"Arrived {place} {target_txt}" + ("" if ok else " (as close as the space allows)") + "."
+        msg = (f"Arrived {place} {target_txt}" + ("" if ok else " (as close as the space allows)")
+               + ". If that was the request, tell the human.")
     else:
         msg = f"I stopped {off / 1000:.1f} m short of the spot {place} {target_txt}: {why}."
     return SkillResult(ok or holds, msg + verified, {"distance_to_goal_m": round(off / 1000, 2)})
@@ -214,7 +223,7 @@ async def face(ctx: SkillContext, target: str) -> SkillResult:
         sx, sy = ctx.spatial_map.places.get("start", (0.0, 0.0))
         await ctx.face_point(sx, sy)
         return SkillResult(True, "I'm facing my start point.")
-    obj = _resolve(ctx, target)
+    obj = await _resolve(ctx, target)
     result = await ctx.face_point(obj.x_mm, obj.y_mm)
     if result is not None and not result.ok:
         return SkillResult(False, result.message)

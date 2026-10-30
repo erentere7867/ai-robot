@@ -50,6 +50,21 @@ class TurnResult:
                 "sound": self.expression.get("sound", "none")}
 
 
+_THINK_TAIL = re.compile(r"</t(?:h(?:i(?:n(?:k(?:>)?)?)?)?)?\s*$")
+
+
+def strip_reasoning(content: str) -> tuple[str, bool]:
+    """Return (reply, leaked): drop <think> blocks; a reply that is only reasoning counts as leaked."""
+    text = content or ""
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    text = re.sub(r"<think>.*", "", text, flags=re.S)
+    if _THINK_TAIL.search(text):
+        return "", True  # reasoning cut off right where the answer would have started
+    leaked = bool(re.match(r"\s*(?:The user|User (?:said|asked|wants|introduced)|I should|Let me think)", text))
+    return ("" if leaked else text.strip()), leaked
+
+
 _CALL_TOKENS = re.compile(r"<\|tool_call_(?:start|end)\|>|</?think>|```(?:python|json)?")
 
 
@@ -157,7 +172,16 @@ class AgentLoop:
                     reply.content = ""
                     await self._emit("cognition.recovered_calls", {"calls": [c.name for c in reply.tool_calls]})
             if not reply.tool_calls:
-                result.say = reply.content
+                result.say, leaked = strip_reasoning(reply.content)
+                if leaked and not background:
+                    # One retry without tools: just say something to the human.
+                    messages.append({"role": "user", "content": "(Reply to the human now in one short sentence.)"})
+                    try:
+                        retry = await self.backend.chat(messages, max_tokens=80)
+                        result.say = strip_reasoning(retry.content)[0]
+                    except BackendUnavailable:
+                        pass
+                    messages.pop()
                 break
             messages.append(reply.assistant_message())
             transcript.append(messages[-1])

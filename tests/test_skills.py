@@ -92,14 +92,16 @@ async def test_go_to_between_refuses_a_gap_too_narrow(sim):
     assert not missing.ok and "needs the other object" in missing.message
 
 
-async def test_go_to_unknown_target_explains_how_to_find_it(sim):
+async def test_go_to_unknown_target_searches_then_explains(sim):
     empty = await run(sim, "go_to", target="unicorn")
     assert not empty.ok and empty.status == "rejected"
-    assert "I don't know where 'unicorn' is (known: nothing yet)" in empty.message
-    assert "observe or look_around" in empty.message
+    assert "I looked all around and could not find 'unicorn'" in empty.message
+    # The search is a full circle that ends facing the original way, without driving anywhere.
+    pose = sim.body.pose()
+    assert (pose.x_mm, pose.y_mm) == (0.0, 0.0) and abs(pose.heading_deg) < 1.0
     await run(sim, "observe")
     known = await run(sim, "go_to", target="ball_7")
-    assert "(known: box_1)" in known.message
+    assert "Objects I know: box_1" in known.message
     assert (sim.body.pose().x_mm, sim.body.pose().y_mm) == (0.0, 0.0)
 
 

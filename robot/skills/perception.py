@@ -78,7 +78,9 @@ async def look_around(ctx: SkillContext, query: str = "") -> SkillResult:
     fallback: str | None = None  # a synonym match (asked for a box, saw a cube) if nothing better turns up
     steps = int(round(360.0 / LOOK_AROUND_STEP_DEG))
     for step in range(steps):
-        view = await perceive(ctx, None)
+        # Searching asks the VLM for exactly that thing: it recognises "charging dock" when asked,
+        # but lists the same object as "box" in a general inventory.
+        view = await perceive(ctx, query or None)
         seen_ids.extend(view["seen"])
         if query:
             pose = ctx.pose()
