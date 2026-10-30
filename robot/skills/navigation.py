@@ -290,7 +290,9 @@ async def explore(ctx: SkillContext) -> SkillResult:
 
 
 def skills() -> list[Skill]:
-    target = {"type": "string", "description": "object id such as box_1, or a place such as start"}
+    target = {"type": "string", "description": "a known object id such as box_1; or a description such as "
+              "'charging dock' (I search for it if it is not known yet); or start, the spot where I was "
+              "switched on"}
     return [
         Skill("go_to", "Drive to a spot relative to a known object; plans a safe path around obstacles and "
               "turns to face the object at the end. 'behind' means the far side of the object from where you "

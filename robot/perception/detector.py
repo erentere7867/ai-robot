@@ -26,6 +26,7 @@ DETECT_QUERY_PROMPT = (
 
 _LABEL_CLEAN = re.compile(r"[^a-z0-9 \-']+")
 _OBJECT = re.compile(r"\{[^{}]*\}")
+_PAIR = re.compile(r'"(?:label|name)"\s*:\s*"([^"]*)"[^\[{}]*?"(?:bbox|box|bbox_2d)"\s*:\s*\[([^\]\[]*)\]')
 
 
 @dataclass(frozen=True)
@@ -63,13 +64,20 @@ def parse_detections(text: str, *, max_items: int = 16) -> list[Detection]:
     try:
         items = json.loads(match.group(0))
     except ValueError:
-        # Small models often slip on the outer syntax (e.g. "}}]"); read each object on its own.
+        # Small models often slip on the syntax ("}}]", "767]]}"); read each object on its own, and as a
+        # last resort pull out label/box pairs directly.
         items = []
         for chunk in _OBJECT.findall(match.group(0)):
             try:
                 items.append(json.loads(chunk))
             except ValueError:
                 continue
+        if not items:
+            for label, numbers in _PAIR.findall(match.group(0)):
+                try:
+                    items.append({"label": label, "bbox": [float(v) for v in numbers.split(",")]})
+                except ValueError:
+                    continue
     if not isinstance(items, list):
         return []
     if items and all(isinstance(v, (int, float)) for v in items) and len(items) == 4:

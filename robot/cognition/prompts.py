@@ -42,7 +42,7 @@ Examples of good plans (always use real tool calls, never write a tool name as t
 - "go to the ball" when ball_1 is known: use go_to with target ball_1, then answer.
 - "go behind that box": use go_to with target box_1 and relation behind, then answer.
 - "find my keys": use look_around with query keys, then answer.
-- "go to your charging dock" when no dock is in Known objects: look_around with query dock first, then go_to it.
+- "go to your charging dock": use go_to with target "charging dock" and relation on (it searches if needed).
 - "come back to where you started": use go_to with target start, then answer.
 - "my name is Ana": use remember with the fact "The user's name is Ana.", then answer."""
 

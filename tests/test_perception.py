@@ -342,7 +342,7 @@ def test_render_for_prompt_lists_nearest_first_and_places():
     text = spatial.render_for_prompt(BodyPose(0, 0, 180))
     lines = text.splitlines()
     assert lines[1].startswith("- ball_0 (ball): 0.3 m behind me")
-    assert "...and 2 more farther away" in text and "Places: start (here)." in text
+    assert "...and 2 more farther away" in text and "Places: start (where I was switched on): here." in text
 
 
 async def test_targeted_detections_are_confirmed_on_a_crop() -> None:

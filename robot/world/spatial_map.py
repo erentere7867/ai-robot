@@ -301,7 +301,8 @@ class SpatialMap:
             dist = math.hypot(px - pose.x_mm, py - pose.y_mm)
             bearing = math.degrees(math.atan2(py - pose.y_mm, px - pose.x_mm)) - pose.heading_deg
             where = "here" if dist < 150 else f"{dist / 1000:.1f} m {direction_words(bearing)}"
-            places.append(f"{name} ({where})")
+            what = " (where I was switched on)" if name == "start" else ""
+            places.append(f"{name}{what}: {where}")
         if places:
             lines.append("Places: " + ", ".join(places) + ".")
         return "\n".join(lines)
