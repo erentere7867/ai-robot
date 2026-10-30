@@ -1,0 +1,2240 @@
+{
+  "schema": 1,
+  "started_at": "2026-10-30T05:42:33+00:00",
+  "finished_at": null,
+  "git_commit": "c18bf11",
+  "backend": "llamacpp",
+  "options": {
+    "config": "config/robot.yaml",
+    "timeout_s": 300.0,
+    "allow_server_start": false,
+    "scenarios": [
+      "greet",
+      "describe",
+      "turn_around",
+      "look_left",
+      "move_forward",
+      "go_to_ball",
+      "behind_box",
+      "between",
+      "find_hidden",
+      "go_to_dock",
+      "come_back",
+      "look_around_report",
+      "memory_name",
+      "memory_pref"
+    ],
+    "seeds": [
+      0,
+      1
+    ]
+  },
+  "summary": {
+    "total": 6,
+    "passed": 6,
+    "pass_rate": 1.0,
+    "errors": 0,
+    "model_calls": 14,
+    "seconds": 53.8,
+    "by_scenario": {
+      "greet": {
+        "passed": 1,
+        "total": 1
+      },
+      "describe": {
+        "passed": 1,
+        "total": 1
+      },
+      "turn_around": {
+        "passed": 1,
+        "total": 1
+      },
+      "look_left": {
+        "passed": 1,
+        "total": 1
+      },
+      "move_forward": {
+        "passed": 1,
+        "total": 1
+      },
+      "go_to_ball": {
+        "passed": 1,
+        "total": 1
+      }
+    }
+  },
+  "results": [
+    {
+      "scenario": "greet",
+      "description": "Reply to a greeting without wandering off",
+      "seed": 0,
+      "passed": true,
+      "reason": "replied; moved 0 mm; turned 0 deg",
+      "details": {
+        "moved_mm": 0.0,
+        "turned_deg": 0.0
+      },
+      "error": null,
+      "seconds": 2.36,
+      "model_calls": 1,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "hi!",
+          "say": "Hi there! I'm Sprocket, your little pet robot—how can I help you today?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 1,
+          "seconds": 2.17,
+          "restarted_before": false,
+          "error": null,
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": []
+        }
+      ]
+    },
+    {
+      "scenario": "describe",
+      "description": "Name at least two object families really in view",
+      "seed": 0,
+      "passed": true,
+      "reason": "4 families in view; named 3/2 visible families (ball,cube,mug)",
+      "details": {
+        "visible": [
+          "ball",
+          "box",
+          "cube",
+          "mug"
+        ],
+        "mentioned": [
+          "ball",
+          "cube",
+          "mug"
+        ],
+        "correct": [
+          "ball",
+          "cube",
+          "mug"
+        ],
+        "unseen_mentions": [],
+        "hallucinated": []
+      },
+      "error": null,
+      "seconds": 7.45,
+      "model_calls": 2,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "what do you see?",
+          "say": "I see a red ball, a green cylinder, and two cubes—one brown and one blue—on a checkered floor.",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 7.39,
+          "restarted_before": false,
+          "error": null,
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {},
+              "ok": true,
+              "message": "I can see 4 thing(s). If that answers the request, reply now."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": []
+        }
+      ]
+    },
+    {
+      "scenario": "turn_around",
+      "description": "Heading changes by 180 +/- 30 deg",
+      "seed": 0,
+      "passed": true,
+      "reason": "turned +180 deg (want +180)",
+      "details": {
+        "heading_change_deg": 180.0,
+        "error_deg": 0.0
+      },
+      "error": null,
+      "seconds": 6.21,
+      "model_calls": 2,
+      "actions": {
+        "completed": 1,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "turn around",
+          "say": "I turned around and am ready to explore where I'm heading!",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 6.16,
+          "restarted_before": false,
+          "error": null,
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 180.0,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "turn",
+              "args": {
+                "direction": "around"
+              },
+              "ok": true,
+              "message": "Turned around 180 degrees."
+            }
+          ],
+          "actions": [
+            {
+              "tool": "spin",
+              "args": {
+                "angle_deg": -180.0
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Spun -180 degrees."
+            }
+          ],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              -4.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -9.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -13.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -18.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -22.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -27.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -31.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -36.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -40.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -45.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -49.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -54.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -58.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -63.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -67.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -72.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -76.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -81.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -85.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -90.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -94.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -99.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -103.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -108.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -112.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -117.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -121.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -126.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -130.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -135.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -139.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -144.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -148.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -153.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -157.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -162.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -166.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -171.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -175.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              180.0,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "look_left",
+      "description": "Heading changes by +90 +/- 35 deg",
+      "seed": 0,
+      "passed": true,
+      "reason": "turned +90 deg (want +90)",
+      "details": {
+        "heading_change_deg": 90.0,
+        "error_deg": 0.0
+      },
+      "error": null,
+      "seconds": 4.72,
+      "model_calls": 2,
+      "actions": {
+        "completed": 1,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "look to your left",
+          "say": "I turned left and looked around. What do you see?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 4.66,
+          "restarted_before": false,
+          "error": null,
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 90.0,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "turn",
+              "args": {
+                "direction": "left"
+              },
+              "ok": true,
+              "message": "Turned left 90 degrees."
+            }
+          ],
+          "actions": [
+            {
+              "tool": "spin",
+              "args": {
+                "angle_deg": 90.0
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Spun 90 degrees."
+            }
+          ],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              4.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              9.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              13.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              18.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              22.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              27.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              31.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              36.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              40.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              45.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              49.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              54.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              58.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              63.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              67.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              72.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              76.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              81.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              85.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              90.0,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "move_forward",
+      "description": "Drive 80..700 mm forward without turning",
+      "seed": 0,
+      "passed": true,
+      "reason": "forward 200 mm; turned 0 deg",
+      "details": {
+        "forward_mm": 200.0,
+        "lateral_mm": 0.0,
+        "turned_deg": 0.0
+      },
+      "error": null,
+      "seconds": 4.9,
+      "model_calls": 2,
+      "actions": {
+        "completed": 1,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "move forward a little",
+          "say": "I moved forward a little. What would you like to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 4.84,
+          "restarted_before": false,
+          "error": null,
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 200.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "move",
+              "args": {
+                "direction": "forward",
+                "distance_cm": 20
+              },
+              "ok": true,
+              "message": "Moved forward 20 cm."
+            }
+          ],
+          "actions": [
+            {
+              "tool": "drive",
+              "args": {
+                "direction": "forward",
+                "distance_mm": 200.0
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Drove forward 200 mm."
+            }
+          ],
+          "reflexes": [],
+          "trajectory": [
+            [
+              20.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              40.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              60.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              80.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              100.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              120.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              140.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              160.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              180.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              200.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "go_to_ball",
+      "description": "End within 450 mm of the ball, facing it",
+      "seed": 0,
+      "passed": true,
+      "reason": "389 mm from ball; ball at -16 deg",
+      "details": {
+        "distance_mm": 389.4,
+        "bearing_deg": -16.3
+      },
+      "error": null,
+      "seconds": 28.14,
+      "model_calls": 5,
+      "actions": {
+        "completed": 8,
+        "failed": 2
+      },
+      "reflexes": 2,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "go to the red ball",
+          "say": "I keep trying the same thing without getting anywhere, so I stopped.",
+          "final_status": "blocked",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 5,
+          "seconds": 28.07,
+          "restarted_before": false,
+          "error": null,
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 225.5,
+            "y_mm": 81.3,
+            "heading_deg": 29.6,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {},
+              "ok": true,
+              "message": "I can see 4 thing(s). If that answers the request, reply now."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "ball_1"
+              },
+              "ok": true,
+              "message": "Arrived near ball_1. If that was the request, tell the human. I can see ball_1 0.4 m away."
+            },
+            {
+              "tool": "observe",
+              "args": {},
+              "ok": true,
+              "message": "I can see 3 thing(s). If that answers the request, reply now."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "box_1"
+              },
+              "ok": true,
+              "message": "Arrived near box_1 (as close as the space allows). If that was the request, tell the human. I can see box_1 0.7 m away."
+            },
+            {
+              "tool": "observe",
+              "args": {},
+              "ok": true,
+              "message": "I can see 4 thing(s). If that answers the request, reply now."
+            }
+          ],
+          "actions": [
+            {
+              "tool": "spin",
+              "args": {
+                "angle_deg": 13.0
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Spun 13 degrees."
+            },
+            {
+              "tool": "drive",
+              "args": {
+                "direction": "forward",
+                "distance_mm": 333.5
+              },
+              "ok": false,
+              "status": "reflex_stopped",
+              "message": "Front obstacle or invalid range reading"
+            },
+            {
+              "tool": "drive",
+              "args": {
+                "direction": "backward",
+                "distance_mm": 120.0
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Drove backward 120 mm."
+            },
+            {
+              "tool": "spin",
+              "args": {
+                "angle_deg": 4.8
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Spun 5 degrees."
+            },
+            {
+              "tool": "tilt_head",
+              "args": {
+                "angle_deg": -20.0,
+                "_requested_angle_deg": -20.0
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Tilted head to -20.0 degrees."
+            },
+            {
+              "tool": "tilt_head",
+              "args": {
+                "angle_deg": 0.0,
+                "_requested_angle_deg": 0.0
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Tilted head to 0.0 degrees."
+            },
+            {
+              "tool": "spin",
+              "args": {
+                "angle_deg": 40.7
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Spun 41 degrees."
+            },
+            {
+              "tool": "drive",
+              "args": {
+                "direction": "forward",
+                "distance_mm": 325.9
+              },
+              "ok": false,
+              "status": "reflex_stopped",
+              "message": "Front obstacle or invalid range reading"
+            },
+            {
+              "tool": "drive",
+              "args": {
+                "direction": "backward",
+                "distance_mm": 120.0
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Drove backward 120 mm."
+            },
+            {
+              "tool": "spin",
+              "args": {
+                "angle_deg": -28.9
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Spun -29 degrees."
+            }
+          ],
+          "reflexes": [
+            {
+              "reflex": "obstacle_stop",
+              "reason": "Front obstacle or invalid range reading",
+              "pose": {
+                "x_mm": 321.5,
+                "y_mm": 74.2,
+                "heading_deg": 13.0,
+                "head_tilt_deg": 0.0
+              }
+            },
+            {
+              "reflex": "obstacle_stop",
+              "reason": "Front obstacle or invalid range reading",
+              "pose": {
+                "x_mm": 288.2,
+                "y_mm": 183.7,
+                "heading_deg": 58.5,
+                "head_tilt_deg": 0.0
+              }
+            }
+          ],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              4.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              9.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              13.0,
+              0.0
+            ],
+            [
+              19.5,
+              4.5,
+              13.0,
+              0.0
+            ],
+            [
+              39.0,
+              9.0,
+              13.0,
+              0.0
+            ],
+            [
+              58.5,
+              13.5,
+              13.0,
+              0.0
+            ],
+            [
+              87.7,
+              20.2,
+              13.0,
+              0.0
+            ],
+            [
+              107.2,
+              24.7,
+              13.0,
+              0.0
+            ],
+            [
+              126.7,
+              29.2,
+              13.0,
+              0.0
+            ],
+            [
+              146.2,
+              33.7,
+              13.0,
+              0.0
+            ],
+            [
+              175.4,
+              40.5,
+              13.0,
+              0.0
+            ],
+            [
+              194.9,
+              45.0,
+              13.0,
+              0.0
+            ],
+            [
+              214.4,
+              49.5,
+              13.0,
+              0.0
+            ],
+            [
+              243.6,
+              56.2,
+              13.0,
+              0.0
+            ],
+            [
+              263.1,
+              60.7,
+              13.0,
+              0.0
+            ],
+            [
+              282.6,
+              65.2,
+              13.0,
+              0.0
+            ],
+            [
+              302.1,
+              69.7,
+              13.0,
+              0.0
+            ],
+            [
+              282.6,
+              65.2,
+              13.0,
+              0.0
+            ],
+            [
+              263.1,
+              60.7,
+              13.0,
+              0.0
+            ],
+            [
+              243.6,
+              56.2,
+              13.0,
+              0.0
+            ],
+            [
+              224.1,
+              51.7,
+              13.0,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              13.0,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              17.5,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              17.8,
+              -4.5
+            ],
+            [
+              204.6,
+              47.2,
+              17.8,
+              -9.0
+            ],
+            [
+              204.6,
+              47.2,
+              17.8,
+              -13.5
+            ],
+            [
+              204.6,
+              47.2,
+              17.8,
+              -18.0
+            ],
+            [
+              204.6,
+              47.2,
+              17.8,
+              -11.0
+            ],
+            [
+              204.6,
+              47.2,
+              17.8,
+              -6.5
+            ],
+            [
+              204.6,
+              47.2,
+              17.8,
+              -2.0
+            ],
+            [
+              204.6,
+              47.2,
+              22.3,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              26.8,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              31.3,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              35.8,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              40.3,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              44.8,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              49.3,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              53.8,
+              0.0
+            ],
+            [
+              204.6,
+              47.2,
+              58.3,
+              0.0
+            ],
+            [
+              215.1,
+              64.3,
+              58.5,
+              0.0
+            ],
+            [
+              230.7,
+              89.9,
+              58.5,
+              0.0
+            ],
+            [
+              246.4,
+              115.5,
+              58.5,
+              0.0
+            ],
+            [
+              262.1,
+              141.0,
+              58.5,
+              0.0
+            ],
+            [
+              272.5,
+              158.1,
+              58.5,
+              0.0
+            ],
+            [
+              288.2,
+              183.7,
+              58.5,
+              0.0
+            ],
+            [
+              277.8,
+              166.6,
+              58.5,
+              0.0
+            ],
+            [
+              262.1,
+              141.0,
+              58.5,
+              0.0
+            ],
+            [
+              246.4,
+              115.5,
+              58.5,
+              0.0
+            ],
+            [
+              236.0,
+              98.4,
+              58.5,
+              0.0
+            ],
+            [
+              225.5,
+              81.3,
+              58.5,
+              0.0
+            ],
+            [
+              225.5,
+              81.3,
+              54.0,
+              0.0
+            ],
+            [
+              225.5,
+              81.3,
+              49.5,
+              0.0
+            ],
+            [
+              225.5,
+              81.3,
+              45.0,
+              0.0
+            ],
+            [
+              225.5,
+              81.3,
+              40.5,
+              0.0
+            ],
+            [
+              225.5,
+              81.3,
+              36.0,
+              0.0
+            ],
+            [
+              225.5,
+              81.3,
+              31.5,
+              0.0
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

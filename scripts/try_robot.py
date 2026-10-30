@@ -2,6 +2,7 @@
 
     python scripts/try_robot.py "what do you see?" "go behind that box"
     python scripts/try_robot.py --keep-memory "my name is Deniz" "what's my name?"
+    python scripts/try_robot.py --physics "go to the red ball"
 
 Each argument is one human turn. Uses a throwaway memory/map unless --keep-memory is given.
 """
@@ -32,12 +33,15 @@ async def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default="config/robot.yaml")
     parser.add_argument("--backend", default="llamacpp", choices=["auto", "llamacpp", "null"])
     parser.add_argument("--keep-memory", action="store_true", help="use the normal memory DB and map")
+    parser.add_argument("--physics", action="store_true", help="MuJoCo dynamics body (slip, odometry drift)")
     args = parser.parse_args(argv)
 
     cfg = RobotConfig.from_yaml(args.config)
     cfg.llm.backend = args.backend
     cfg.record_events = False
     cfg.autonomy.enabled = False
+    if args.physics:
+        cfg.body_backend = "physics"
     if not args.keep_memory:
         tmp = Path(tempfile.mkdtemp(prefix="robot-try-"))
         cfg.database_path, cfg.spatial_map_path = tmp / "memory.db", tmp / "map.json"
