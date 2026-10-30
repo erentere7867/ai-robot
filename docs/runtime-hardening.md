@@ -105,6 +105,39 @@ The separate 1,000-turn run ended at 57.91 MiB RSS, with 230 KiB of retained Pyt
 growth, 128 observations, four recent messages, 1,000 episodes, zero pending requests/commands,
 empty subscriber queues and zero subscriber errors. See the JSON files under `artifacts/`.
 
+## Optional rigid-body physics body
+
+`robot/body/physics_body.py` adds `PhysicsBody`, a drop-in replacement for the kinematic `SimBody`
+(same constructor shape plus `sandbox=`/`seed=`, the same tools, `CommandResult` statuses, reflexes
+and bus events). It simulates `config/companion_r1_physics.xml` in MuJoCo: a 2.3 kg robot on a
+free joint, four tyres on velocity-servo motors with floor friction, a head position servo, walls
+at +/-1.5 m and the default sandbox objects as free bodies (the charging dock is static). It is not
+wired into `RobotHarness` by default; swap it in where `SimBody` is constructed:
+`PhysicsBody(bus, capabilities, step_dt_s=..., seed=0)`. The harness's `sandbox.bind(body)` then
+attaches the raycasts and object synchronisation.
+
+- Physics runs in 2 ms steps, advanced to `bus.clock` time every control tick (and by an idle task
+  under `RealClock`; under `ReplayClock` call `advance_to_now()`). A 100 Hz firmware loop does
+  skid-steer control on the odometry estimate.
+- `pose()` is odometry (quantised encoders with a seeded per-side calibration error, plus IMU yaw
+  with seeded bias and noise); `true_pose()` is ground truth. `SensorNoise.off()` disables noise.
+  ToF readings get 3 mm noise. Sandbox raycasts and `is_charging()` are sampled with `true_pose()`.
+- Sustained chassis contact force (>= 6 N for 40 ms) or stalled wheels stop the command as
+  `reflex_stopped` with reflex `"bumper"`. The movable default objects are light enough to be
+  pushed instead; the static dock and the walls trigger the bumper. Sandbox geometric collision checks are not used; the physics contact replaces them.
+- Pushed objects that moved more than 5 mm are written back with `sandbox.move_object()`. Sandbox
+  edits (drag, add, remove, reset) move, create or remove physics bodies.
+- The battery mirrors `SimBody`'s parameters: idle drain per minute, drain per metre of wheel travel
+  (spinning also drains), and charging while the sensor model reports `is_charging()`.
+
+Measured with `scripts/bench_physics_body.py` on an i5-11300H laptop (Windows, Python 3.15,
+MuJoCo 3.17): 21-24 ms of physics per simulated second, and 36-41x real time end to end,
+including control ticks, events and sandbox synchronisation. Accuracy, odometry with and without
+noise, bumper, emergency stop, cancellation, pushing and sandbox synchronisation are covered by
+`tests/test_physics_body.py`. Limitations: catch-up is capped at 0.5 s per call, so long
+`ReplayClock` jumps without commands do not simulate the whole interval; the dashboard still
+renders the robot at `pose()`; `picked_up` is not simulated.
+
 The current body is simulated. A real motor controller needs its own watchdog and physical
 emergency-stop enforcement. Energy-threshold VAD also does not provide acoustic echo cancellation;
 speaker/microphone feedback must be tested on the assembled robot.

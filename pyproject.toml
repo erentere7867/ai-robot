@@ -29,7 +29,7 @@ build-backend = "setuptools.build_meta"
 include = ["robot*"]
 
 [tool.setuptools.data-files]
-"share/companion-robot/config" = ["config/robot.yaml", "config/robot.pi5.yaml", "config/body.yaml", "config/SOUL.md", "config/companion_r1.xml"]
+"share/companion-robot/config" = ["config/robot.yaml", "config/robot.pi5.yaml", "config/body.yaml", "config/SOUL.md", "config/companion_r1.xml", "config/companion_r1_physics.xml"]
 "share/companion-robot/config/meshes" = ["config/meshes/*.stl"]
 
 [tool.pytest.ini_options]

@@ -1,0 +1,135 @@
+<mujoco model="companion_r1_physics">
+  <!--
+    Rigid-body physics model of companion_r1 used by robot/body/physics_body.py.
+    Geometry follows the CAD in companion_r1.xml (wheel radius 60 mm, track 270 mm, wheelbase 180 mm)
+    but uses primitive collision geoms only. Units: metres, kilograms, seconds.
+
+    Collision bits (contype/conaffinity):
+      1 = floor contact (drive wheels only touch the floor)
+      2 = solid bodies (chassis, walls, room objects)
+    Geom group 3 holds the robot's own geoms so ToF raycasts can exclude them.
+  -->
+  <compiler angle="degree" autolimits="true"/>
+
+  <option timestep="0.002" integrator="implicitfast" cone="elliptic" gravity="0 0 -9.81"/>
+
+  <default>
+    <geom contype="2" conaffinity="2" condim="3" friction="0.5 0.005 0.0001" rgba="0.7 0.7 0.7 1"/>
+    <default class="wall">
+      <geom type="box" friction="0.4 0.005 0.0001" rgba="0.16 0.22 0.32 1"/>
+    </default>
+    <default class="wheel">
+      <!-- armature = gearbox-reflected rotor inertia of the drive motor. -->
+      <joint type="hinge" axis="0 1 0" damping="0.002" armature="0.005"/>
+      <!-- Rubber tyres: the soft, well-damped contact models tyre compliance (and stops skid-steer
+           chatter). The unloaded radius is 61.3 mm so the loaded rolling radius is the nominal 60 mm. -->
+      <geom type="sphere" size="0.0613" mass="0.08" contype="1" conaffinity="0" group="3"
+            friction="0.9 0.005 0.0001" solref="0.05 2" solimp="0.6 0.95 0.008" rgba="0.17 0.19 0.21 1"/>
+    </default>
+    <default class="drive_motor">
+      <!-- Geared DC motor with a speed loop: ~0.6 N.m stall torque at the wheel. -->
+      <velocity kv="2.0" ctrlrange="-12 12" forcerange="-0.6 0.6"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="key_light" pos="0.8 -1.2 2.4" dir="-0.25 0.35 -0.9"/>
+
+    <!-- Floor (infinite collision plane) and 3 m x 3 m room walls with inner faces at +/-1.5 m. -->
+    <geom name="floor" type="plane" size="3 3 0.05" contype="1" conaffinity="3" rgba="0.15 0.2 0.28 1"/>
+    <geom name="wall_north" class="wall" pos="1.52 0 0.14" size="0.02 1.54 0.14"/>
+    <geom name="wall_south" class="wall" pos="-1.52 0 0.14" size="0.02 1.54 0.14"/>
+    <geom name="wall_west" class="wall" pos="0 1.52 0.14" size="1.50 0.02 0.14"/>
+    <geom name="wall_east" class="wall" pos="0 -1.52 0.14" size="1.50 0.02 0.14"/>
+
+    <!-- companion_r1: body origin on the floor below the chassis centre, +x forward. -->
+    <body name="robot_base" pos="0 0 0">
+      <freejoint name="base_free"/>
+      <inertial pos="-0.006 0 0.095" mass="1.7" diaginertia="0.0115 0.0150 0.0210"/>
+      <!-- Bumper envelope: chassis plus wheel footprint (front face at +150 mm). -->
+      <geom name="chassis" type="box" pos="0 0 0.0975" size="0.150 0.150 0.0655" group="3"
+            friction="0.3 0.005 0.0001" rgba="0.85 0.87 0.85 0.4"/>
+      <site name="imu" pos="0 0 0.08" size="0.005"/>
+      <site name="front_tof" pos="0.141 0 0.065" size="0.004"/>
+
+      <body name="fl_wheel" pos="0.090 0.135 0.060">
+        <joint name="fl_spin" class="wheel"/>
+        <geom name="fl_tire" class="wheel"/>
+      </body>
+      <body name="fr_wheel" pos="0.090 -0.135 0.060">
+        <joint name="fr_spin" class="wheel"/>
+        <geom name="fr_tire" class="wheel"/>
+      </body>
+      <body name="rl_wheel" pos="-0.090 0.135 0.060">
+        <joint name="rl_spin" class="wheel"/>
+        <geom name="rl_tire" class="wheel"/>
+      </body>
+      <body name="rr_wheel" pos="-0.090 -0.135 0.060">
+        <joint name="rr_spin" class="wheel"/>
+        <geom name="rr_tire" class="wheel"/>
+      </body>
+
+      <!-- Head on a hobby-style position servo; positive tilt looks up. -->
+      <body name="head" pos="0.025 0 0.196">
+        <joint name="head_tilt" type="hinge" axis="0 -1 0" range="-25 35" damping="0.02" armature="0.002"/>
+        <inertial pos="0.01 0 0.05" mass="0.3" diaginertia="0.0006 0.0004 0.0006"/>
+        <geom name="head_shell" type="box" pos="0 0 0.048" size="0.044 0.072 0.048" contype="0"
+              conaffinity="0" group="3" rgba="0.85 0.87 0.85 1"/>
+      </body>
+    </body>
+
+    <!-- Default sandbox objects (SimulationSandbox.reset_default_scene); movable ones are free bodies.
+         When a sandbox is bound, its object positions replace these. -->
+    <body name="obj_red_ball" pos="0.68 0.16 0.048">
+      <freejoint/>
+      <geom name="geom_red_ball" type="sphere" size="0.048" mass="0.06" condim="6"
+            friction="0.8 0.005 0.001" rgba="0.96 0.25 0.37 1"/>
+    </body>
+
+    <body name="obj_blue_cube" pos="0.62 -0.21 0.055">
+      <freejoint/>
+      <geom name="geom_blue_cube" type="box" size="0.055 0.055 0.055" mass="0.2" rgba="0.23 0.51 0.96 1"/>
+    </body>
+
+    <body name="obj_yellow_duck" pos="0.47 0.34 0.0">
+      <freejoint/>
+      <!-- Flat-bottomed body: an ellipsoid on a plane rocks indefinitely. -->
+      <geom name="geom_duck_body" type="cylinder" pos="0 0 0.03" size="0.042 0.03" mass="0.04"
+            rgba="0.95 0.78 0.08 1"/>
+      <geom name="geom_duck_head" type="sphere" pos="0.024 0 0.07" size="0.025" mass="0.01"
+            rgba="0.95 0.78 0.08 1"/>
+    </body>
+
+    <body name="obj_green_mug" pos="0.84 -0.03 0.058">
+      <freejoint/>
+      <geom name="geom_green_mug" type="cylinder" size="0.043 0.058" mass="0.33" rgba="0.06 0.73 0.51 1"/>
+      <geom name="geom_mug_handle" type="box" pos="-0.046 0 0" size="0.012 0.008 0.034" mass="0.02"
+            rgba="0.06 0.73 0.51 1"/>
+    </body>
+
+    <body name="obj_cardboard_box" pos="0.95 0.42 0.095">
+      <freejoint/>
+      <geom name="geom_cardboard_box" type="box" size="0.11 0.11 0.095" mass="0.4"
+            friction="0.45 0.005 0.0001" rgba="0.82 0.54 0.24 1"/>
+    </body>
+
+    <!-- The charging dock is static (mocap: immovable, but the dashboard can still relocate it). -->
+    <body name="obj_charging_dock" mocap="true" pos="-0.68 0.0 0.0">
+      <!-- Thin base plate: the chassis clears it and the wheels roll over it. -->
+      <geom name="geom_dock_base" type="box" pos="0 0 0.008" size="0.11 0.12 0.008"
+            contype="0" conaffinity="2" rgba="0.18 0.20 0.26 1"/>
+      <geom name="geom_dock_tower" type="box" pos="-0.07 0 0.065" size="0.035 0.10 0.065"
+            rgba="0.32 0.22 0.65 1"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <velocity name="motor_fl" class="drive_motor" joint="fl_spin"/>
+    <velocity name="motor_fr" class="drive_motor" joint="fr_spin"/>
+    <velocity name="motor_rl" class="drive_motor" joint="rl_spin"/>
+    <velocity name="motor_rr" class="drive_motor" joint="rr_spin"/>
+    <!-- ~1.5 N.m servo; ctrlrange is in radians (-25..35 deg). -->
+    <position name="servo_head" joint="head_tilt" kp="20" kv="0.4" ctrlrange="-0.4363 0.6109"
+              forcerange="-1.5 1.5"/>
+  </actuator>
+</mujoco>
