@@ -42,20 +42,22 @@ def _summary(ctx: SkillContext, ids: list[str]) -> list[str]:
     return [ctx.spatial_map.describe(o, pose).replace(", seen just now", "") for o in objs]
 
 
-async def observe(ctx: SkillContext, query: str = "") -> SkillResult:
-    query = _query(query)
-    view = await perceive(ctx, query or None)
-    if query and not view["seen"] and not view["unplaced"]:
-        view = await perceive(ctx, None)  # report what *is* there instead of a bare "no"
-        seen = _summary(ctx, view["seen"])
-        return SkillResult(True, f"No {query} in view. look_around searches all directions.",
-                           {"objects": seen} if seen else {})
+async def observe(ctx: SkillContext) -> SkillResult:
+    pose = ctx.pose()
+    key = (round(pose.x_mm, -1), round(pose.y_mm, -1), round(pose.heading_deg), round(pose.head_tilt_deg))
+    cached = ctx.turn_cache.get("observe")
+    if cached is not None and cached[0] == key:
+        # Looking again from the same spot shows the same thing; a small model sometimes loops here.
+        return SkillResult(True, "You already looked from here and nothing moved. Answer the human now.",
+                           cached[1])
+    view = await perceive(ctx, None)
     seen = _summary(ctx, view["seen"])
     data: dict[str, Any] = {"objects": seen}
     if view["unplaced"]:
         data["also_visible"] = view["unplaced"]
     if view["lost"]:
         data["no_longer_there"] = view["lost"]
+    ctx.turn_cache["observe"] = (key, data)
     if not seen and not view["unplaced"]:
         return SkillResult(True, "I see no distinct objects in front of me.", data)
     return SkillResult(True, f"I can see {len(seen) + len(view['unplaced'])} thing(s). If that answers "
@@ -105,10 +107,8 @@ async def look_around(ctx: SkillContext, query: str = "") -> SkillResult:
 
 def skills() -> list[Skill]:
     return [
-        Skill("observe", "Look through your head camera at what is in front of you. Returns each object "
-              "with an id, its direction and distance. Use before answering questions about what you see.",
-              {"query": {"type": "string", "description": "optional: one kind of object to look for, e.g. duck"}},
-              observe),
+        Skill("observe", "Look through your head camera at what is in front of you right now, e.g. for "
+              "'what do you see?'. Returns each object with an id, direction and distance.", {}, observe),
         Skill("look_around", "Turn a full circle while looking, to find things that are not in front of you "
               "or to learn what is in the room. With query, stops and faces the first match.",
               {"query": {"type": "string", "description": "optional: the thing you are searching for"}},

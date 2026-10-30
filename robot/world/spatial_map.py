@@ -288,7 +288,7 @@ class SpatialMap:
 
     def render_for_prompt(self, pose: BodyPose, *, limit: int = 8) -> str:
         if not self.objects:
-            lines = ["Known objects: none yet (use observe or look_around)."]
+            lines = ["Known objects: none yet."]
         else:
             ordered = sorted(self.objects.values(), key=lambda o: (o.relative(pose)[0], -o.confidence))
             lines = ["Known objects:"] + [f"- {self.describe(o, pose)}" for o in ordered[:limit]]

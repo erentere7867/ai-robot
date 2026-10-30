@@ -6,7 +6,8 @@ from robot.skills.base import Skill, SkillContext, SkillError, SkillRegistry, Sk
 
 def build_default_registry(eye_colors: list[str]) -> SkillRegistry:
     registry = SkillRegistry()
-    for skill in [*perception.skills(), *navigation.skills(), *social.skills(eye_colors)]:
+    # Order matters to a small model: the first tools listed get picked more often.
+    for skill in [*navigation.skills(), *social.skills(eye_colors), *perception.skills()]:
         registry.add(skill)
     return registry
 

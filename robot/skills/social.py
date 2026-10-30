@@ -65,7 +65,8 @@ async def wait(ctx: SkillContext, seconds: float) -> SkillResult:
 
 def skills(eye_colors: list[str]) -> list[Skill]:
     return [
-        Skill("express", "Show a feeling with your face, a sound, and optionally a body gesture.",
+        Skill("express", "Show a feeling with your face and a sound, optionally with a gesture such as a dance, "
+              "nod, wiggle or spin.",
               {"emotion": {"type": "string", "enum": [e for e in EMOTION_SOUNDS if e != "neutral"]},
                "gesture": {"type": "string", "enum": GESTURES}}, express, ["emotion"]),
         Skill("set_eye_color", "Change the colour of your eyes.",

@@ -271,9 +271,10 @@ def skills() -> list[Skill]:
                "distance_cm": {"type": "number", "minimum": 5, "maximum": 150,
                                "description": "optional gap to keep from the object"}},
               go_to, ["target"]),
-        Skill("face", "Turn in place to face a known object.",
+        Skill("turn_to", "Turn your body toward a known object without driving, e.g. for 'look at the ball'.",
               {"target": {"type": "string", "description": "object id such as box_1"}}, face, ["target"]),
-        Skill("turn", "Turn in place. 'around' turns 180 degrees. Optional degrees overrides the default 90.",
+        Skill("turn", "Turn in place, e.g. 'look left' is left and 'turn around' is around (180 degrees). "
+              "Optional degrees overrides the default 90.",
               {"direction": {"type": "string", "enum": ["left", "right", "around"]},
                "degrees": {"type": "number", "minimum": 5, "maximum": 360}},
               turn, ["direction"]),

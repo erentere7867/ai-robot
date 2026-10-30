@@ -245,6 +245,7 @@ class BehaviorArbiter:
         ctx.attached_image = None
         ctx.wake_request_s = None
         ctx.expression = {}
+        ctx.turn_cache = {}
         result = await self.agent.run(messages, ctx, background=autonomous)
         if epoch != self._epoch:
             raise asyncio.CancelledError

@@ -55,6 +55,7 @@ class SkillContext:
     on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
     wake_request_s: float | None = None
     expression: dict[str, Any] = field(default_factory=dict)
+    turn_cache: dict[str, Any] = field(default_factory=dict)  # per-turn memo, cleared by the arbiter
 
     def pose(self) -> BodyPose:
         return self.body.pose()
