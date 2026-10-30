@@ -42,9 +42,10 @@ _FORGET_PATTERNS = [
 def infer_subject(text: str) -> str:
     """Extract a canonical subject key from a fact statement for contradiction/update resolution."""
     cleaned = text.strip().rstrip(".!?")
-    # Match patterns like "my favorite color is green" or "My cat's name is Mochi"
+    # Match patterns like "my favorite color is green" or "My cat's name is Mochi". The model writes
+    # "The user's favorite color is green": that must share the subject (and tombstones) of "my ...".
     m = re.match(
-        r"^(?:that\s+)?(?:my|our|the|user'?s?)\s+([a-z0-9 '_-]{2,40}?)\s+(?:is|are|was|equals)\s+.+$",
+        r"^(?:that\s+)?(?:the\s+user'?s|my|our|the|user'?s?)\s+([a-z0-9 '_-]{2,40}?)\s+(?:is|are|was|equals)\s+.+$",
         cleaned,
         re.IGNORECASE,
     )
