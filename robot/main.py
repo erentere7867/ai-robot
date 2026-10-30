@@ -16,26 +16,34 @@ from robot.audio.service import AudioService
 from robot.behavior.arbiter import BehaviorArbiter
 from robot.behavior.attention import AttentionManager
 from robot.behavior.autonomy import AutonomyController
+from robot.behavior.drives import DriveSystem
 from robot.behavior.emotion import EmotionEngine
 from robot.behavior.fsm import InteractionFSM
-from robot.body.hal import BodyCapabilities
+from robot.body.hal import BodyCapabilities, BodyPose
 from robot.body.sim_body import SimBody
-from robot.cognition.backend import InferenceBackend, NullBackend, UnavailableBackend
-from robot.cognition.context import ContextBuilder
+from robot.cognition.agent import AgentLoop
+from robot.cognition.backend import InferenceBackend, NullBackend
 from robot.cognition.llamacpp import AutoBackend, LlamaCppBackend
-from robot.cognition.validator import ResponseValidator
+from robot.cognition.prompts import PromptBuilder, estimate_tokens
 from robot.core.bus import EventBus
 from robot.core.clock import Clock, RealClock
 from robot.core.config import RobotConfig
 from robot.core.events import Event, EventPriority
 from robot.core.recorder import EventRecorder
 from robot.core.service import ServiceSupervisor
+from robot.face.animator import EYE_COLOR_THEMES
 from robot.face.process import FaceProcessBridge
 from robot.interfaces.console import ConsoleInterface
 from robot.interfaces.dashboard import DashboardServer
 from robot.memory.consolidator import MemoryConsolidator
 from robot.memory.store import MemoryStore
+from robot.navigation.planner import GridPlanner
+from robot.perception.camera import SimCamera
+from robot.perception.detector import VLMDetector
+from robot.perception.geometry import CameraModel
+from robot.skills import SkillContext, build_default_registry
 from robot.world.sandbox import SimulationSandbox
+from robot.world.spatial_map import SpatialMap
 from robot.world.state import WorldState
 
 
@@ -73,15 +81,16 @@ class RobotHarness:
             else BodyCapabilities()
         )
         self.registry = CapabilityRegistry(self.capabilities)
-        self.body = SimBody(self.bus, self.capabilities, step_dt_s=1.0 / self.config.sim_tick_hz)
+        self.body = self._make_body()
         self.sandbox = SimulationSandbox(self.bus)
-        self.executor = ActionExecutor(
-            self.bus, self.body, self.registry,
-            camera_observer=lambda: [d.label for d in self.sandbox.detect_objects(self.body.pose())],
-        )
+        self.executor = ActionExecutor(self.bus, self.body, self.registry)
         self.memory = MemoryStore(self.config.database_path, clock=self.clock)
         self.consolidator = MemoryConsolidator(self.bus, self.memory)
         self.world = WorldState(self.bus, clock=self.clock, sandbox=self.sandbox)
+        self.spatial_map = SpatialMap(self.clock)
+        self.planner = GridPlanner(room_half_extent_mm=self.spatial_map.half, resolution_mm=50.0)
+        self.camera = SimCamera(self.sandbox, self.body, self.clock,
+                                CameraModel(self.sandbox.cam_width, self.sandbox.cam_height))
         self.face_bridge = FaceProcessBridge(
             self.bus,
             spawn_window=spawn_face_window,
@@ -118,13 +127,7 @@ class RobotHarness:
             wake_words=self.config.wake_words,
             require_wake_word=enable_mic if require_wake_word is None else require_wake_word,
         )
-        self.context_builder = ContextBuilder(
-            self.config.soul_path,
-            self.registry,
-            self.config.context_budget,
-            native_tools=self.config.llm.native_tools and self.config.llm.backend != "null",
-        )
-        self.validator = ResponseValidator(self.registry)
+        self.prompts = PromptBuilder(self.config.soul_path, self.config.context_budget, self.config.name)
 
         self._llama_client: LlamaCppBackend | None = None
         if backend is not None:
@@ -136,27 +139,32 @@ class RobotHarness:
             self.backend = self._llama_client
         else:
             self._llama_client = LlamaCppBackend(self.config.llm)
-            self.backend = AutoBackend(primary=self._llama_client, fallback=UnavailableBackend())
+            self.backend = AutoBackend(self._llama_client)
 
-        self.arbiter = BehaviorArbiter(
-            bus=self.bus,
-            fsm=self.fsm,
-            emotion=self.emotion,
-            context_builder=self.context_builder,
-            backend=self.backend,
-            validator=self.validator,
-            registry=self.registry,
-            executor=self.executor,
-            memory=self.memory,
-            world=self.world,
-            consolidator=self.consolidator,
-            agent_config=self.config.agent,
+        self.detector = VLMDetector(self.backend)
+        self.skills = build_default_registry(sorted(EYE_COLOR_THEMES))
+        self.skill_context = SkillContext(
+            bus=self.bus, executor=self.executor, body=self.body, camera=self.camera, detector=self.detector,
+            spatial_map=self.spatial_map, planner=self.planner, memory=self.memory, emotion=self.emotion,
+            clock=self.clock, registry=self.registry, on_event=self._emit_skill_event,
         )
+        budget = self.config.context_budget
+        self.agent = AgentLoop(self.backend, self.skills, self.config.agent,
+                               prompt_limit_tokens=budget.total_tokens - budget.response_reserve_tokens,
+                               on_event=self._emit_skill_event)
+        self.arbiter = BehaviorArbiter(
+            bus=self.bus, fsm=self.fsm, emotion=self.emotion, prompts=self.prompts, agent=self.agent,
+            skill_context=self.skill_context, memory=self.memory, world=self.world,
+            consolidator=self.consolidator, agent_config=self.config.agent,
+        )
+        self.drives = DriveSystem(rate_scale=self.config.autonomy.drive_rate_scale)
         self.autonomy = AutonomyController(
             bus=self.bus, arbiter=self.arbiter, body=self.body, config=self.config.autonomy,
-            attention=self.attention, audio=self.audio,
+            attention=self.attention, audio=self.audio, camera=self.camera, spatial_map=self.spatial_map,
+            drives=self.drives,
         )
         self.arbiter.autonomy = self.autonomy
+        self.arbiter.drives = self.drives
 
         self.dashboard: DashboardServer | None = (
             DashboardServer(self, port=dashboard_port) if enable_dashboard else None
@@ -176,15 +184,42 @@ class RobotHarness:
         self._requests: dict[str, asyncio.Future] = {}
         self._request_subs: list[str] = []
 
+    def _make_body(self):
+        tick = 1.0 / self.config.sim_tick_hz
+        if self.config.body_backend == "physics":
+            from robot.body.physics_body import PhysicsBody
+
+            return PhysicsBody(self.bus, self.capabilities, step_dt_s=tick)
+        return SimBody(self.bus, self.capabilities, step_dt_s=tick)
+
+    async def _emit_skill_event(self, event_type: str, payload: dict) -> None:
+        await self.bus.emit(event_type, "agent", payload, priority=EventPriority.NORMAL,
+                            correlation_id=self.skill_context.correlation_id)
+
+    def _on_pose_for_map(self, event: Event) -> None:
+        pose, sensors = event.payload.get("pose"), event.payload.get("sensors")
+        if not isinstance(pose, dict) or not isinstance(sensors, dict):
+            return
+        try:
+            body_pose = BodyPose(float(pose["x_mm"]), float(pose["y_mm"]), float(pose["heading_deg"]),
+                                 float(pose.get("head_tilt_deg", 0.0)))
+            self.spatial_map.update_range(body_pose, float(sensors.get("front_tof_mm", float("inf"))))
+        except (KeyError, TypeError, ValueError):
+            return
+
+    def validate_user_text(self, text: str) -> None:
+        if not text.strip() or len(text) > 4096:
+            raise ValueError("Message must contain 1..4096 characters")
+        if estimate_tokens(text) > 600:
+            raise ValueError("Message is too long for the robot's context; please send a shorter request")
+
     async def submit_message(
-        self, text: str, *, source: str = "dashboard", direct: bool = True, timeout_s: float = 35.0
+        self, text: str, *, source: str = "dashboard", direct: bool = True, timeout_s: float = 300.0
     ) -> dict:
         """Shared, correlated input path; requests cannot consume each other's replies."""
         if not self._started:
             raise RuntimeError("Harness is not running")
-        if not text.strip() or len(text) > 4096:
-            raise ValueError("Message must contain 1..4096 characters")
-        self.context_builder.validate_user_text(text)
+        self.validate_user_text(text)
         if len(self._requests) >= 8:
             raise RuntimeError("Robot is busy")
         request_id = uuid.uuid4().hex
@@ -240,6 +275,10 @@ class RobotHarness:
             if self._llama_client is not None:
                 await self._llama_client.ensure_server_started()
             self.sandbox.bind(self.body)
+            self.spatial_map.load(self.config.spatial_map_path)
+            start = self.body.pose()
+            self.spatial_map.places["start"] = (start.x_mm, start.y_mm)
+            self._request_subs.append(self.bus.subscribe("body.pose", self._on_pose_for_map, immediate=True))
             self.world.bind()
             self.autonomy.bind()
             self.attention.bind()
@@ -270,6 +309,10 @@ class RobotHarness:
         if self.arbiter._active_turn:
             await asyncio.wait({self.arbiter._active_turn}, timeout=1.0)
         await self.supervisor.stop_all()
+        try:
+            self.spatial_map.save(self.config.spatial_map_path)
+        except OSError:
+            logging.getLogger(__name__).warning("Could not save the spatial map", exc_info=True)
         self.arbiter.unbind()
         self.attention.unbind()
         self.world.unbind()

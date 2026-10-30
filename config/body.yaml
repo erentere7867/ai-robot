@@ -54,7 +54,7 @@ sensors:
     pivot_z_mm: 210.0
     hfov_deg: 65.0
     vfov_deg: 50.0
-    resolution: [320, 240]
+    resolution: [512, 384]
   microphone_array:
     enabled: false
 

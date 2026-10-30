@@ -2380,7 +2380,7 @@ class DashboardServer:
                 "action.cancel", "dashboard", {"reason": "forget"}, priority=EventPriority.CRITICAL
             )
             count, tomb = self.harness.memory.forget(topic)
-            self.harness.context_builder.clear_turns()
+            self.harness.prompts.clear()
             self.harness.consolidator.clear_pending()
             self._memory_cache = None
             return (

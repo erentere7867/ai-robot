@@ -1,5 +1,4 @@
-# Harness resource limits for Raspberry Pi 5, 4 GB RAM.
-# Model settings are deliberately left at their existing defaults.
+# Raspberry Pi 5 (4 GB) profile: smaller queues and history, slower autonomy cadence, CPU inference.
 robot:
   name: "Sprocket"
   wake_words: ["sprocket", "hey sprocket", "robot", "hey robot"]
@@ -10,28 +9,44 @@ runtime:
   runtime_dir: "~/robot-runtime"
   database_path: "~/robot-runtime/data/memory.db"
   recordings_dir: "~/robot-runtime/data/recordings"
+  spatial_map_path: "~/robot-runtime/data/spatial_map.json"
   soul_path: "config/SOUL.md"
   body_config_path: "config/body.yaml"
   sim_tick_hz: 20.0
   face_fps: 30.0
+  body_backend: "kinematic"
 bus:
   max_queue_size: 64
   record_events: false
 agent:
-  max_steps: 24
+  max_steps: 12
   max_actions: 160
-  timeout_s: 240.0
+  timeout_s: 600.0
 autonomy:
   enabled: true
-  idle_after_s: 12.0
-  observation_interval_s: 1.0
-  think_interval_s: 45.0
+  idle_after_s: 30.0
+  observation_interval_s: 2.0
+  think_interval_s: 120.0
+  drive_rate_scale: 1.0
+llm:
+  backend: "auto"
+  base_url: "http://127.0.0.1:8080"
+  model_name: "LFM3-VL-2B-Q4_K_M"
+  model_path: "~/models/LFM3-VL-2B-Q4_K_M.gguf"
+  mmproj_path: "~/models/mmproj-LFM3-VL-2B-Q8_0.gguf"
+  llama_server_bin: "~/robot-runtime/llama.cpp/build/bin/llama-server"
+  gpu_layers: 0
+  ctx_size: 8192
+  timeout_s: 240.0
+  startup_timeout_s: 240.0
+  temperature: 0.0
+  max_tokens: 200
 context_budget:
-  total_tokens: 2048
+  total_tokens: 3584
   response_reserve_tokens: 256
-  identity_tokens: 180
-  memories_tokens: 160
-  world_state_tokens: 140
-  tools_tokens: 360
+  identity_tokens: 160
+  memories_tokens: 120
+  world_state_tokens: 220
+  tools_tokens: 1100
   recent_turns_tokens: 320
   max_recent_turns: 4

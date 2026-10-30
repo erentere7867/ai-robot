@@ -26,14 +26,14 @@ def load_yaml_file(path: Path | str) -> dict[str, Any]:
 
 @dataclass
 class ContextBudgetConfig:
-    total_tokens: int = 2048
-    identity_tokens: int = 320
-    memories_tokens: int = 320
-    world_state_tokens: int = 200
-    tools_tokens: int = 360
+    total_tokens: int = 4096
+    identity_tokens: int = 200
+    memories_tokens: int = 160
+    world_state_tokens: int = 260
+    tools_tokens: int = 1100
     recent_turns_tokens: int = 700
-    max_recent_turns: int = 8
-    response_reserve_tokens: int = 256
+    max_recent_turns: int = 6
+    response_reserve_tokens: int = 300
 
     def __post_init__(self) -> None:
         for key, value in vars(self).items():
@@ -65,19 +65,22 @@ class LLMConfig:
         ).expanduser()
     )
     gpu_layers: int = 99
-    ctx_size: int = 4096
-    timeout_s: float = 25.0
+    ctx_size: int = 8192
+    timeout_s: float = 90.0
     temperature: float = 0.0
-    max_tokens: int = 220
-    native_tools: bool = True
+    max_tokens: int = 256
+    native_tools: bool = True  # kept for config compatibility; tool calls are always native
+    startup_timeout_s: float = 90.0
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "null", "llamacpp"}:
             raise ValueError("Unknown LLM backend")
         if not isinstance(self.native_tools, bool):
             raise ValueError("llm.native_tools must be boolean")
-        if not math.isfinite(self.timeout_s) or not 0 < self.timeout_s <= 120:
-            raise ValueError("LLM timeout must be in (0, 120] seconds")
+        if not math.isfinite(self.timeout_s) or not 0 < self.timeout_s <= 300:
+            raise ValueError("LLM timeout must be in (0, 300] seconds")
+        if not math.isfinite(self.startup_timeout_s) or not 1 <= self.startup_timeout_s <= 600:
+            raise ValueError("LLM startup timeout must be in [1, 600] seconds")
         if not math.isfinite(self.temperature) or not 0 <= self.temperature <= 2:
             raise ValueError("LLM temperature must be in [0, 2]")
         if not 128 <= self.ctx_size <= 131072 or not 1 <= self.max_tokens < self.ctx_size:
@@ -91,9 +94,9 @@ if not (PROJECT_ROOT / "config" / "robot.yaml").exists():
 
 @dataclass
 class AgentConfig:
-    max_steps: int = 32
+    max_steps: int = 14
     max_actions: int = 200
-    timeout_s: float = 240.0
+    timeout_s: float = 300.0
 
     def __post_init__(self) -> None:
         for key in ("max_steps", "max_actions"):
@@ -107,12 +110,13 @@ class AgentConfig:
 @dataclass
 class AutonomyConfig:
     enabled: bool = True
-    idle_after_s: float = 12.0
-    think_interval_s: float = 30.0
+    idle_after_s: float = 20.0
+    think_interval_s: float = 45.0
     observation_interval_s: float = 1.0
+    drive_rate_scale: float = 1.0
 
     def __post_init__(self) -> None:
-        for key in ("idle_after_s", "think_interval_s", "observation_interval_s"):
+        for key in ("idle_after_s", "think_interval_s", "observation_interval_s", "drive_rate_scale"):
             value = getattr(self, key)
             if not math.isfinite(value) or value < 0.1:
                 raise ValueError(f"autonomy.{key} must be finite and at least 0.1 seconds")
@@ -133,6 +137,10 @@ class RobotConfig:
     soul_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "SOUL.md")
     body_config_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "body.yaml")
     sim_tick_hz: float = 20.0
+    body_backend: str = "kinematic"  # "kinematic" | "physics"
+    spatial_map_path: Path = field(
+        default_factory=lambda: Path("~/robot-runtime/data/spatial_map.json").expanduser()
+    )
     max_queue_size: int = 256
     record_events: bool = True
     face_fps: float = 30.0
@@ -161,6 +169,8 @@ class RobotConfig:
                 raise ValueError(f"{key} must be finite and positive")
         if not 1 <= self.sim_tick_hz <= 200 or not 1 <= self.max_queue_size <= 4096:
             raise ValueError("Simulation rate or queue size is outside supported limits")
+        if self.body_backend not in ("kinematic", "physics"):
+            raise ValueError("runtime.body_backend must be 'kinematic' or 'physics'")
 
     @classmethod
     def from_yaml(
@@ -197,22 +207,15 @@ class RobotConfig:
                 str(llm_raw.get("llama_server_bin", str(LLMConfig().llama_server_bin)))
             ),
             gpu_layers=int(llm_raw.get("gpu_layers", 99)),
-            ctx_size=int(llm_raw.get("ctx_size", 4096)),
-            timeout_s=float(llm_raw.get("timeout_s", 25.0)),
+            ctx_size=int(llm_raw.get("ctx_size", 8192)),
+            timeout_s=float(llm_raw.get("timeout_s", 90.0)),
             temperature=float(llm_raw.get("temperature", 0.0)),
-            max_tokens=int(llm_raw.get("max_tokens", 220)),
+            max_tokens=int(llm_raw.get("max_tokens", 256)),
             native_tools=llm_raw.get("native_tools", True),
+            startup_timeout_s=float(llm_raw.get("startup_timeout_s", 90.0)),
         )
-        cb = ContextBudgetConfig(
-            total_tokens=int(cb_raw.get("total_tokens", 2048)),
-            identity_tokens=int(cb_raw.get("identity_tokens", 320)),
-            memories_tokens=int(cb_raw.get("memories_tokens", 320)),
-            world_state_tokens=int(cb_raw.get("world_state_tokens", 200)),
-            tools_tokens=int(cb_raw.get("tools_tokens", 360)),
-            recent_turns_tokens=int(cb_raw.get("recent_turns_tokens", 700)),
-            max_recent_turns=int(cb_raw.get("max_recent_turns", 8)),
-            response_reserve_tokens=int(cb_raw.get("response_reserve_tokens", 256)),
-        )
+        defaults = ContextBudgetConfig()
+        cb = ContextBudgetConfig(**{key: int(cb_raw.get(key, getattr(defaults, key))) for key in vars(defaults)})
         return cls(
             name=str(r.get("name", "Sprocket")),
             wake_words=[
@@ -228,6 +231,8 @@ class RobotConfig:
             soul_path=_resolve(str(rt.get("soul_path", "config/SOUL.md")), default_rel=True),
             body_config_path=_resolve(str(rt.get("body_config_path", "config/body.yaml")), default_rel=True),
             sim_tick_hz=float(rt.get("sim_tick_hz", 20.0)),
+            body_backend=str(rt.get("body_backend", "kinematic")),
+            spatial_map_path=_resolve(str(rt.get("spatial_map_path", "~/robot-runtime/data/spatial_map.json"))),
             max_queue_size=int(bus.get("max_queue_size", 256)),
             record_events=bool(bus.get("record_events", True)),
             face_fps=float(rt.get("face_fps", 30.0)),

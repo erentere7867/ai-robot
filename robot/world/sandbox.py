@@ -273,8 +273,8 @@ class SimulationSandbox:
         bus: EventBus | None = None,
         *,
         room_half_extent_mm: float = 1500.0,
-        cam_width: int = 320,
-        cam_height: int = 240,
+        cam_width: int = 512,
+        cam_height: int = 384,
         overview_width: int = 520,
         overview_height: int = 340,
         xml_path: Path | None = None,
@@ -390,8 +390,8 @@ class SimulationSandbox:
                 id="cardboard_box",
                 label="Cardboard Box",
                 shape="box",
-                x_mm=1120.0,
-                y_mm=280.0,
+                x_mm=950.0,
+                y_mm=420.0,
                 width_mm=220.0,
                 depth_mm=220.0,
                 height_mm=190.0,
@@ -595,6 +595,8 @@ class SimulationSandbox:
 
         cone_rad = math.radians(14.0)
         for obj in self._objects.values():
+            if obj.id == "charging_dock":
+                continue
             dx = obj.x_mm - origin_x
             dy = obj.y_mm - origin_y
             forward = dx * dir_x + dy * dir_y
@@ -607,6 +609,26 @@ class SimulationSandbox:
                 min_dist = min(min_dist, surface_dist)
 
         return round(max(10.0, min(2500.0, min_dist)), 1)
+
+    ROBOT_FOOTPRINT_RADIUS_MM = 140.0
+    DOCK_CHARGE_RADIUS_MM = 230.0
+
+    def check_collision(self, pose: BodyPose) -> bool:
+        """Physical contact of the robot's footprint with a wall or an object (bumper switch)."""
+        r = self.ROBOT_FOOTPRINT_RADIUS_MM
+        half = self.room_half_extent_mm - 20.0
+        if abs(pose.x_mm) + r > half or abs(pose.y_mm) + r > half:
+            return True
+        for obj in self._objects.values():
+            if obj.id == "charging_dock":
+                continue  # the dock is a low ramp the robot drives onto
+            if math.hypot(obj.x_mm - pose.x_mm, obj.y_mm - pose.y_mm) < r + 0.5 * min(obj.width_mm, obj.depth_mm):
+                return True
+        return False
+
+    def is_charging(self, pose: BodyPose) -> bool:
+        dock = self._objects.get("charging_dock")
+        return dock is not None and math.hypot(dock.x_mm - pose.x_mm, dock.y_mm - pose.y_mm) <= self.DOCK_CHARGE_RADIUS_MM
 
     def check_cliff_triggered(self, pose: BodyPose) -> bool:
         """Check if any of the 4 corner cliff sensors is over the active cliff zone."""
@@ -921,33 +943,24 @@ class SimulationSandbox:
         mujoco.mj_forward(model, data)
         return st
 
-    def capture_camera_view(self, pose: BodyPose | None = None) -> CameraFrame:
-        """Render first-person 3D OpenGL RGB view from `head_cam` in MuJoCo and ground visible objects."""
+    def render_head_rgb(self, pose: BodyPose | None = None) -> np.ndarray:
+        """Raw first-person RGB render from `head_cam` (what a physical camera would deliver)."""
         p = pose or self._last_pose
-        ext = self.compute_camera_extrinsics(p)
-        visible_detections = self._compute_visible_detections(p)
+        with _MJ_SHARED_LOCK:
+            st = self._sync_mujoco_state_on_gl_thread(p)
+            renderer: mujoco.Renderer = st["head_renderer"]
+            renderer.update_scene(st["data"], camera="head_cam")
+            return renderer.render().copy()
 
-        def _render_head() -> np.ndarray:
-            with _MJ_SHARED_LOCK:
-                st = self._sync_mujoco_state_on_gl_thread(p)
-                renderer: mujoco.Renderer = st["head_renderer"]
-                renderer.update_scene(st["data"], camera="head_cam")
-                return renderer.render().copy()
-
-        img = _render_head()
-        # Draw subtle white 3x3 grounding reticle at each detected object center
-        h, w, _ = img.shape
-        for det in visible_detections:
-            uc = max(1, min(w - 2, det.u_px))
-            vc = max(1, min(h - 2, det.v_px))
-            img[vc - 1 : vc + 2, uc - 1 : uc + 2] = (255, 255, 255)
-
+    def capture_camera_view(self, pose: BodyPose | None = None) -> CameraFrame:
+        """Head-camera frame for the dashboard; `visible_objects` is simulator ground truth for debugging."""
+        p = pose or self._last_pose
         frame = CameraFrame(
             width=self.cam_width,
             height=self.cam_height,
-            png_bytes=_encode_rgb_to_png_bytes(img),
-            visible_objects=visible_detections,
-            camera_pose=ext,
+            png_bytes=_encode_rgb_to_png_bytes(self.render_head_rgb(p)),
+            visible_objects=self._compute_visible_detections(p),
+            camera_pose=self.compute_camera_extrinsics(p),
         )
         self._last_frame = frame
         return frame

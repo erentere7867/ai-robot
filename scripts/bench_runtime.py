@@ -78,7 +78,7 @@ async def benchmark(turns: int = 300, *, config: str = "config/robot.yaml", dash
                 "python_retained_growth_kib": round((current - before) / 1024, 1),
                 "python_peak_kib": round(peak / 1024, 1),
                 "retained_observations": len(harness.world._observations),
-                "retained_history_messages": len(harness.context_builder._recent_turns),
+                "retained_history_messages": len(harness.prompts.history),
                 "pending_requests": len(harness._requests),
                 "active_commands": len(harness.executor._active_tasks),
                 "retained_episodes": harness.memory._conn.execute("SELECT count(*) FROM episodes").fetchone()[

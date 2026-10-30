@@ -215,6 +215,8 @@ class SensorReadings:
     wheel_ticks_right: int = 0
     imu_yaw_deg: float = 0.0
     imu_pitch_deg: float = 0.0
+    battery_pct: float = 100.0
+    charging: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -226,6 +228,8 @@ class SensorReadings:
             "wheel_ticks_right": self.wheel_ticks_right,
             "imu_yaw_deg": round(self.imu_yaw_deg, 1),
             "imu_pitch_deg": round(self.imu_pitch_deg, 1),
+            "battery_pct": round(self.battery_pct, 1),
+            "charging": self.charging,
         }
 
 

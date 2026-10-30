@@ -40,7 +40,7 @@ class GridPlanner:
         room_half_extent_mm: float = 1500.0,
         resolution_mm: float = 40.0,
         robot_radius_mm: float = 180.0,
-        clearance_mm: float = 40.0,
+        clearance_mm: float = 20.0,
     ) -> None:
         self.half = float(room_half_extent_mm)
         self.res = float(resolution_mm)
@@ -60,8 +60,14 @@ class GridPlanner:
     def to_world(self, cell: tuple[int, int]) -> tuple[float, float]:
         return (-self.half + (cell[0] + 0.5) * self.res, -self.half + (cell[1] + 0.5) * self.res)
 
-    def build_grid(self, obstacles: list[CircleObstacle], *, extra_inflation_mm: float = 0.0) -> np.ndarray:
-        """Boolean grid where True = blocked for the robot centre."""
+    def build_grid(
+        self, obstacles: list[CircleObstacle], *, extra_inflation_mm: float = 0.0,
+        points: np.ndarray | None = None, point_radius_mm: float = 25.0,
+    ) -> np.ndarray:
+        """Boolean grid where True = blocked for the robot centre.
+
+        `points` are (N, 2) obstacle points in mm (e.g. range-sensor hits), each a small disc.
+        """
         infl = self.inflation_mm + extra_inflation_mm
         centers = -self.half + (np.arange(self.n) + 0.5) * self.res
         xs = centers[:, None]
@@ -72,6 +78,10 @@ class GridPlanner:
         for ob in obstacles:
             r = ob.radius_mm + infl
             grid |= (xs - ob.x_mm) ** 2 + (ys - ob.y_mm) ** 2 <= r * r
+        if points is not None and len(points):
+            r2 = (point_radius_mm + infl) ** 2
+            for px, py in points:
+                grid |= (xs - px) ** 2 + (ys - py) ** 2 <= r2
         return grid
 
     def is_free(self, grid: np.ndarray, x_mm: float, y_mm: float) -> bool:
@@ -134,12 +144,15 @@ class GridPlanner:
         start: tuple[float, float],
         goal: tuple[float, float],
         obstacles: list[CircleObstacle],
+        *,
+        points: np.ndarray | None = None,
+        goal_tolerance_mm: float = 500.0,
     ) -> PlannedPath:
         """Plan a smoothed collision-free path from `start` to `goal` (both in mm)."""
         if any(not math.isfinite(v) or abs(v) >= self.half for v in (*start, *goal)):
-            return PlannedPath(False, [], message="Route endpoint is outside the room.")
-        grid = self.build_grid(obstacles)
-        goal_free = self.nearest_free(grid, *goal, max_r_mm=500.0)
+            return PlannedPath(False, [], message="Route endpoint is outside the mapped area.")
+        grid = self.build_grid(obstacles, points=points)
+        goal_free = self.nearest_free(grid, *goal, max_r_mm=goal_tolerance_mm)
         if goal_free is None:
             return PlannedPath(False, [], message="Goal is blocked by obstacles or walls.")
         s = self.to_cell(*start)

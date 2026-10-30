@@ -147,7 +147,7 @@
       <geom name="geom_mug_handle" type="box" pos="-0.046 0 0" size="0.012 0.008 0.034" material="mat_shiny_obj" rgba="0.06 0.73 0.51 1"/>
     </body>
 
-    <body name="obj_cardboard_box" mocap="true" pos="1.12 0.28 0.095">
+    <body name="obj_cardboard_box" mocap="true" pos="0.95 0.42 0.095">
       <geom name="geom_cardboard_box" type="box" size="0.11 0.11 0.095" material="mat_matte_obj" rgba="0.82 0.54 0.24 1"/>
       <geom name="geom_box_tape" type="box" pos="0 0 0.0955" size="0.111 0.018 0.001" material="mat_matte_obj" rgba="0.92 0.78 0.52 1"/>
     </body>

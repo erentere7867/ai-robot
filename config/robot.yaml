@@ -9,42 +9,47 @@ runtime:
   runtime_dir: "~/robot-runtime"
   database_path: "~/robot-runtime/data/memory.db"
   recordings_dir: "~/robot-runtime/data/recordings"
+  spatial_map_path: "~/robot-runtime/data/spatial_map.json"
   soul_path: "config/SOUL.md"
   body_config_path: "config/body.yaml"
   sim_tick_hz: 20.0
+  # kinematic: perfect odometry, fast. physics: MuJoCo dynamics, wheel slip, odometry drift.
+  body_backend: "kinematic"
 
 bus:
   max_queue_size: 256
   record_events: true
 
 agent:
-  max_steps: 32
+  max_steps: 14        # model calls per request
   max_actions: 200
-  timeout_s: 240.0
+  timeout_s: 300.0
 
 autonomy:
   enabled: true
-  idle_after_s: 12.0
-  observation_interval_s: 1.0
-  think_interval_s: 30.0
+  idle_after_s: 20.0          # quiet time after the human spoke before acting alone
+  observation_interval_s: 1.0 # cheap checks (drives, camera thumbnail); no model calls
+  think_interval_s: 45.0      # minimum gap between background decisions
+  drive_rate_scale: 1.0       # >1 makes curiosity/social/play build up faster (demos)
 
 llm:
-  native_tools: true
   backend: "auto"
   base_url: "http://127.0.0.1:8080"
   model_name: "LFM3-VL-2B-Q4_K_M"
   model_path: "~/Downloads/LFM3-VL-2B-Q4_K_M.gguf"
   mmproj_path: "~/Downloads/mmproj-LFM3-VL-2B-Q8_0.gguf"
   llama_server_bin: "~/robot-runtime/llama.cpp/llama-server.exe"
-  timeout_s: 25.0
+  ctx_size: 8192
+  timeout_s: 90.0
   temperature: 0.0
-  max_tokens: 220
+  max_tokens: 256
 
 context_budget:
-  total_tokens: 2048
-  identity_tokens: 320
-  memories_tokens: 320
-  world_state_tokens: 200
-  tools_tokens: 360
+  total_tokens: 4096
+  response_reserve_tokens: 300
+  identity_tokens: 200
+  memories_tokens: 160
+  world_state_tokens: 260
+  tools_tokens: 1100
   recent_turns_tokens: 700
-  max_recent_turns: 8
+  max_recent_turns: 6

@@ -1,291 +1,134 @@
-"""Inference backend interface and offline pet-mode NullBackend."""
+"""Model-independent chat interface with native tool calls."""
 
 from __future__ import annotations
 
 import json
-import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from robot.memory.policy import extract_explicit_memory_proposals
+
+class BackendUnavailable(RuntimeError):
+    """The language model cannot be reached; callers must not invent a decision."""
 
 
 @dataclass
-class InferenceResult:
-    """Raw output and telemetry returned by an InferenceBackend."""
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+    invalid_arguments: bool = False
 
-    raw_text: str
-    backend_name: str
+    def to_message(self) -> dict[str, Any]:
+        return {"id": self.id, "type": "function",
+                "function": {"name": self.name, "arguments": json.dumps(self.arguments, ensure_ascii=False)}}
+
+
+@dataclass
+class ChatResult:
+    content: str
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    backend_name: str = "unknown"
     latency_ms: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
-    metadata: dict[str, Any] = field(default_factory=dict)
+    finish_reason: str | None = None
+
+    def assistant_message(self) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": "assistant", "content": self.content}
+        if self.tool_calls:
+            message["tool_calls"] = [c.to_message() for c in self.tool_calls]
+        return message
 
 
 class InferenceBackend(Protocol):
-    """Model-independent inference adapter."""
-
     name: str
 
     async def is_available(self) -> bool: ...
 
-    async def generate(
+    async def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
-        json_schema: dict[str, Any] | None = None,
-    ) -> InferenceResult: ...
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int | None = None,
+    ) -> ChatResult: ...
+
+
+def message_text(message: dict[str, Any]) -> str:
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        return "\n".join(str(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text")
+    return str(content)
 
 
 class UnavailableBackend:
-    """A missing model never substitutes a scripted physical behavior."""
-
     name = "inference_unavailable"
 
-    async def generate(self, messages, *, json_schema=None) -> InferenceResult:
-        autonomous = any(header in str(messages[-1].get("content", ""))
-                         for header in ("[Background Event]", "[Autonomous Objective]")) if messages else False
-        return InferenceResult(json.dumps({
-            "say": "" if autonomous else "The model is unavailable, so I cannot decide how to carry out this request.",
-            "sound": "none", "emotion": {"name": "neutral", "intensity": 0.3},
-            "actions": [], "memory": [], "status": "blocked", "next_wake_s": 60,
-        }), self.name)
+    async def is_available(self) -> bool:
+        return False
+
+    async def chat(self, messages, *, tools=None, max_tokens=None) -> ChatResult:
+        raise BackendUnavailable("No language model is available")
 
 
 class NullBackend:
-    """Deterministic test/demo adapter, selected explicitly with --backend null."""
+    """Explicit `--backend null` adapter: talks, never moves. For wiring tests and demos only."""
 
     name = "null_offline"
 
     async def is_available(self) -> bool:
         return True
 
-    async def generate(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        json_schema: dict[str, Any] | None = None,
-    ) -> InferenceResult:
-        raw_content = messages[-1]["content"] if messages else ""
-        if isinstance(raw_content, list):
-            user_content = "\n".join(
-                str(part.get("text", ""))
-                for part in raw_content
-                if isinstance(part, dict) and part.get("type") == "text"
-            )
-        else:
-            user_content = str(raw_content)
-        if "[Background Event]" in user_content or "[Autonomous Objective]" in user_content:
-            # The test adapter has no self-directed behavior.
-            return InferenceResult(json.dumps({
-                "say": "", "sound": "none", "emotion": {"name": "curious", "intensity": 0.5},
-                "actions": [], "memory": [], "status": "completed",
-            }), self.name)
-        user_msg = self._extract_section(user_content, "[User Message]") or user_content
-        mem_section = self._extract_section(user_content, "[Retrieved Memories]")
-        world_section = self._extract_section(user_content, "[World State]")
+    async def chat(self, messages, *, tools=None, max_tokens=None) -> ChatResult:
+        if tools is None:  # perception requests (detector) get an empty detection list
+            return ChatResult("[]", backend_name=self.name, latency_ms=1.0)
+        last = messages[-1] if messages else {}
+        if last.get("role") == "tool":
+            return ChatResult("Done.", backend_name=self.name, latency_ms=1.0)
+        text = message_text(last)
+        if "[Background event]" in text:
+            return ChatResult("", backend_name=self.name, latency_ms=1.0)
+        return ChatResult("I'm running without my language model, so I can only chat a little.",
+                          backend_name=self.name, latency_ms=1.0)
 
-        response_obj = self._synthesize_response(user_msg, mem_section, world_section)
-        return InferenceResult(
-            raw_text=json.dumps(response_obj, ensure_ascii=False),
-            backend_name=self.name,
-            latency_ms=1.0,
-        )
 
-    @staticmethod
-    def _extract_section(text: str, header: str) -> str:
-        idx = text.find(header)
-        if idx == -1:
-            return ""
-        sub = text[idx + len(header) :].lstrip()
-        next_idx = sub.find("\n[")
-        return sub[:next_idx].strip() if next_idx != -1 else sub.strip()
+Responder = Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], ChatResult | dict[str, Any] | str]
 
-    def _synthesize_response(
-        self,
-        user_msg: str,
-        mem_section: str,
-        world_section: str,
-    ) -> dict[str, Any]:
-        lower = user_msg.lower().strip()
 
-        # 1. Explicit remember / forget
-        proposals = extract_explicit_memory_proposals(user_msg)
-        if proposals:
-            p = proposals[0]
-            if p.op == "remember":
-                return {
-                    "say": f"Got it! I'll remember that: {p.text}.",
-                    "sound": "happy_trill",
-                    "emotion": {"name": "happy", "intensity": 0.75},
-                    "actions": [{"tool": "perform_trick", "args": {"trick": "nod"}}],
-                    "memory": [{"op": "remember", "text": p.text}],
-                }
-            return {
-                "say": f"Okay, I've wiped '{p.text}' from my memory.",
-                "sound": "soft_beep",
-                "emotion": {"name": "neutral", "intensity": 0.4},
-                "actions": [{"tool": "perform_trick", "args": {"trick": "shake"}}],
-                "memory": [{"op": "forget", "text": p.text}],
-            }
+class ScriptedBackend:
+    """Deterministic backend for tests: each entry is a reply, or a callable receiving the messages.
 
-        # 2. Explicit emotion / face requests ("try making a sad face", "make an angry face")
-        if any(w in lower for w in ("face", "expression", "try making", "act ")):
-            for emo_kw, snd, trick, reply in [
-                (
-                    "sad",
-                    "sad_whimper",
-                    "sleepy_droop",
-                    "*Droops head and whimpers softly*... Here is my sad face.",
-                ),
-                (
-                    "angry",
-                    "angry_grumble",
-                    "stomp",
-                    "Grrrr! *Narrows eyebrows and stomps*... Here is my angry face!",
-                ),
-                (
-                    "mad",
-                    "angry_grumble",
-                    "stomp",
-                    "Grrrr! *Narrows eyebrows and stomps*... Here is my angry face!",
-                ),
-                ("grumpy", "angry_grumble", "shake", "Hmph! Feeling grumpy!"),
-                ("surprised", "startle_pip", "perk_up", "Whoa!! *Eyes go wide!*"),
-                ("scared", "startle_pip", "shake", "Eep! That startled me!"),
-                ("proud", "happy_trill", "perk_up", "*Tilts head high with pride!*"),
-                ("shy", "soft_beep", "sleepy_droop", "*Looks down shyly and beeps.*"),
-                ("love", "purr", "wiggle", "*Purrs warmly!*"),
-            ]:
-                if emo_kw in lower:
-                    emo_name = "angry" if emo_kw == "mad" else emo_kw
-                    return {
-                        "say": reply,
-                        "sound": snd,
-                        "emotion": {"name": emo_name, "intensity": 0.9},
-                        "actions": [{"tool": "perform_trick", "args": {"trick": trick}}],
-                        "memory": [],
-                    }
+    Reply shorthand: a string is plain text; a dict {"call": name, "args": {...}} is one tool call;
+    {"calls": [[name, args], ...]} is several; {"say": text} is plain text.
+    """
 
-        # 3. Head tilt requests (e.g. "Tilt your head up 200 degrees")
-        if "tilt" in lower or ("look" in lower and ("up" in lower or "down" in lower)):
-            num_match = re.search(r"([+-]?\d+(?:\.\d+)?)", lower)
-            angle = float(num_match.group(1)) if num_match else 20.0
-            if "down" in lower and angle > 0:
-                angle = -angle
-            return {
-                "say": f"Tilting my head toward {angle:.0f} degrees!",
-                "sound": "curious_chirp",
-                "emotion": {"name": "curious", "intensity": 0.7},
-                "actions": [{"tool": "tilt_head", "args": {"angle_deg": angle}}],
-                "memory": [],
-            }
+    name = "scripted"
 
-        # 3. Named tricks
-        for trick, emo, snd, line in [
-            ("dance", "excited", "happy_trill", "Ooh, a dance? Watch my moves!"),
-            ("wiggle", "happy", "happy_trill", "Wiggle wiggle!"),
-            ("nod", "happy", "ack_chirp", "Yep, nodding along!"),
-            ("shake", "curious", "soft_beep", "Nope, shaking it off!"),
-            ("sleepy", "sleepy", "sleepy_yawn", "*Yaaawn*... getting a little drowsy."),
-        ]:
-            if trick in lower:
-                trick_name = "sleepy_droop" if trick == "sleepy" else trick
-                return {
-                    "say": line,
-                    "sound": snd,
-                    "emotion": {"name": emo, "intensity": 0.8},
-                    "actions": [{"tool": "perform_trick", "args": {"trick": trick_name}}],
-                    "memory": [],
-                }
+    def __init__(self, script: list[Any] | None = None, *, default: Any = "") -> None:
+        self.script = list(script or [])
+        self.default = default
+        self.requests: list[dict[str, Any]] = []
+        self._counter = 0
 
-        # 4. Spin / turn
-        if any(w in lower for w in ("spin", "turn around", "rotate")):
-            num_match = re.search(r"([+-]?\d+(?:\.\d+)?)", lower)
-            angle = float(num_match.group(1)) if num_match else (180.0 if "around" in lower else 360.0)
-            if "right" in lower and angle > 0:
-                angle = -angle
-            return {
-                "say": f"Spinning {angle:.0f} degrees!",
-                "sound": "happy_trill",
-                "emotion": {"name": "excited", "intensity": 0.75},
-                "actions": [{"tool": "spin", "args": {"angle_deg": angle}}],
-                "memory": [],
-            }
+    async def is_available(self) -> bool:
+        return True
 
-        # 5. Drive forward / backward
-        if any(w in lower for w in ("drive", "move forward", "move back", "go forward", "back up")):
-            direction = "backward" if ("back" in lower or "reverse" in lower) else "forward"
-            num_match = re.search(r"(\d+(?:\.\d+)?)", lower)
-            dist = float(num_match.group(1)) if num_match else 250.0
-            return {
-                "say": f"Rolling {direction} {dist:.0f} millimeters!",
-                "sound": "soft_beep",
-                "emotion": {"name": "happy", "intensity": 0.65},
-                "actions": [{"tool": "drive", "args": {"direction": direction, "distance_mm": dist}}],
-                "memory": [],
-            }
+    async def chat(self, messages, *, tools=None, max_tokens=None) -> ChatResult:
+        self.requests.append({"messages": json.loads(json.dumps(messages, default=str)), "tools": tools})
+        entry = self.script.pop(0) if self.script else self.default
+        if callable(entry):
+            entry = entry(messages, tools)
+        return self._to_result(entry)
 
-        # 6. Spatial & Camera query ("behind", "around you", "what do you see")
-        if any(w in lower for w in ("what do you see", "in front of you")):
-            for line in world_section.splitlines():
-                if line.strip().startswith("Camera:"):
-                    return {
-                        "say": f"In my head camera view: {line.strip()[7:].strip()}.",
-                        "sound": "curious_chirp",
-                        "emotion": {"name": "curious", "intensity": 0.75},
-                        "actions": [{"tool": "perform_trick", "args": {"trick": "nod"}}],
-                        "memory": [],
-                    }
-        if any(w in lower for w in ("behind", "around you", "what did you see", "what do you see")):
-            for line in world_section.splitlines():
-                if line.strip().startswith("- "):
-                    return {
-                        "say": f"From my spatial memory: {line.strip()[2:]}.",
-                        "sound": "curious_chirp",
-                        "emotion": {"name": "curious", "intensity": 0.7},
-                        "actions": [],
-                        "memory": [],
-                    }
-            return {
-                "say": "I don't have any recent objects in my short-term spatial memory right now.",
-                "sound": "curious_chirp",
-                "emotion": {"name": "curious", "intensity": 0.6},
-                "actions": [{"tool": "perform_trick", "args": {"trick": "curious_tilt"}}],
-                "memory": [],
-            }
-
-        # 7. Memory recall question ("what's my ...", "do you remember ...")
-        if "?" in user_msg or lower.startswith(("what", "who", "where", "do you remember")):
-            mem_lines = [
-                ln.strip()[2:]
-                for ln in mem_section.splitlines()
-                if ln.strip().startswith("- ") and "(none)" not in ln
-            ]
-            if mem_lines:
-                best = mem_lines[0]
-                # Strip leading `(subject) `
-                best_clean = re.sub(r"^\([^)]+\)\s*", "", best)
-                return {
-                    "say": f"I remember! {best_clean}.",
-                    "sound": "happy_trill",
-                    "emotion": {"name": "happy", "intensity": 0.75},
-                    "actions": [{"tool": "perform_trick", "args": {"trick": "nod"}}],
-                    "memory": [],
-                }
-            return {
-                "say": "Hmm, I don't have a memory stored about that yet!",
-                "sound": "curious_chirp",
-                "emotion": {"name": "curious", "intensity": 0.6},
-                "actions": [{"tool": "perform_trick", "args": {"trick": "curious_tilt"}}],
-                "memory": [],
-            }
-
-        # 8. Default friendly pet greeting
-        return {
-            "say": "Beep-boop! I'm here and listening (running in offline pet mode).",
-            "sound": "curious_chirp",
-            "emotion": {"name": "happy", "intensity": 0.65},
-            "actions": [{"tool": "perform_trick", "args": {"trick": "curious_tilt"}}],
-            "memory": [],
-        }
+    def _to_result(self, entry: Any) -> ChatResult:
+        if isinstance(entry, ChatResult):
+            return entry
+        if isinstance(entry, str):
+            return ChatResult(entry, backend_name=self.name)
+        calls = []
+        pairs = entry.get("calls") or ([[entry["call"], entry.get("args", {})]] if "call" in entry else [])
+        for name, args in pairs:
+            self._counter += 1
+            calls.append(ToolCall(f"call_{self._counter}", name, dict(args)))
+        return ChatResult(str(entry.get("say", "")), calls, backend_name=self.name)

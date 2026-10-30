@@ -34,6 +34,9 @@ class SimBody:
         capabilities: BodyCapabilities | None = None,
         *,
         step_dt_s: float = 0.05,
+        battery_idle_pct_per_min: float = 0.5,
+        battery_pct_per_m: float = 1.0,
+        charge_pct_per_min: float = 20.0,
     ) -> None:
         self.bus = bus
         self._caps = capabilities or BodyCapabilities()
@@ -55,6 +58,10 @@ class SimBody:
         self._manual_tof_override = False
         self._manual_cliff_override = False
         self._sensor_model = None
+        self._battery_idle = battery_idle_pct_per_min
+        self._battery_per_mm = battery_pct_per_m / 1000.0
+        self._charge_rate = charge_pct_per_min
+        self._battery_t = bus.clock.monotonic()
 
     def attach_sensor_model(self, model) -> None:
         """Sample simulated sensors in the motor loop, independent of event delivery."""
@@ -66,6 +73,25 @@ class SimBody:
                 front_tof_mm=self._sensor_model.compute_front_tof_mm(self._pose),
                 cliff=self._sensor_model.check_cliff_triggered(self._pose),
             )
+        self._update_battery()
+
+    def _update_battery(self, travelled_mm: float = 0.0) -> None:
+        now = self.bus.clock.monotonic()
+        minutes = max(0.0, now - self._battery_t) / 60.0
+        self._battery_t = now
+        charging = bool(self._sensor_model is not None and hasattr(self._sensor_model, "is_charging")
+                        and self._sensor_model.is_charging(self._pose))
+        level = self._sensors.battery_pct
+        level += minutes * (self._charge_rate if charging else -self._battery_idle)
+        level -= abs(travelled_mm) * self._battery_per_mm
+        self._sensors.battery_pct = max(0.0, min(100.0, level))
+        self._sensors.charging = charging
+
+    def _would_collide(self, x_mm: float, y_mm: float) -> bool:
+        model = self._sensor_model
+        if model is None or not hasattr(model, "check_collision"):
+            return False
+        return bool(model.check_collision(BodyPose(x_mm, y_mm, self._pose.heading_deg, self._pose.head_tilt_deg)))
 
     def capabilities(self) -> BodyCapabilities:
         return self._caps
@@ -91,6 +117,8 @@ class SimBody:
             wheel_ticks_right=self._sensors.wheel_ticks_right,
             imu_yaw_deg=self._sensors.imu_yaw_deg,
             imu_pitch_deg=self._sensors.imu_pitch_deg,
+            battery_pct=self._sensors.battery_pct,
+            charging=self._sensors.charging,
         )
 
     async def start(self) -> None:
@@ -293,9 +321,16 @@ class SimBody:
                 return result
             if kind == "drive":
                 rad = math.radians(self._pose.heading_deg)
-                self._pose.x_mm += sign * step * math.cos(rad)
-                self._pose.y_mm += sign * step * math.sin(rad)
+                nx = self._pose.x_mm + sign * step * math.cos(rad)
+                ny = self._pose.y_mm + sign * step * math.sin(rad)
+                if self._would_collide(nx, ny) and not self._would_collide(self._pose.x_mm, self._pose.y_mm):
+                    await self._emit_reflex("bumper", "Bumped into something")
+                    await self._emit_pose()
+                    return CommandResult(cmd.id, cmd.tool, False, "reflex_stopped",
+                                         "Bumper pressed: I bumped into something.", self._pose.to_dict())
+                self._pose.x_mm, self._pose.y_mm = nx, ny
                 self._add_wheel_ticks(sign * step, sign * step)
+                self._update_battery(step)
             elif kind == "spin":
                 self._apply_rotation(sign * step)
             else:
