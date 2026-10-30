@@ -18,6 +18,15 @@ ARRIVE_TOLERANCE_MM = 120.0
 MAX_SEGMENT_MM = 600.0
 START_WORDS = {"start", "start point", "starting point", "home", "where i started", "where you started", "origin"}
 RELATIONS = ["near", "behind", "in_front_of", "left_of", "right_of", "between", "on"]
+# Words a small model reaches for instead (often borrowed from the map's direction text).
+RELATION_ALIASES = {
+    **{w: "near" for w in ("next_to", "beside", "by", "close_to", "near_to", "at", "to", "front_left",
+                           "front_right", "ahead", "toward", "towards", "approach", "nearby")},
+    **{w: "in_front_of" for w in ("in_front", "front", "front_of", "before")},
+    **{w: "behind" for w in ("behind_of", "back", "back_of", "far_side", "beyond", "past")},
+    "left": "left_of", "to_the_left_of": "left_of", "right": "right_of", "to_the_right_of": "right_of",
+    **{w: "on" for w in ("onto", "on_top", "on_top_of", "into", "inside")},
+}
 
 
 def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -297,7 +306,7 @@ def skills() -> list[Skill]:
         Skill("go_to", "Drive to a spot relative to a known object; plans a safe path around obstacles and "
               "turns to face the object at the end. 'behind' means the far side of the object from where you "
               "are now; 'on' drives onto something flat like a dock or mat. For 'between' also give 'other'.",
-              {"target": target, "relation": {"type": "string", "enum": RELATIONS},
+              {"target": target, "relation": {"type": "string", "enum": RELATIONS, "aliases": RELATION_ALIASES},
                "other": {"type": "string", "description": "second object id, only for between"},
                "distance_cm": {"type": "number", "minimum": 5, "maximum": 150,
                                "description": "optional gap to keep from the object"}},

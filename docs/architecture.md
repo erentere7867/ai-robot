@@ -100,6 +100,27 @@ one would. The camera always renders from the true pose; the robot only knows it
 (`-np 2 -c 16384`): one slot keeps the agent's prompt cache, the other serves detection requests.
 `LlamaCppBackend.ensure_server_started` does this automatically.
 
+## Measured on the laptop (LFM3-VL-2B Q4, GTX 1650)
+
+- Decision benchmark (`eval_decisions.py`, first tool call in 21 situations): 67% at the start of the
+  rework, 93–98% now.
+- Simulator tasks (`eval_scenarios.py`, 14 tasks graded from ground truth): latest run 42/42 over three
+  room layouts; earlier runs of nearly the same code scored 89–93%, so expect occasional misses.
+  Tasks: greet, describe, turn around, look left, move a little, go to the ball, go behind the box,
+  go between two objects, find a hidden duck, go to the charging dock, come back to the start,
+  look around and report, and remembering a name/preference across restarts.
+- Autonomy (`try_autonomy.py`): left alone, the curiosity drive woke it, it explored, found new
+  objects and covered 99% of the area around it in 2.5 minutes (drives accelerated 30x).
+
+Known limitations:
+
+- The general "what is here" detection sometimes invents objects (a "laptop", a "banner") from walls
+  or the dock's base. Searches for a specific thing are confirmed on a crop with a yes/no question;
+  the general inventory is not, to keep it to one model call per view.
+- The 2B model occasionally adds a step nobody asked for or confuses similar words; guards stop loops
+  and the skills report honestly, but replies can still be slightly off.
+- The same object can be listed twice when the VLM boxes it twice in one view.
+
 ## Raspberry Pi 5 (4 GB): what to expect
 
 Laptop measurements (GTX 1650): a decision takes 1.5–3 s, a detection 1–2.5 s, "go behind that

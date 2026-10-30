@@ -105,9 +105,11 @@ class Skill:
     background_ok: bool = True
 
     def tool_schema(self) -> dict[str, Any]:
+        # "aliases" is harness-side tolerance for near-miss words; the model only sees the clean schema.
+        properties = {k: {kk: vv for kk, vv in v.items() if kk != "aliases"} for k, v in self.parameters.items()}
         return {"type": "function", "function": {
             "name": self.name, "description": self.description,
-            "parameters": {"type": "object", "properties": self.parameters, "required": self.required,
+            "parameters": {"type": "object", "properties": properties, "required": self.required,
                            "additionalProperties": False},
         }}
 
@@ -133,7 +135,8 @@ def _coerce(name: str, spec: dict[str, Any], value: Any) -> Any:
         text = str(value).strip()[:120]
         options = spec.get("enum")
         if options:
-            lowered = text.lower().replace(" ", "_")
+            lowered = text.lower().replace(" ", "_").replace("-", "_")
+            lowered = spec.get("aliases", {}).get(lowered, lowered)
             if lowered not in options:
                 raise SkillError(f"{name} must be one of {options}")
             return lowered

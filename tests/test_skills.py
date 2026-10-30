@@ -239,3 +239,22 @@ async def test_cancelled_skill_stops_before_moving(sim):
         assert sim.body.pose().x_mm == 0
     finally:
         sim.skill_context.cancelled = lambda: False
+
+
+def test_relation_aliases_are_tolerated_but_not_shown_to_the_model():
+    from robot.skills.base import SkillError, _coerce
+    from robot.skills.navigation import RELATION_ALIASES, RELATIONS
+    from robot.skills.navigation import skills as nav_skills
+
+    spec = {"type": "string", "enum": RELATIONS, "aliases": RELATION_ALIASES}
+    assert _coerce("relation", spec, "front-right") == "near"
+    assert _coerce("relation", spec, "on top of") == "on"
+    assert _coerce("relation", spec, "Behind") == "behind"
+    try:
+        _coerce("relation", spec, "sideways")
+    except SkillError:
+        pass
+    else:
+        raise AssertionError("unknown relations must still be rejected")
+    schema = next(s for s in nav_skills() if s.name == "go_to").tool_schema()
+    assert "aliases" not in schema["function"]["parameters"]["properties"]["relation"]
