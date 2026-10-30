@@ -362,3 +362,11 @@ async def test_targeted_detections_are_confirmed_on_a_crop() -> None:
     # A general inventory is not double-checked.
     backend = ScriptedBackend([boxes])
     assert len(await VLMDetector(backend).detect(frame)) == 2
+
+
+def test_room_surfaces_are_not_objects() -> None:
+    from robot.perception.detector import parse_detections
+
+    text = ('[{"label": "blue wall", "bbox": [0, 0, 400, 300]}, {"label": "blue floor", "bbox": [0, 600, 999, 999]},'
+            ' {"label": "red ball", "bbox": [100, 600, 200, 700]}]')
+    assert [d.label for d in parse_detections(text)] == ["red ball"]

@@ -55,7 +55,12 @@ class LlamaCppBackend:
         cmd = [
             str(bin_path), "-m", str(model_path), "--host", host, "--port", str(parsed.port or 8080),
             "-ngl", str(self.config.gpu_layers), "-c", str(self.config.ctx_size), "-np", "2",
-            "--jinja", "--reasoning", "off", "--temp", str(self.config.temperature),
+            "--jinja", "--reasoning", "auto", "--reasoning-format", "deepseek", "--no-reasoning-preserve",
+            "--reasoning-budget", str(self.config.thinking_budget_tokens), "--temp", str(self.config.temperature),
+            # LFM3 mixes convolutions and sliding-window attention, so a cached prompt can only be resumed
+            # from a checkpoint. The default spacing (8192 tokens) is longer than our prompts; with these two
+            # flags a decision re-reads ~5-150 tokens instead of ~400 (measured: 1.9 s -> 0.7 s per call).
+            "--swa-full", "--checkpoint-min-step", "256",
         ]
         if self.config.mmproj_path and self.config.mmproj_path.exists():
             cmd.extend(["--mmproj", str(self.config.mmproj_path)])
@@ -96,13 +101,16 @@ class LlamaCppBackend:
             return False
 
     async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
+        # Decisions (requests with tools) may think first; detection and yes/no checks answer directly.
+        thinking = self.config.thinking and bool(tools)
+        budget = (max_tokens or self.config.max_tokens) + (self.config.thinking_budget_tokens if thinking else 0)
         payload: dict[str, Any] = {
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": max_tokens or self.config.max_tokens,
+            "max_tokens": budget,
             "stream": False,
             "cache_prompt": True,
-            "chat_template_kwargs": {"enable_thinking": False},
+            "chat_template_kwargs": {"enable_thinking": thinking},
         }
         if tools:
             payload.update(tools=tools, tool_choice=tool_choice)
@@ -138,6 +146,7 @@ class LlamaCppBackend:
         usage = data.get("usage") or {}
         return ChatResult(
             content=str(message.get("content") or "").strip(),
+            reasoning=str(message.get("reasoning_content") or "").strip(),
             tool_calls=calls,
             backend_name=f"llamacpp:{self.config.model_name}",
             latency_ms=(time.perf_counter() - t0) * 1000.0,

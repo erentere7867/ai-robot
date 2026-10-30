@@ -95,6 +95,10 @@ class LLMConfig:
     max_tokens: int = 256
     native_tools: bool = True  # kept for config compatibility; tool calls are always native
     startup_timeout_s: float = 90.0
+    # LFM3-VL's thinking mode for decisions (detection never thinks). Measured on the decision benchmark:
+    # off 95% at 0.7 s per decision, on 86% at 5-9 s, so it is off by default.
+    thinking: bool = False
+    thinking_budget_tokens: int = 512
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "null", "llamacpp"}:
@@ -244,6 +248,8 @@ class RobotConfig:
             max_tokens=int(llm_raw.get("max_tokens", 256)),
             native_tools=llm_raw.get("native_tools", True),
             startup_timeout_s=float(llm_raw.get("startup_timeout_s", 90.0)),
+            thinking=_as_bool(llm_raw.get("thinking", False), "llm.thinking"),
+            thinking_budget_tokens=int(llm_raw.get("thinking_budget_tokens", 512)),
         )
         defaults = ContextBudgetConfig()
         cb = ContextBudgetConfig(**{key: int(cb_raw.get(key, getattr(defaults, key))) for key in vars(defaults)})

@@ -33,6 +33,7 @@ class ChatResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     finish_reason: str | None = None
+    reasoning: str = ""  # the model's thinking, for logs and the dashboard; never spoken
 
     def assistant_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": self.content}

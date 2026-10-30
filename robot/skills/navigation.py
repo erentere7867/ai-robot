@@ -241,7 +241,8 @@ async def face(ctx: SkillContext, target: str) -> SkillResult:
 
 async def turn(ctx: SkillContext, direction: str, degrees: float | None = None) -> SkillResult:
     if direction == "around":
-        angle = degrees if degrees is not None else 180.0
+        # "around" is a half turn; a small model often adds degrees=360 to it, which would end where it began.
+        angle = degrees if degrees is not None and degrees > 360.0 else 180.0
     else:
         angle = abs(degrees if degrees is not None else 90.0) * (1 if direction == "left" else -1)
     # The motor accepts at most one revolution per command; longer turns are done in pieces.
@@ -356,8 +357,8 @@ def skills() -> list[Skill]:
               go_to, ["target"]),
         Skill("turn_to", "Turn your body toward a known object without driving, e.g. for 'look at the ball'.",
               {"target": {"type": "string", "description": "object id such as box_1"}}, face, ["target"]),
-        Skill("turn", "Turn in place, e.g. 'look left' is left and 'turn around' is around (180 degrees). "
-              "Give degrees for any other amount, e.g. 360 for a full spin or 540 for one and a half.",
+        Skill("turn", "Turn in place, e.g. 'look left' is left and 'turn around' is around (a half turn). "
+              "For other amounts use left or right with degrees, e.g. 360 for a full spin.",
               {"direction": {"type": "string", "enum": ["left", "right", "around"]},
                "degrees": {"type": "number", "minimum": 5, "maximum": 1080}},
               turn, ["direction"]),

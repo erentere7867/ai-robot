@@ -27,7 +27,10 @@ $ArgsList = @(
     "-c", "$CtxSize",
     "-np", "2",  # one slot keeps the agent prompt cached, the other serves detection
     "--jinja",
-    "--reasoning", "off",
+    "--reasoning", "auto", "--reasoning-format", "deepseek", "--no-reasoning-preserve",
+    "--reasoning-budget", "512",
+    # Hybrid LFM3 models resume cached prompts only from checkpoints; default spacing is too coarse.
+    "--swa-full", "--checkpoint-min-step", "256",
     "--temp", "0"
 )
 

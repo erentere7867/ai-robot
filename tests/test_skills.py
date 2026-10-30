@@ -284,3 +284,8 @@ async def test_circle_around_an_object_returns_facing_it(sim):
     assert math.hypot(box.x_mm - pose.x_mm, box.y_mm - pose.y_mm) < 900
     bearing = math.degrees(math.atan2(box.y_mm - pose.y_mm, box.x_mm - pose.x_mm)) - pose.heading_deg
     assert abs((bearing + 180) % 360 - 180) < 15  # facing the box at the end
+
+
+async def test_turn_around_is_a_half_turn_even_with_360(sim):
+    await run(sim, "turn", direction="around", degrees=360)
+    assert abs(abs(sim.body.pose().heading_deg) - 180.0) < 1.0

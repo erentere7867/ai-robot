@@ -128,8 +128,14 @@ async def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-k", default="", help="only run cases whose name contains this")
     parser.add_argument("--config", default="config/robot.yaml")
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--thinking", choices=["on", "off"], help="override llm.thinking")
+    parser.add_argument("--budget", type=int, help="override llm.thinking_budget_tokens (output cap)")
     args = parser.parse_args(argv)
     cfg = RobotConfig.from_yaml(args.config)
+    if args.thinking:
+        cfg.llm.thinking = args.thinking == "on"
+    if args.budget is not None:
+        cfg.llm.thinking_budget_tokens = args.budget
     backend = LlamaCppBackend(cfg.llm)
     if not await backend.is_available():
         print(f"llama-server is not answering at {cfg.llm.base_url}")
@@ -140,6 +146,7 @@ async def main(argv: list[str] | None = None) -> int:
     image = Path(__file__).resolve().parents[1] / "tests" / "data" / "scene_front.png"
     image_url = ("data:image/png;base64," + base64.b64encode(image.read_bytes()).decode()) if image.exists() else ""
     passed = total = 0
+    seconds = 0.0
     try:
         for case in [c for c in CASES if args.k in c.name]:
             for _ in range(args.repeat):
@@ -150,12 +157,13 @@ async def main(argv: list[str] | None = None) -> int:
                     calls = [(c.name, c.arguments) for c in recover_text_tool_calls(result.content, names)]
                 ok = case.check(calls, result.content if not calls else "")
                 passed += ok
+                seconds += time.perf_counter() - t0
                 total += 1
                 shown = ", ".join(f"{n}({json.dumps(a)})" for n, a in calls) or repr(result.content[:70])
                 print(f"{'PASS' if ok else 'FAIL'}  {case.name:<20} {time.perf_counter() - t0:4.1f}s  {shown}")
     finally:
         await backend.close()
-    print(f"\n{passed}/{total} passed ({100 * passed / max(1, total):.0f}%)")
+    print(f"\n{passed}/{total} passed ({100 * passed / max(1, total):.0f}%), {seconds / max(1, total):.1f} s per decision")
     return 0 if passed == total else 1
 
 

@@ -612,3 +612,10 @@ async def test_nudge_restates_the_request_and_forces_a_tool_call():
                                "Done."], messages=request("turn around"))
     assert [r["tool_choice"] for r in backend.requests] == ["auto", "required", "auto"]
     assert '"turn around"' in backend.requests[1]["messages"][-1]["content"]
+
+
+async def test_reply_contradicting_a_successful_action_is_corrected():
+    result, backend, _ = await run([{"call": "move", "args": {"direction": "forward"}},
+                                    "Sorry, I can't move right now.", "I moved forward."])
+    assert result.say == "I moved forward."
+    assert "That tool succeeded" in backend.requests[2]["messages"][-1]["content"]

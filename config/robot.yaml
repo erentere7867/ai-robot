@@ -43,6 +43,7 @@ llm:
   timeout_s: 90.0
   temperature: 0.0
   max_tokens: 256
+  thinking: false              # true lets the model reason first: slower, not more accurate here
 
 context_budget:
   total_tokens: 4096

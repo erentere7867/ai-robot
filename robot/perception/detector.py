@@ -25,6 +25,8 @@ DETECT_QUERY_PROMPT = (
 )
 
 _LABEL_CLEAN = re.compile(r"[^a-z0-9 \-']+")
+SURFACES = {"floor", "wall", "walls", "ceiling", "ground", "background", "sky", "shadow", "reflection",
+            "tiles", "tile", "baseboard", "corner"}
 _OBJECT = re.compile(r"\{[^{}]*\}")
 _PAIR = re.compile(r'"(?:label|name)"\s*:\s*"([^"]*)"[^\[{}]*?"(?:bbox|box|bbox_2d)"\s*:\s*\[([^\]\[]*)\]')
 
@@ -100,6 +102,8 @@ def parse_detections(text: str, *, max_items: int = 16) -> list[Detection]:
         y1, y2 = min(y1, y2), max(y1, y2)
         if x2 - x1 < 0.008 or y2 - y1 < 0.008 or (x2 - x1) * (y2 - y1) > 0.9:
             continue
+        if set(label.split()) & SURFACES:
+            continue  # the room itself, not an object in it
         det = Detection(label, (x1, y1, x2, y2))
         if any(_iou(det.bbox, other.bbox) > 0.7 for other in boxes):
             continue

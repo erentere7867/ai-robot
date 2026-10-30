@@ -95,6 +95,14 @@ def claims_unperformed_action(say: str, tool_log: list[dict[str, Any]]) -> bool:
     return bool(_CLAIM.search(say or "") or _REFUSAL.search(say or ""))
 
 
+def contradicts_success(say: str, tool_log: list[dict[str, Any]]) -> bool:
+    """True when the reply says "I can't ..." right after an action tool succeeded."""
+    return bool(_REFUSAL.search(say or "")) and any(e["ok"] and e["tool"] in _ACTION_TOOLS for e in tool_log)
+
+
+FIX_REPLY = "(That tool succeeded: {result} Tell the human in one short sentence what you just did.)"
+
+
 _CALL_TOKENS = re.compile(r"<\|tool_call_(?:start|end)\|>|</?think>|```(?:python|json)?")
 
 
@@ -198,6 +206,7 @@ class AgentLoop:
             await self._emit("cognition.model_call", {
                 "step": step + 1, "latency_ms": round(reply.latency_ms, 1), "prompt_tokens": reply.prompt_tokens,
                 "completion_tokens": reply.completion_tokens, "content": reply.content[:300],
+                "reasoning": reply.reasoning[:600],
                 "tool_calls": [{"name": c.name, "args": c.arguments} for c in reply.tool_calls],
             })
             if not reply.tool_calls:
@@ -223,6 +232,14 @@ class AgentLoop:
                     messages.append({"role": "assistant", "content": reply.content})
                     messages.append({"role": "user", "content": NUDGE.format(request=request_text(messages))})
                     await self._emit("cognition.nudged", {"reply": result.say[:200]})
+                    result.say = ""
+                    continue
+                if not nudged and contradicts_success(result.say, result.tool_log):
+                    nudged = True  # e.g. shows a sad face, then says it can't make one
+                    done = next(e for e in reversed(result.tool_log) if e["ok"] and e["tool"] in _ACTION_TOOLS)
+                    messages.append({"role": "assistant", "content": reply.content})
+                    messages.append({"role": "user", "content": FIX_REPLY.format(result=done["message"])})
+                    await self._emit("cognition.nudged", {"reply": result.say[:200], "reason": "contradiction"})
                     result.say = ""
                     continue
                 break
