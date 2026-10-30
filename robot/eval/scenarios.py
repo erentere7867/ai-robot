@@ -328,6 +328,7 @@ class TurnRecord:
     trajectory: list[dict[str, float]] = field(default_factory=list)
     actions: list[dict[str, Any]] = field(default_factory=list)
     reflexes: list[dict[str, Any]] = field(default_factory=list)
+    skills: list[dict[str, Any]] = field(default_factory=list)
     responses: int = 0
     final_status: str = ""
     backend: str = ""
@@ -352,6 +353,7 @@ class TurnRecord:
             "error": self.error,
             "pose_before": self.pose_before,
             "pose_after": self.pose_after,
+            "skills": self.skills,
             "actions": self.actions,
             "reflexes": self.reflexes,
             "trajectory": [
@@ -643,7 +645,9 @@ SCENARIO_LIST: tuple[Scenario, ...] = (
         "End within 300 mm of the ball/cube midpoint",
         ("go between the red ball and the blue cube",),
         grade_between,
-        SceneSetup(overrides={"green_mug": (1050.0, -350.0)}),
+        # Ball and cube far enough apart that the 228 mm wide robot physically fits between them.
+        SceneSetup(overrides={"green_mug": (1050.0, -350.0), "red_ball": (700.0, 240.0),
+                              "blue_cube": (650.0, -240.0)}, jitter_mm=50.0),
     ),
     Scenario(
         "find_hidden",

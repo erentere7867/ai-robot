@@ -26,8 +26,10 @@ COLORS = {
     "red", "blue", "green", "yellow", "orange", "brown", "purple", "violet", "pink", "white", "black",
     "gray", "grey", "teal", "cyan", "tan", "beige", "gold", "silver", "magenta", "lavender",
 }
+# The VLM is not consistent about colour names (the same ball is "red" one time, "pink" the next).
 COLOR_GROUPS = [{"brown", "tan", "beige", "orange", "cardboard", "gold"}, {"purple", "violet", "lavender", "magenta"},
-                {"gray", "grey", "silver"}, {"teal", "cyan", "green"}, {"teal", "cyan", "blue"}]
+                {"gray", "grey", "silver"}, {"teal", "cyan", "green"}, {"teal", "cyan", "blue"},
+                {"red", "pink", "magenta", "crimson", "rose"}, {"yellow", "gold", "orange"}]
 SYNONYMS = [
     {"box", "carton", "crate", "package", "cube", "block"},
     {"ball", "sphere", "orb"},
@@ -307,7 +309,8 @@ class SpatialMap:
     # ---- geometry for the planner ----------------------------------------------------------------
     def obstacles(self, *, exclude: set[str] | None = None) -> list[CircleObstacle]:
         exclude = exclude or set()
-        return [CircleObstacle(o.x_mm, o.y_mm, o.radius_mm, o.id) for o in self.objects.values()
+        # Radii come from the visible width; a box's corners reach further than that.
+        return [CircleObstacle(o.x_mm, o.y_mm, 1.2 * o.radius_mm + 10.0, o.id) for o in self.objects.values()
                 if o.id not in exclude and o.confidence >= 0.3]
 
     def occupied_mask(self) -> np.ndarray:

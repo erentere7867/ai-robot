@@ -40,7 +40,7 @@ async def navigate_to(ctx: SkillContext, goal: tuple[float, float], *, exclude: 
         here = (pose.x_mm, pose.y_mm)
         if _dist(here, goal) <= ARRIVE_TOLERANCE_MM:
             return True, "arrived"
-        points = _occupied_points(ctx)
+        points = _occupied_points(ctx, exclude)
         plan = ctx.planner.plan(here, goal, ctx.spatial_map.obstacles(exclude=exclude), points=points)
         if not plan.ok:
             if "outside" in plan.message:
@@ -49,7 +49,8 @@ async def navigate_to(ctx: SkillContext, goal: tuple[float, float], *, exclude: 
                            "there may not be enough room for me")
         waypoint = plan.waypoints[0]
         if _dist(here, plan.waypoints[-1]) <= ARRIVE_TOLERANCE_MM:
-            return True, "arrived as close as obstacles allow"
+            # The exact spot is blocked; the caller decides whether this is good enough.
+            return False, f"the exact spot is blocked, so I stopped {_dist(here, goal) / 10:.0f} cm from it"
         turn = await ctx.face_point(*waypoint)
         if turn is not None and not turn.ok:
             return False, turn.message
@@ -73,13 +74,20 @@ async def navigate_to(ctx: SkillContext, goal: tuple[float, float], *, exclude: 
     return False, "gave up after too many steps"
 
 
-def _occupied_points(ctx: SkillContext) -> np.ndarray:
+def _occupied_points(ctx: SkillContext, exclude: set[str] | None = None) -> np.ndarray:
     mask = ctx.spatial_map.occupied_mask()
     idx = np.nonzero(mask)
     if not len(idx[0]):
         return np.zeros((0, 2))
     half, cell = ctx.spatial_map.half, 50.0
-    return np.stack([-half + (idx[0] + 0.5) * cell, -half + (idx[1] + 0.5) * cell], axis=1)
+    points = np.stack([-half + (idx[0] + 0.5) * cell, -half + (idx[1] + 0.5) * cell], axis=1)
+    # Range hits on an object we are allowed to approach (between / on) must not block it either.
+    for obj_id in exclude or ():
+        obj = ctx.spatial_map.objects.get(obj_id)
+        if obj is not None:
+            keep = np.hypot(points[:, 0] - obj.x_mm, points[:, 1] - obj.y_mm) > obj.radius_mm + 120.0
+            points = points[keep]
+    return points
 
 
 async def _verify_target(ctx: SkillContext, obj_id: str) -> str:
@@ -87,7 +95,11 @@ async def _verify_target(ctx: SkillContext, obj_id: str) -> str:
     obj = ctx.spatial_map.objects.get(obj_id)
     if obj is None:
         return ""
-    dist, _ = obj.relative(ctx.pose())
+    dist, bearing = obj.relative(ctx.pose())
+    if dist - obj.radius_mm < 280.0 and abs(bearing) < 25.0:
+        # Too close for the camera to see the whole object; the range sensor still measures it.
+        tof = ctx.body.sensors().front_tof_mm
+        return f" {obj_id} is right in front of me (range sensor: {tof / 10:.0f} cm)."
     tilted = dist < 700.0
     if tilted:
         await ctx.primitive("tilt_head", angle_deg=-20.0)
@@ -109,6 +121,7 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
     if target.strip().lower() in START_WORDS:
         goal = ctx.spatial_map.places.get("start", (0.0, 0.0))
         ok, why = await navigate_to(ctx, goal)
+        ok = ok or _dist((ctx.pose().x_mm, ctx.pose().y_mm), goal) < 250.0
         msg = "I'm back at my start point." if ok else f"I couldn't get back to my start point: {why}."
         return SkillResult(ok, msg, {"distance_to_goal_m": round(_dist((ctx.pose().x_mm, ctx.pose().y_mm),
                                                                          goal) / 1000, 2)})

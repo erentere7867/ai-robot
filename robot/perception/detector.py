@@ -24,6 +24,7 @@ DETECT_QUERY_PROMPT = (
 )
 
 _LABEL_CLEAN = re.compile(r"[^a-z0-9 \-']+")
+_OBJECT = re.compile(r"\{[^{}]*\}")
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,14 @@ def parse_detections(text: str, *, max_items: int = 16) -> list[Detection]:
     try:
         items = json.loads(match.group(0))
     except ValueError:
-        # Some outputs are a bare box list for a single-object query: [x1, y1, x2, y2]
+        # Small models often slip on the outer syntax (e.g. "}}]"); read each object on its own.
+        items = []
+        for chunk in _OBJECT.findall(match.group(0)):
+            try:
+                items.append(json.loads(chunk))
+            except ValueError:
+                continue
+    if not isinstance(items, list):
         return []
     if items and all(isinstance(v, (int, float)) for v in items) and len(items) == 4:
         items = [{"label": "object", "bbox": items}]

@@ -39,7 +39,7 @@ class GridPlanner:
         *,
         room_half_extent_mm: float = 1500.0,
         resolution_mm: float = 40.0,
-        robot_radius_mm: float = 180.0,
+        robot_radius_mm: float = 165.0,
         clearance_mm: float = 20.0,
     ) -> None:
         self.half = float(room_half_extent_mm)

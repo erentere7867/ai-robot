@@ -141,6 +141,7 @@ class _Probe:
         handlers: dict[str, Callable[[Event], None]] = {
             "robot.response": self._on_response,
             "cognition.model_call": self._on_model_call,
+            "skill.completed": self._on_skill,
             "action.started": self._on_action_started,
             "action.completed": self._on_action_done,
             "action.failed": self._on_action_done,
@@ -183,6 +184,12 @@ class _Probe:
     def _on_model_call(self, _event: Event) -> None:
         if self.turn is not None:
             self.turn.model_calls += 1
+
+    def _on_skill(self, event: Event) -> None:
+        if self.turn is not None:
+            p = event.payload
+            self.turn.skills.append({"tool": p.get("tool"), "args": p.get("args"), "ok": p.get("ok"),
+                                     "message": str(p.get("message", ""))[:240]})
 
     def _on_action_started(self, event: Event) -> None:
         if self.turn is not None:
