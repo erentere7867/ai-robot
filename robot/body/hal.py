@@ -215,6 +215,8 @@ class SensorReadings:
     wheel_ticks_right: int = 0
     imu_yaw_deg: float = 0.0
     imu_pitch_deg: float = 0.0
+    battery_pct: float = 100.0
+    charging: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
