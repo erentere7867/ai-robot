@@ -258,3 +258,29 @@ def test_relation_aliases_are_tolerated_but_not_shown_to_the_model():
         raise AssertionError("unknown relations must still be rejected")
     schema = next(s for s in nav_skills() if s.name == "go_to").tool_schema()
     assert "aliases" not in schema["function"]["parameters"]["properties"]["relation"]
+
+
+async def test_turns_beyond_one_revolution_are_split(sim):
+    result = await run(sim, "turn", direction="left", degrees=540)
+    assert result.ok and "540" in result.message
+    assert abs(abs(sim.body.pose().heading_deg) - 180.0) < 1.0
+
+
+async def test_circle_around_an_object_returns_facing_it(sim):
+    await run(sim, "observe")
+    box = sim.sandbox.get_object("cardboard_box")
+    sides = set()
+
+    def track(event):
+        pose = event.payload["pose"]
+        angle = math.degrees(math.atan2(pose["y_mm"] - box.y_mm, pose["x_mm"] - box.x_mm))
+        sides.add(int((angle + 180) // 90) % 4)  # which quadrant around the box the robot passed through
+
+    sim.bus.subscribe("body.pose", track, immediate=True)
+    result = await run(sim, "circle_around", target="box_1")
+    assert result.ok, result.message
+    assert sides == {0, 1, 2, 3}  # went all the way round
+    pose = sim.body.pose()
+    assert math.hypot(box.x_mm - pose.x_mm, box.y_mm - pose.y_mm) < 900
+    bearing = math.degrees(math.atan2(box.y_mm - pose.y_mm, box.x_mm - pose.x_mm)) - pose.heading_deg
+    assert abs((bearing + 180) % 360 - 180) < 15  # facing the box at the end

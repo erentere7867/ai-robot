@@ -73,7 +73,7 @@ class ConsoleInterface:
             self.bus.unsubscribe(sid)
         self._sub_ids.clear()
 
-    async def send_and_wait(self, text: str, *, timeout_s: float = 30.0) -> dict[str, Any] | None:
+    async def send_and_wait(self, text: str, *, timeout_s: float = 300.0) -> dict[str, Any] | None:
         """Publish a user message event and wait for `robot.response`."""
         try:
             self.last_response = await self.harness.submit_message(

@@ -315,7 +315,13 @@ class SimBody:
                 self._pose.linear_vel_mm_s = sign * speed
             elif kind == "spin":
                 self._pose.angular_vel_deg_s = sign * speed
+            before = self.bus.clock.monotonic()
             await self.bus.clock.sleep(step / speed)
+            # Move by the time that really passed: OS timers and a busy event loop make sleeps run long,
+            # and a fixed step per tick would make the robot slower than its commanded speed. A stalled
+            # tick advances at most three ticks' worth so collisions are still checked finely.
+            elapsed = self.bus.clock.monotonic() - before
+            step = min(remaining, max(step, min(speed * elapsed, 3.0 * speed * self.step_dt_s)))
             result = await self._safety_result(cmd, base=kind != "head", forward=kind == "drive" and sign > 0)
             if result:
                 return result

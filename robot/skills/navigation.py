@@ -244,11 +244,54 @@ async def turn(ctx: SkillContext, direction: str, degrees: float | None = None) 
         angle = degrees if degrees is not None else 180.0
     else:
         angle = abs(degrees if degrees is not None else 90.0) * (1 if direction == "left" else -1)
-    result = await ctx.spin(angle)
-    if result is not None and not result.ok:
-        return SkillResult(False, result.message)
+    # The motor accepts at most one revolution per command; longer turns are done in pieces.
+    remaining = angle
+    while abs(remaining) > 1.0:
+        piece = max(-360.0, min(360.0, remaining))
+        result = await ctx.primitive("spin", angle_deg=round(piece, 1))
+        if not result.ok:
+            return SkillResult(False, f"Turned only {abs(angle - remaining):.0f} degrees: {result.message}")
+        remaining -= piece
     ctx.attached_image = None
     return SkillResult(True, f"Turned {direction} {abs(angle):.0f} degrees.")
+
+
+ALL_WORDS = {"all", "everything", "objects", "all objects", "all of the objects", "all the objects", "things",
+             "all things", "the objects", "room"}
+
+
+async def circle_around(ctx: SkillContext, target: str = "all", laps: float = 1.0) -> SkillResult:
+    """Drive a loop around one object, or around everything known, at a safe distance."""
+    key = target.strip().lower()
+    if key in ALL_WORDS:
+        objs = [o for o in ctx.spatial_map.objects.values() if o.confidence >= 0.3]
+        if not objs:
+            await look_around(ctx)
+            objs = [o for o in ctx.spatial_map.objects.values() if o.confidence >= 0.3]
+        if not objs:
+            return SkillResult(False, "I don't know of any objects to circle around.")
+        name = "all the objects"
+    else:
+        objs = [await _resolve(ctx, target)]
+        name = objs[0].id
+    cx = sum(o.x_mm for o in objs) / len(objs)
+    cy = sum(o.y_mm for o in objs) / len(objs)
+    radius = max(math.hypot(o.x_mm - cx, o.y_mm - cy) + o.radius_mm for o in objs) + ROBOT_CLEARANCE_MM + 80.0
+    pose = ctx.pose()
+    start_angle = math.atan2(pose.y_mm - cy, pose.x_mm - cx)
+    points = max(6, int(round(2 * math.pi * radius / 450.0)))
+    total = int(round(points * max(0.25, min(3.0, laps))))
+    reached = 0
+    for k in range(1, total + 1):
+        a = start_angle + 2 * math.pi * k / points
+        ok, _ = await navigate_to(ctx, (cx + radius * math.cos(a), cy + radius * math.sin(a)), max_iterations=8)
+        reached += ok
+    await ctx.face_point(cx, cy)
+    if reached == 0:
+        return SkillResult(False, f"I couldn't drive around {name}: walls or obstacles block the way.")
+    note = "" if reached == total else f" ({total - reached} of {total} points were blocked, so I went past them)"
+    return SkillResult(True, f"Drove a loop around {name} about {radius / 1000:.1f} m out{note}. "
+                             "If that was the request, tell the human.")
 
 
 async def move(ctx: SkillContext, direction: str, distance_cm: float = 30.0) -> SkillResult:
@@ -314,10 +357,14 @@ def skills() -> list[Skill]:
         Skill("turn_to", "Turn your body toward a known object without driving, e.g. for 'look at the ball'.",
               {"target": {"type": "string", "description": "object id such as box_1"}}, face, ["target"]),
         Skill("turn", "Turn in place, e.g. 'look left' is left and 'turn around' is around (180 degrees). "
-              "Optional degrees overrides the default 90.",
+              "Give degrees for any other amount, e.g. 360 for a full spin or 540 for one and a half.",
               {"direction": {"type": "string", "enum": ["left", "right", "around"]},
-               "degrees": {"type": "number", "minimum": 5, "maximum": 360}},
+               "degrees": {"type": "number", "minimum": 5, "maximum": 1080}},
               turn, ["direction"]),
+        Skill("circle_around", "Drive a loop around one object or around all known objects, keeping a safe "
+              "distance.", {"target": {"type": "string", "description": "object id, or all"},
+                            "laps": {"type": "number", "minimum": 0.25, "maximum": 3}},
+              circle_around),
         Skill("move", "Drive straight forward or backward. 'A little' is about 20 cm.",
               {"direction": {"type": "string", "enum": ["forward", "backward"]},
                "distance_cm": {"type": "number", "minimum": 5, "maximum": 200}},

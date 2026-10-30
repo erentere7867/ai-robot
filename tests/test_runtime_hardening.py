@@ -126,7 +126,7 @@ async def test_new_input_replaces_old_turn_and_correlates_requests(tmp_path):
         backend.release.set()
         assert (await first)["backend"] == "cancelled"
         assert (await second)["backend"] == "controlled"
-        assert harness.body.pose().x_mm == 300
+        assert harness.body.pose().x_mm == pytest.approx(300)
 
 
 @pytest.mark.asyncio
@@ -542,7 +542,7 @@ async def test_event_match_cache_is_bounded_and_invalidated():
 @pytest.mark.asyncio
 async def test_slow_motion_cannot_create_unbounded_execution_deadline(tmp_path):
     async with make_harness(tmp_path) as harness:
-        assert harness.executor._timeout_for("drive", {"distance_mm": 2000, "speed_mm_s": 1e-9}) <= 30
+        assert harness.executor._timeout_for("drive", {"distance_mm": 2000, "speed_mm_s": 1e-9}) <= 60  # bounded watchdog, whatever speed is requested
 
 
 @pytest.mark.asyncio

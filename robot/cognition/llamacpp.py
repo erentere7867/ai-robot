@@ -108,16 +108,25 @@ class LlamaCppBackend:
             payload.update(tools=tools, tool_choice="auto")
         t0 = time.perf_counter()
         async with self._lock:
-            try:
-                async with self._client.stream("POST", "/v1/chat/completions", json=payload) as resp:
-                    resp.raise_for_status()
-                    raw = bytearray()
-                    async for chunk in resp.aiter_bytes():
-                        raw.extend(chunk)
-                        if len(raw) > MAX_RESPONSE_BYTES:
-                            raise ValueError("Inference response exceeds 64 KiB")
-            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-                raise BackendUnavailable(str(exc)) from exc
+            for attempt in range(2):
+                try:
+                    async with self._client.stream("POST", "/v1/chat/completions", json=payload) as resp:
+                        resp.raise_for_status()
+                        raw = bytearray()
+                        async for chunk in resp.aiter_bytes():
+                            raw.extend(chunk)
+                            if len(raw) > MAX_RESPONSE_BYTES:
+                                raise ValueError("Inference response exceeds 64 KiB")
+                    break
+                except httpx.TransportError as exc:
+                    # A pooled keep-alive connection the server already closed fails at once with
+                    # "Server disconnected without sending a response"; a fresh connection works.
+                    if attempt == 0 and not isinstance(exc, httpx.TimeoutException):
+                        logger.info("Retrying model request after transport error: %s", exc)
+                        continue
+                    raise BackendUnavailable(str(exc)) from exc
+                except httpx.HTTPStatusError as exc:
+                    raise BackendUnavailable(str(exc)) from exc
         data = json.loads(raw)
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}

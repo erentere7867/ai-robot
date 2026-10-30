@@ -9,12 +9,16 @@ from robot.world.spatial_map import direction_words, label_score
 
 LOOK_AROUND_STEP_DEG = 60.0
 GENERIC_QUERIES = {"room", "everything", "anything", "all", "objects", "object", "things", "thing", "scene",
-                   "surroundings", "around", "stuff", "view", "what", "it", "that", "front", "area"}
+                   "surroundings", "around", "stuff", "view", "what", "it", "that", "front", "area", "items",
+                   "item", "something"}
 
 
 def _query(text: str) -> str:
+    """'' for a general look ("any object", "new things in the room"), else the thing to search for."""
     text = text.strip().lower()
-    return "" if text in GENERIC_QUERIES or text.endswith(" room") else text
+    words = [w for w in text.replace("_", " ").split() if w not in {"any", "a", "an", "the", "new", "interesting",
+                                                                     "in", "of", "for", "some", "my", "this"}]
+    return "" if not words or all(w in GENERIC_QUERIES for w in words) else text
 
 
 async def perceive(ctx: SkillContext, query: str | None = None) -> dict[str, Any]:

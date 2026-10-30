@@ -558,3 +558,50 @@ async def test_auto_backend_backoff_prevents_repeated_failed_requests():
 
     recovered = AutoBackend(Healthy())
     assert (await recovered.chat([])).content == "ok" and recovered.last_used_backend == "llamacpp:test"
+
+
+async def test_reply_claiming_an_action_without_a_tool_is_nudged_once():
+    # "turn around" again: the model answers from history instead of acting; the nudge makes it act.
+    result, backend, probe = await run([
+        "I've turned around again! What next?",
+        {"call": "move", "args": {"direction": "forward", "distance_cm": 10}},
+        "Done, I moved.",
+    ])
+    assert probe.ran == [("move", {"direction": "forward", "distance_cm": 10.0})]
+    assert result.say == "Done, I moved."
+    assert "No tool was called" in backend.requests[1]["messages"][-1]["content"]
+
+
+async def test_nudge_happens_at_most_once_and_plain_chat_is_untouched():
+    result, backend, _ = await run(["I'm turning around now!", "I'm turning around now!"])
+    assert len(backend.requests) == 2 and result.say == "I'm turning around now!"
+    result, backend, _ = await run(["Hello! I'm Sprocket. Your name is Deniz."])
+    assert len(backend.requests) == 1
+
+
+async def test_refusing_an_ability_the_robot_has_is_nudged():
+    _, backend, _ = await run(["I'm sorry, I can't make a sad face right now.", "Okay!"])
+    assert len(backend.requests) == 2
+
+
+async def test_stale_keepalive_disconnect_is_retried_once():
+    import httpx
+
+    from robot.cognition.llamacpp import LlamaCppBackend
+    from robot.core.config import LLMConfig
+
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+
+    client = LlamaCppBackend(LLMConfig(auto_start_server=False))
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://127.0.0.1")
+    try:
+        assert (await client.chat([])).content == "hi" and calls["n"] == 2
+    finally:
+        await client.close()

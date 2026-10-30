@@ -246,23 +246,17 @@ class ActionExecutor:
         return result
 
     def _timeout_for(self, tool: str, args: dict) -> float:
+        """A watchdog, not a schedule: twice the nominal duration plus slack for slow ticks and wheel slip."""
         caps = self.registry.caps
         if tool == "drive":
-            return min(
-                30.0,
-                max(
-                    self.default_timeout_s,
-                    args["distance_mm"] / args.get("speed_mm_s", caps.default_linear_speed_mm_s) + 1.0,
-                ),
-            )
-        if tool == "spin":
-            return min(
-                30.0,
-                max(self.default_timeout_s, abs(args["angle_deg"]) / caps.default_angular_speed_deg_s + 1.0),
-            )
-        if tool == "perform_trick":
-            return min(30.0, max(self.default_timeout_s, caps.tricks[args["trick"]].duration_s + 5.0))
-        return min(30.0, self.default_timeout_s)
+            nominal = args["distance_mm"] / args.get("speed_mm_s", caps.default_linear_speed_mm_s)
+        elif tool == "spin":
+            nominal = abs(args["angle_deg"]) / caps.default_angular_speed_deg_s
+        elif tool == "perform_trick":
+            nominal = caps.tricks[args["trick"]].duration_s
+        else:
+            return min(30.0, self.default_timeout_s)
+        return min(60.0, max(self.default_timeout_s, 2.0 * nominal + 4.0))
 
     async def _on_action_request(self, event: Event) -> None:
         tool = str(event.payload.get("tool", ""))

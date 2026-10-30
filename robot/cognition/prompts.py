@@ -38,7 +38,9 @@ RULES = """How you work:
 Examples of good plans (always use real tool calls, never write a tool name as text):
 - "what's behind you?": use the turn tool with direction around, then the observe tool, then answer.
 - "look to your left": use turn with direction left.
-- "do a little dance": use express with gesture dance. "make your eyes blue": use set_eye_color.
+- "do a little dance": use express with gesture dance. "make a sad face": use express with emotion sad.
+- "make your eyes blue": use set_eye_color. "drive around the box": use circle_around with target box_1.
+- Every request is new: if asked to turn around again, turn again.
 - "go to the ball" when ball_1 is known: use go_to with target ball_1, then answer.
 - "go behind that box": use go_to with target box_1 and relation behind, then answer.
 - "find my keys": use look_around with query keys, then answer.

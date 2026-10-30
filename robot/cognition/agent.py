@@ -65,6 +65,29 @@ def strip_reasoning(content: str) -> tuple[str, bool]:
     return ("" if leaked else text.strip()), leaked
 
 
+_CLAIM = re.compile(
+    r"\b(?:i've|i have|i'm|i am|i just|i'll|i will|let me|let's|now i|i turned|i moved|i went|i drove|i spun)\b"
+    r"[^.!?]{0,40}?\b(?:turn|spin|spun|mov|go|went|head|driv|drove|circl|look|explor|danc|search|find|found|"
+    r"approach|park|rotat|sweep)", re.I)
+_ACTION_TOOLS = {"go_to", "turn_to", "turn", "move", "explore", "look_around", "observe", "express", "tilt_head",
+                 "circle_around"}
+NUDGE = ("(No tool was called this turn, so nothing happened. You have tools for moving, looking and showing "
+         "feelings. If the request needs an action, call the tool "
+         "for it now; otherwise answer without claiming an action.)")
+
+
+_REFUSAL = re.compile(
+    r"\bi (?:can't|cannot|can not|am not able to|am unable to|don't know how to)\b[^.!?]{0,40}?\b(?:face|danc|turn|"
+    r"spin|mov|go|look|smile|nod|wiggle|express|show|circl|drive|explor|find|search|eyes?)", re.I)
+
+
+def claims_unperformed_action(say: str, tool_log: list[dict[str, Any]]) -> bool:
+    """True when the reply claims an action no tool performed, or refuses one the robot has a tool for."""
+    if any(e["tool"] in _ACTION_TOOLS for e in tool_log):
+        return False
+    return bool(_CLAIM.search(say or "") or _REFUSAL.search(say or ""))
+
+
 _CALL_TOKENS = re.compile(r"<\|tool_call_(?:start|end)\|>|</?think>|```(?:python|json)?")
 
 
@@ -143,6 +166,7 @@ class AgentLoop:
         transcript: list[dict[str, Any]] = []
         attempts: dict[str, int] = {}
         failures = 0
+        nudged = False
         for step in range(self.config.max_steps):
             ctx.check()
             if time.monotonic() - started > self.config.timeout_s:
@@ -182,6 +206,14 @@ class AgentLoop:
                     except BackendUnavailable:
                         pass
                     messages.pop()
+                if not nudged and claims_unperformed_action(result.say, result.tool_log):
+                    # The model narrated an action instead of doing it (or repeated an old reply).
+                    nudged = True
+                    messages.append({"role": "assistant", "content": reply.content})
+                    messages.append({"role": "user", "content": NUDGE})
+                    await self._emit("cognition.nudged", {"reply": result.say[:200]})
+                    result.say = ""
+                    continue
                 break
             messages.append(reply.assistant_message())
             transcript.append(messages[-1])
