@@ -80,9 +80,21 @@ messages, never as text summaries of actions, or it starts *writing* actions ins
 ```bash
 python -m robot                                   # console + dashboard (starts llama-server if needed)
 python scripts/try_robot.py "what do you see?" "go behind that box"
+python scripts/try_robot.py --physics "go to the red ball"   # MuJoCo dynamics: slip, odometry drift
+python scripts/try_autonomy.py --seconds 180 --speed 20      # leave it alone and watch
 python scripts/eval_decisions.py                  # needs llama-server running
-python scripts/eval_scenarios.py --backend llamacpp --no-server-start --seeds 1
+python scripts/eval_scenarios.py --backend llamacpp --no-server-start --seeds 2
+python -m pytest -q                               # 350 tests, no model needed
 ```
+
+The dashboard (http://127.0.0.1:8090) shows the robot's own spatial map (with an optional
+"sim truth" overlay), every model call and skill result with the camera frame and detection boxes it
+saw, and the drives that wake it when idle.
+
+Two simulated bodies exist: `SimBody` (kinematic, perfect odometry, fast; the default) and
+`PhysicsBody` (`runtime.body_backend: physics`): MuJoCo dynamics with wheel friction, pushable
+objects, a contact bumper and noisy encoder/IMU odometry, so the robot's map drifts the way a real
+one would. The camera always renders from the true pose; the robot only knows its estimate.
 
 `llama-server` must be started with the vision projector, `--jinja` and two slots
 (`-np 2 -c 16384`): one slot keeps the agent's prompt cache, the other serves detection requests.
