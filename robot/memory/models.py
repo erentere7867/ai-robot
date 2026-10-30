@@ -34,6 +34,7 @@ class MemoryRecord:
     supersedes: str | None = None
     sensitivity: str = "shared"
     updated_at: float = 0.0
+    importance: float = 0.5
 
     @property
     def is_active(self) -> bool:
@@ -52,6 +53,7 @@ class MemoryRecord:
             "supersedes": self.supersedes,
             "sensitivity": self.sensitivity,
             "updated_at": self.updated_at,
+            "importance": self.importance,
         }
 
 
@@ -85,3 +87,4 @@ class MemoryProposal:
     subject: str | None = None
     provenance: MemoryProvenance = MemoryProvenance.USER_EXPLICIT
     confidence: float = 1.0
+    importance: float | None = None
