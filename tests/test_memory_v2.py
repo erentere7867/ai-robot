@@ -732,6 +732,7 @@ async def test_harness_learns_name_from_plain_statement_and_recalls_after_restar
     clock = ReplayClock(T0)
     cfg = RobotConfig.from_yaml()
     cfg.database_path = tmp_path / "harness.db"
+    cfg.spatial_map_path = tmp_path / "map.json"
     cfg.record_events = False
     cfg.llm.backend = "null"
 
@@ -748,7 +749,13 @@ async def test_harness_learns_name_from_plain_statement_and_recalls_after_restar
         await first.stop()
 
     clock.advance(10.0)
-    second = RobotHarness(cfg, clock=clock)
+    from robot.cognition.backend import ScriptedBackend, message_text
+
+    # The model can only answer from what the harness puts in its prompt: the name must be there.
+    def answer(messages, _tools):
+        return "Your name is Deniz!" if "Deniz" in message_text(messages[-1]) else "I don't know."
+
+    second = RobotHarness(cfg, clock=clock, backend=ScriptedBackend(default=answer))
     await second.start()
     try:
         reply = await second.arbiter.handle_user_turn("What's my name?")
