@@ -82,7 +82,7 @@ def recover_text_tool_calls(content: str, tool_names: set[str]) -> list[ToolCall
             return []
         try:
             args = {kw.arg: ast.literal_eval(kw.value) for kw in node.keywords if kw.arg}
-        except ValueError:
+        except (ValueError, TypeError):  # TypeError: unhashable literal keys such as {[1]: 2}
             return []
         calls.append(ToolCall(f"recovered_{i}", node.func.id, args))
     return calls
@@ -116,7 +116,9 @@ class AgentLoop:
     async def run(self, messages: list[dict[str, Any]], ctx: SkillContext, *, background: bool) -> TurnResult:
         result = TurnResult(say="")
         started = time.monotonic()
-        first_new = len(messages)
+        # This turn's calls and results, kept apart from `messages`: _fit may delete or merge entries
+        # there, so slicing `messages` by a start index could cut a call from its result.
+        transcript: list[dict[str, Any]] = []
         attempts: dict[str, int] = {}
         failures = 0
         for step in range(self.config.max_steps):
@@ -151,6 +153,7 @@ class AgentLoop:
                 result.say = reply.content
                 break
             messages.append(reply.assistant_message())
+            transcript.append(messages[-1])
             stop_batch = False
             for call in reply.tool_calls:
                 if stop_batch:
@@ -174,6 +177,7 @@ class AgentLoop:
                     attempts[key] = attempts.get(key, 0) + 1
                 messages.append({"role": "tool", "tool_call_id": call.id,
                                  "content": json.dumps(outcome.to_model(), ensure_ascii=False)})
+                transcript.append(messages[-1])
             if ctx.attached_image is not None:
                 self._attach_image(messages, ctx.attached_image.data_url, reply.tool_calls[-1].name)
                 ctx.attached_image = None
@@ -188,7 +192,7 @@ class AgentLoop:
             result.say = "" if background else "I ran out of steps before finishing."
         result.next_wake_s = ctx.wake_request_s
         result.expression = dict(ctx.expression)
-        result.transcript = [m for m in messages[first_new:] if m.get("role") in ("assistant", "tool")]
+        result.transcript = transcript
         result.say = speakable(result.say, ctx.spatial_map.objects if ctx.spatial_map else {})
         return result
 

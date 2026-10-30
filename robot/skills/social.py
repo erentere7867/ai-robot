@@ -43,7 +43,9 @@ async def remember(ctx: SkillContext, fact: str) -> SkillResult:
         outcome = store.apply(MemoryProposal("remember", normalize_fact_text(fact), infer_subject(fact),
                                              MemoryProvenance.MODEL_PROPOSED, 0.8))
     await ctx.emit("memory.updated", outcome)
-    ok = bool(outcome.get("ok", outcome.get("status") not in ("rejected", "blocked", "tombstoned")))
+    # MemoryStore.apply reports a forgotten topic as "blocked_by_tombstone".
+    ok = bool(outcome.get("ok", outcome.get("status") not in ("rejected", "blocked", "tombstoned",
+                                                               "blocked_by_tombstone")))
     return SkillResult(ok, "Saved to long-term memory." if ok else f"Not saved: {outcome.get('status', 'rejected')}.")
 
 

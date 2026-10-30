@@ -772,6 +772,21 @@ class SimulationSandbox:
             if self._is_occluded(obj, cam_x, cam_y):
                 continue
 
+            # The reported box is the projection of the object's full 3D extent (as in the rendered image,
+            # whose bottom edge is the object's near side), not a centre-depth approximation.
+            corners = []
+            for px, py, pz in self._extent_points(obj):
+                ex, ey, ez = px - cam_x, py - cam_y, pz - cam_z
+                erx, ery = ex * cos_y + ey * sin_y, -ex * sin_y + ey * cos_y
+                efwd = erx * cos_p + ez * sin_p
+                if efwd <= 1.0:
+                    corners = []
+                    break
+                corners.append((cx + fx * (-ery / efwd), cy - fy * ((-erx * sin_p + ez * cos_p) / efwd)))
+            if corners:
+                x1, x2 = int(round(min(c[0] for c in corners))), int(round(max(c[0] for c in corners)))
+                y1, y2 = int(round(min(c[1] for c in corners))), int(round(max(c[1] for c in corners)))
+
             u_px = max(0, min(w - 1, int(round(u_f))))
             v_px = max(0, min(h - 1, int(round(v_f))))
             u_norm = round(u_px / float(w), 3)
@@ -803,6 +818,24 @@ class SimulationSandbox:
 
         visible.sort(key=lambda d: d.distance_mm)
         return visible
+
+    @staticmethod
+    def _extent_points(obj: SandboxObject) -> list[tuple[float, float, float]]:
+        """Surface points whose projections bound the image of the object's (convex) shape."""
+        z0, z1 = obj.z_mm, obj.z_mm + obj.height_mm
+        hw, hd = 0.5 * obj.width_mm, 0.5 * obj.depth_mm
+        if obj.shape == "box":
+            return [(obj.x_mm + sx * hw, obj.y_mm + sy * hd, z)
+                    for sx in (-1.0, 1.0) for sy in (-1.0, 1.0) for z in (z0, z1)]
+        ring = [(math.cos(math.pi * k / 12.0), math.sin(math.pi * k / 12.0)) for k in range(24)]
+        if obj.shape == "cylinder":
+            return [(obj.x_mm + c * hw, obj.y_mm + s * hd, z) for c, s in ring for z in (z0, z1)]
+        zc, hz = 0.5 * (z0 + z1), 0.5 * obj.height_mm
+        points = [(obj.x_mm, obj.y_mm, z0), (obj.x_mm, obj.y_mm, z1)]
+        for lat in (-67.5, -45.0, -22.5, 0.0, 22.5, 45.0, 67.5):
+            cl, sl = math.cos(math.radians(lat)), math.sin(math.radians(lat))
+            points.extend((obj.x_mm + c * hw * cl, obj.y_mm + s * hd * cl, zc + hz * sl) for c, s in ring)
+        return points
 
     def _is_occluded(self, target: SandboxObject, cam_x: float, cam_y: float) -> bool:
         """True if a nearer, sufficiently tall object blocks the camera's line of sight to `target`."""

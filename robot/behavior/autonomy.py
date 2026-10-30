@@ -199,7 +199,8 @@ class AutonomyController:
         urgent = self.drives.urgent()
         if scheduled:
             trigger, text = "scheduled_wake", "You asked to think again now."
-        elif now >= self.next_decision_at and urgent is not None:
+        elif now >= self.next_decision_at and urgent is not None and self._wake_at is None:
+            # A requested wake (the wait tool) defers drive wakes until then; outside events still count.
             trigger, text = f"drive:{urgent[0]}", urgent[1]
         elif now >= self.next_decision_at and changed:
             trigger, text = "scene_changed", "Something in front of you just changed or moved."

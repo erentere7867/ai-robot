@@ -342,9 +342,10 @@ def infer_subject(text: str) -> str:
     m_robot = re.match(r"^(?:your|robot'?s)\s+([a-z0-9 '_-]{2,40}?)\s+(?:is|are|was)\s+.+$", cleaned, re.IGNORECASE)
     if m_robot:
         return "robot's " + canonical_subject(m_robot.group(1))
-    # Match patterns like "my favorite color is green" or "My cat's name is Mochi"
+    # Match patterns like "my favorite color is green" or "My cat's name is Mochi". The model writes
+    # "The user's favorite color is green": that must share the subject (and tombstones) of "my ...".
     m = re.match(
-        r"^(?:my|our|the|user'?s?)\s+([a-z0-9 '_-]{2,40}?)\s+(?:is|are|was|equals)\s+.+$",
+        r"^(?:the\s+user'?s|my|our|the|user'?s?)\s+([a-z0-9 '_-]{2,40}?)\s+(?:is|are|was|equals)\s+.+$",
         cleaned,
         re.IGNORECASE,
     )
