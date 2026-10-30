@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import struct
+import zlib
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -12,6 +14,31 @@ from robot.body.hal import BodyPose
 from robot.perception.geometry import CameraModel
 
 
+def encode_png(rgb: np.ndarray) -> bytes:
+    """Fast pure-Python/zlib PNG encoder for an (H, W, 3) uint8 RGB image (~2 ms)."""
+    h, w, _ = rgb.shape
+    filter_col = np.zeros((h, 1), dtype=np.uint8)
+    scanlines = np.hstack([filter_col, np.ascontiguousarray(rgb).reshape(h, w * 3)]).tobytes()
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    idat = zlib.compress(scanlines, level=1)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
+
+
+def crop_png(rgb: np.ndarray, bbox: tuple[float, float, float, float], margin: float = 0.25) -> bytes:
+    """PNG of a normalized box with some context around it (for verifying a detection)."""
+    h, w, _ = rgb.shape
+    x1, y1, x2, y2 = bbox
+    mx, my = (x2 - x1) * margin, (y2 - y1) * margin
+    left, top = int(max(0.0, x1 - mx) * w), int(max(0.0, y1 - my) * h)
+    right, bottom = int(min(1.0, x2 + mx) * w), int(min(1.0, y2 + my) * h)
+    return encode_png(rgb[top:max(bottom, top + 1), left:max(right, left + 1)].copy())
+
+
 @dataclass
 class Frame:
     png_bytes: bytes
@@ -19,6 +46,7 @@ class Frame:
     model: CameraModel
     captured_at: float
     thumbnail: np.ndarray | None = None  # small grayscale image for cheap change detection
+    rgb: np.ndarray | None = field(default=None, repr=False)  # raw pixels, for cropping detections
     _data_url: str | None = field(default=None, init=False, repr=False)
 
     @property
@@ -63,11 +91,8 @@ class SimCamera:
         return getter() if callable(getter) else self.body.pose()
 
     def capture(self) -> Frame:
-        from robot.world.sandbox import _encode_rgb_to_png_bytes
-
         rgb = self.sandbox.render_head_rgb(self._true_pose())
-        return Frame(_encode_rgb_to_png_bytes(rgb), self.body.pose(), self.model, self.clock.monotonic(),
-                     _thumbnail(rgb))
+        return Frame(encode_png(rgb), self.body.pose(), self.model, self.clock.monotonic(), _thumbnail(rgb), rgb)
 
     def thumbnail(self) -> np.ndarray:
         return _thumbnail(self.sandbox.render_head_rgb(self._true_pose()))

@@ -6,12 +6,13 @@ The detector is model-agnostic: it accepts 0..1 fractions too and validates ever
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from dataclasses import dataclass
 
 from robot.cognition.backend import InferenceBackend
-from robot.perception.camera import Frame
+from robot.perception.camera import Frame, crop_png
 
 DETECT_ALL_PROMPT = (
     "Detect every distinct physical object in this image (ignore the floor, walls and sky). "
@@ -117,5 +118,19 @@ class VLMDetector:
         result = await self.backend.chat(messages, max_tokens=self.max_tokens)
         detections = parse_detections(result.content)
         if query:
-            detections = [Detection(d.label if d.label != "object" else query, d.bbox) for d in detections]
+            # "Detect every duck" is a leading question: a small VLM often boxes *something*. Each hit is
+            # confirmed on a crop with a neutral yes/no question before the robot believes it.
+            detections = [Detection(d.label if d.label != "object" else query, d.bbox) for d in detections[:3]]
+            detections = [d for d in detections if await self.verify(frame, d.bbox, query)]
         return detections
+
+    async def verify(self, frame: Frame, bbox: tuple[float, float, float, float], query: str) -> bool:
+        if frame.rgb is None:
+            return True  # nothing to crop (e.g. a test frame); keep the detection
+        url = "data:image/png;base64," + base64.b64encode(crop_png(frame.rgb, bbox)).decode("ascii")
+        self.calls += 1
+        result = await self.backend.chat([{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": url}},
+            {"type": "text", "text": f"Is this a {query}? Answer only yes or no."},
+        ]}], max_tokens=4)
+        return result.content.strip().lower().startswith("yes")

@@ -343,3 +343,22 @@ def test_render_for_prompt_lists_nearest_first_and_places():
     lines = text.splitlines()
     assert lines[1].startswith("- ball_0 (ball): 0.3 m behind me")
     assert "...and 2 more farther away" in text and "Places: start (here)." in text
+
+
+async def test_targeted_detections_are_confirmed_on_a_crop() -> None:
+    import numpy as np
+
+    from robot.cognition.backend import ScriptedBackend
+    from robot.perception.camera import Frame, encode_png
+    from robot.perception.detector import VLMDetector
+
+    rgb = np.zeros((48, 64, 3), dtype=np.uint8)
+    frame = Frame(encode_png(rgb), BodyPose(), CameraModel(64, 48), 0.0, rgb=rgb)
+    boxes = '[{"label": "yellow duck", "bbox": [100, 100, 300, 300]}, {"label": "yellow duck", "bbox": [600, 500, 800, 700]}]'
+    backend = ScriptedBackend([boxes, "No.", "Yes."])
+    found = await VLMDetector(backend).detect(frame, "yellow duck")
+    assert [d.bbox for d in found] == [(0.6, 0.5, 0.8, 0.7)]  # the first box was a leading-question false hit
+    assert backend.requests[1]["messages"][0]["content"][1]["text"] == "Is this a yellow duck? Answer only yes or no."
+    # A general inventory is not double-checked.
+    backend = ScriptedBackend([boxes])
+    assert len(await VLMDetector(backend).detect(frame)) == 2

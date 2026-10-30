@@ -5,11 +5,9 @@ from __future__ import annotations
 import atexit
 import base64
 import math
-import struct
 import subprocess
 import sys
 import threading
-import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +19,7 @@ from robot.body.hal import BodyPose
 from robot.core.bus import EventBus
 from robot.core.config import PROJECT_ROOT
 from robot.core.events import Event
+from robot.perception.camera import encode_png
 from robot.world.state import relative_direction_label
 
 # Shared lock for MuJoCo Renderer calls
@@ -53,19 +52,7 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     return (56, 189, 248)
 
 
-def _encode_rgb_to_png_bytes(rgb: np.ndarray) -> bytes:
-    """Fast pure-Python/zlib PNG encoder for an (H, W, 3) uint8 RGB image (~2 ms)."""
-    h, w, _ = rgb.shape
-    filter_col = np.zeros((h, 1), dtype=np.uint8)
-    scanlines = np.hstack([filter_col, rgb.reshape(h, w * 3)]).tobytes()
-
-    def _chunk(tag: bytes, data: bytes) -> bytes:
-        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
-
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-    idat = zlib.compress(scanlines, level=1)
-    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
+_encode_rgb_to_png_bytes = encode_png
 
 
 def _get_or_init_mujoco_gl(xml_path: Path, head_w: int, head_h: int, over_w: int, over_h: int) -> dict[str, Any]:
