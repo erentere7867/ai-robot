@@ -67,7 +67,7 @@ class ControlledBackend:
         self.calls = calls or [("move", {"direction": "forward", "distance_cm": 30})]
         self.ignore_cancel = ignore_cancel
 
-    async def chat(self, messages, *, tools=None, max_tokens=None):
+    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto"):
         if messages and messages[-1].get("role") == "tool":
             return ChatResult("Done.", backend_name=self.name)
         self.entered.set()

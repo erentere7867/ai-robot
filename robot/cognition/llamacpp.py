@@ -95,7 +95,7 @@ class LlamaCppBackend:
         except Exception:
             return False
 
-    async def chat(self, messages, *, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
         payload: dict[str, Any] = {
             "messages": messages,
             "temperature": self.config.temperature,
@@ -105,7 +105,7 @@ class LlamaCppBackend:
             "chat_template_kwargs": {"enable_thinking": False},
         }
         if tools:
-            payload.update(tools=tools, tool_choice="auto")
+            payload.update(tools=tools, tool_choice=tool_choice)
         t0 = time.perf_counter()
         async with self._lock:
             for attempt in range(2):
@@ -180,11 +180,11 @@ class AutoBackend:
     async def is_available(self) -> bool:
         return await self.primary.is_available()
 
-    async def chat(self, messages, *, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
         if time.monotonic() < self._retry_at:
             raise BackendUnavailable("Model recently failed; waiting before retry")
         try:
-            result = await self.primary.chat(messages, tools=tools, max_tokens=max_tokens)
+            result = await self.primary.chat(messages, tools=tools, max_tokens=max_tokens, tool_choice=tool_choice)
         except BackendUnavailable:
             self._failures += 1
             self._retry_at = time.monotonic() + min(30.0, 2.0 ** min(self._failures, 5))

@@ -133,7 +133,7 @@ class GatedBackend(ScriptedBackend):
         self.gated_calls = gated_calls
         self.ignore_cancel = ignore_cancel
 
-    async def chat(self, messages, *, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
         if tools is not None and self.gated_calls > 0:
             self.gated_calls -= 1
             self.entered.set()

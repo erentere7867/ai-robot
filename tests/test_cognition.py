@@ -264,7 +264,7 @@ async def test_backend_unavailable_reports_offline_and_never_acts():
 
 async def test_backend_failing_mid_turn_keeps_what_already_happened():
     class Flaky(ScriptedBackend):
-        async def chat(self, messages, *, tools=None, max_tokens=None):
+        async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto"):
             if self.requests:
                 raise BackendUnavailable("server went away")
             return await super().chat(messages, tools=tools, max_tokens=max_tokens)
@@ -605,3 +605,10 @@ async def test_stale_keepalive_disconnect_is_retried_once():
         assert (await client.chat([])).content == "hi" and calls["n"] == 2
     finally:
         await client.close()
+
+
+async def test_nudge_restates_the_request_and_forces_a_tool_call():
+    _, backend, _ = await run(["I've turned around again!", {"call": "move", "args": {"direction": "forward"}},
+                               "Done."], messages=request("turn around"))
+    assert [r["tool_choice"] for r in backend.requests] == ["auto", "required", "auto"]
+    assert '"turn around"' in backend.requests[1]["messages"][-1]["content"]

@@ -52,6 +52,7 @@ class InferenceBackend(Protocol):
         *,
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: str = "auto",  # "required" forces a tool call
     ) -> ChatResult: ...
 
 
@@ -68,7 +69,7 @@ class UnavailableBackend:
     async def is_available(self) -> bool:
         return False
 
-    async def chat(self, messages, *, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
         raise BackendUnavailable("No language model is available")
 
 
@@ -80,7 +81,7 @@ class NullBackend:
     async def is_available(self) -> bool:
         return True
 
-    async def chat(self, messages, *, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
         if tools is None:  # perception requests (detector) get an empty detection list
             return ChatResult("[]", backend_name=self.name, latency_ms=1.0)
         last = messages[-1] if messages else {}
@@ -114,8 +115,9 @@ class ScriptedBackend:
     async def is_available(self) -> bool:
         return True
 
-    async def chat(self, messages, *, tools=None, max_tokens=None) -> ChatResult:
-        self.requests.append({"messages": json.loads(json.dumps(messages, default=str)), "tools": tools})
+    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
+        self.requests.append({"messages": json.loads(json.dumps(messages, default=str)), "tools": tools,
+                              "tool_choice": tool_choice})
         entry = self.script.pop(0) if self.script else self.default
         if callable(entry):
             entry = entry(messages, tools)

@@ -71,9 +71,16 @@ _CLAIM = re.compile(
     r"approach|park|rotat|sweep)", re.I)
 _ACTION_TOOLS = {"go_to", "turn_to", "turn", "move", "explore", "look_around", "observe", "express", "tilt_head",
                  "circle_around"}
-NUDGE = ("(No tool was called this turn, so nothing happened. You have tools for moving, looking and showing "
-         "feelings. If the request needs an action, call the tool "
-         "for it now; otherwise answer without claiming an action.)")
+NUDGE = ("(No tool was called, so nothing happened. The request was: \"{request}\". Every request is new, even "
+         "if you did the same before. Call the tool that does it now.)")
+
+
+def request_text(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        content = message.get("content")
+        if message.get("role") == "user" and isinstance(content, str) and "[Situation]" in content:
+            return content.rsplit("]\n", 1)[-1].strip()[:200]
+    return ""
 
 
 _REFUSAL = re.compile(
@@ -167,6 +174,7 @@ class AgentLoop:
         attempts: dict[str, int] = {}
         failures = 0
         nudged = False
+        force_tool = False
         for step in range(self.config.max_steps):
             ctx.check()
             if time.monotonic() - started > self.config.timeout_s:
@@ -175,7 +183,9 @@ class AgentLoop:
                 break
             self._fit(messages)
             try:
-                reply: ChatResult = await self.backend.chat(messages, tools=self._tools)
+                reply: ChatResult = await self.backend.chat(
+                    messages, tools=self._tools, tool_choice="required" if force_tool else "auto")
+                force_tool = False
             except BackendUnavailable as exc:
                 result.status = "unavailable"
                 result.say = "" if background else "My thinking model is offline right now, so I can't do that."
@@ -207,10 +217,11 @@ class AgentLoop:
                         pass
                     messages.pop()
                 if not nudged and claims_unperformed_action(result.say, result.tool_log):
-                    # The model narrated an action instead of doing it (or repeated an old reply).
-                    nudged = True
+                    # The model narrated (or refused) an action instead of doing it, often by copying an
+                    # earlier reply. Ask once more and make the next answer a tool call.
+                    nudged = force_tool = True
                     messages.append({"role": "assistant", "content": reply.content})
-                    messages.append({"role": "user", "content": NUDGE})
+                    messages.append({"role": "user", "content": NUDGE.format(request=request_text(messages))})
                     await self._emit("cognition.nudged", {"reply": result.say[:200]})
                     result.say = ""
                     continue
