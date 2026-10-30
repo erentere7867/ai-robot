@@ -1,7 +1,7 @@
 param(
     [int]$Port = 8080,
     [int]$GpuLayers = 99,
-    [int]$CtxSize = 4096,
+    [int]$CtxSize = 16384,
     # Kept for backward compatibility: the vision projector is now always loaded when present.
     [switch]$IncludeProjector,
     [string]$ServerBin = (Join-Path $env:USERPROFILE "robot-runtime\llama.cpp\llama-server.exe"),
@@ -25,7 +25,7 @@ $ArgsList = @(
     "--host", "127.0.0.1",
     "-ngl", "$GpuLayers",
     "-c", "$CtxSize",
-    "-np", "1",
+    "-np", "2",  # one slot keeps the agent prompt cached, the other serves detection
     "--jinja",
     "--reasoning", "off",
     "--temp", "0"
