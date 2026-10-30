@@ -9,14 +9,50 @@ from collections import deque
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
+import numpy as np
+
 from robot.body.hal import BodyPose
 from robot.core.events import Event, EventPriority
 from robot.core.service import ServiceHealth
+from robot.world.spatial_map import CELL_MM
 
 if TYPE_CHECKING:
     from robot.main import RobotHarness
 
 logger = logging.getLogger(__name__)
+
+# Events that explain a decision. They are tapped synchronously (cheap deque appends) so none is
+# lost to the lossy dashboard queue, and so the camera frame of a view can be paired with it.
+THINKING_PATTERNS = (
+    "cognition.*",
+    "skill.*",
+    "perception.view",
+    "memory.retrieved",
+    "robot.response",
+    "turn.cancelled",
+    "reflex.triggered",
+)
+MAX_THINKING_ENTRIES = 240
+KEPT_VIEW_FRAMES = 6
+COVERAGE_DOWNSAMPLE = 2  # spatial-map cells per coverage cell sent to the browser
+
+
+def _clip_text(value: Any, limit: int) -> str:
+    text = str(value if value is not None else "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _clip_json(value: Any, limit: int) -> Any:
+    """A JSON-safe copy of `value`, or a truncated JSON string when its encoding is long."""
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str, allow_nan=False)
+    except (TypeError, ValueError):
+        return _clip_text(value, limit)
+    return json.loads(text) if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _query_flag(query: dict[str, list[str]], key: str) -> bool:
+    return (query.get(key) or [""])[0].strip().lower() in {"1", "true", "yes", "on"}
 
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -963,6 +999,271 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     overflow: hidden;
     text-overflow: ellipsis;
   }
+
+  /* "Why" row: spatial map, thinking stream, drives */
+  .insight-grid {
+    display: grid;
+    grid-template-columns: minmax(300px, 1fr) minmax(0, 1.55fr) 340px;
+    gap: 16px;
+    padding: 0 16px 16px;
+    max-width: 1920px;
+    margin: 0 auto;
+    align-items: start;
+  }
+  .insight-grid > .panel-card { min-width: 0; }
+  @media (max-width: 1280px) {
+    .insight-grid { grid-template-columns: 1fr 1fr; }
+    .insight-grid > #thinkPanel { grid-column: 1 / -1; order: -1; }
+  }
+  @media (max-width: 760px) {
+    .insight-grid { grid-template-columns: 1fr; padding: 0 12px 12px; }
+  }
+  .toggle-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+  }
+  .toggle-label input { margin: 0; padding: 0; accent-color: var(--amber); }
+  .toggle-row { display: flex; gap: 12px; align-items: center; }
+  .map-canvas-wrap {
+    width: 100%;
+    max-width: 520px;
+    margin: 0 auto;
+    aspect-ratio: 1 / 1;
+    background: #05080f;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  canvas#mapCanvas { width: 100%; height: 100%; display: block; }
+  .map-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+  .legend-swatch {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    margin-right: 4px;
+    vertical-align: -1px;
+  }
+  .stat-line { font-size: 11px; color: var(--text-secondary); font-family: Consolas, monospace; }
+  .stat-line strong { color: var(--text-main); }
+  .prompt-details summary {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .prompt-details pre {
+    margin: 6px 0 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 10px;
+    color: var(--text-secondary);
+    background: #080d18;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .goal-line {
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: #090e1a;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    word-break: break-word;
+  }
+  .goal-line strong { color: var(--text-main); }
+  .think-split {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    gap: 12px;
+    align-items: start;
+  }
+  @media (max-width: 980px) {
+    .think-split { grid-template-columns: 1fr; }
+  }
+  .frame-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    background: #05080f;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  canvas#viewCanvas { width: 100%; height: 100%; display: block; }
+  .frame-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 12px;
+    font-size: 11px;
+    font-style: italic;
+    color: var(--text-muted);
+  }
+  .frame-caption {
+    margin-top: 6px;
+    font-size: 10px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    font-family: Consolas, monospace;
+    word-break: break-word;
+  }
+  .frame-caption strong { color: var(--text-secondary); }
+  .think-log {
+    height: 420px;
+    overflow-y: auto;
+    background: #080d18;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 11px;
+  }
+  .turn-card {
+    border: 1px solid #1c2c4a;
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    background: #0b1222;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .turn-card.origin-autonomous { border-left-color: var(--violet); }
+  .turn-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; color: var(--text-main); }
+  .turn-badge {
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(0, 240, 255, 0.12);
+    color: var(--accent);
+  }
+  .origin-autonomous .turn-badge { background: rgba(139, 92, 246, 0.18); color: #c4b5fd; }
+  .turn-trigger { font-size: 10px; color: var(--amber); font-family: Consolas, monospace; }
+  .turn-time { margin-left: auto; font-size: 10px; color: var(--text-muted); }
+  .turn-objective { color: var(--text-secondary); font-style: italic; word-break: break-word; }
+  .step {
+    padding: 3px 6px;
+    border-radius: 4px;
+    background: #0d1526;
+    word-break: break-word;
+    color: var(--text-secondary);
+  }
+  .step-k {
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    margin-right: 4px;
+    color: var(--accent);
+  }
+  .step-muted { color: var(--text-muted); font-size: 10px; }
+  .step code {
+    font-family: Consolas, monospace;
+    font-size: 10px;
+    color: #cbd5e1;
+  }
+  .step-skill.ok .step-k { color: var(--emerald); }
+  .step-skill.fail .step-k { color: var(--rose); }
+  .step-skill.running .step-k { color: var(--amber); }
+  .step-view .step-k { color: #38bdf8; }
+  .step-mem .step-k { color: #c4b5fd; }
+  .step-warn .step-k { color: var(--rose); }
+  .step-say { color: var(--text-main); font-style: italic; }
+  .step-link {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    font-size: 10px;
+    margin-left: 4px;
+  }
+  .turn-final {
+    padding: 4px 6px;
+    border-radius: 4px;
+    background: rgba(16, 185, 129, 0.08);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+    color: var(--text-main);
+    word-break: break-word;
+  }
+  .turn-final.status-bad {
+    background: rgba(244, 63, 94, 0.08);
+    border-color: rgba(244, 63, 94, 0.3);
+  }
+  .turn-final .step-k { color: var(--emerald); }
+  .turn-final.status-bad .step-k { color: var(--rose); }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 5px; }
+  .mode-pill {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    background: #0d1526;
+  }
+  .mode-pill.on { color: var(--emerald); border-color: rgba(16, 185, 129, 0.45); }
+  .mode-pill.warn { color: var(--amber); border-color: rgba(245, 158, 11, 0.45); }
+  .mode-pill.busy { color: #c4b5fd; border-color: rgba(139, 92, 246, 0.5); }
+  .kv-list { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 11px; }
+  .kv-list dt { color: var(--text-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+  .kv-list dd { margin: 0; color: var(--text-main); word-break: break-word; }
+  .drive-row { display: flex; flex-direction: column; gap: 3px; }
+  .drive-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+  }
+  .drive-head .num { font-family: Consolas, monospace; color: var(--text-main); text-transform: none; }
+  .drive-track {
+    position: relative;
+    height: 8px;
+    background: #141e30;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .drive-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--emerald) 0%, var(--accent) 100%);
+    border-radius: 4px;
+  }
+  .drive-fill.urgent { background: linear-gradient(90deg, var(--amber) 0%, #ff8c00 100%); }
+  .drive-fill.low { background: linear-gradient(90deg, var(--rose) 0%, #ff0055 100%); }
+  .drive-thresh {
+    position: absolute;
+    top: -1px;
+    bottom: -1px;
+    width: 2px;
+    background: #f1f5f9;
+    opacity: 0.75;
+  }
 </style>
 </head>
 <body>
@@ -1289,9 +1590,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <button class="dpad-btn" onclick="runAction('drive',{direction:'forward',distance_mm:250})">▲ Fwd 250mm</button>
           </div>
           <div class="dpad-row">
-            <button class="dpad-btn" onclick="runAction('turn',{angle_deg:30})">◀ Turn 30°</button>
+            <button class="dpad-btn" onclick="runAction('spin',{angle_deg:30})">◀ Turn 30°</button>
             <button class="dpad-btn dpad-stop" onclick="runAction('stop',{})">STOP</button>
-            <button class="dpad-btn" onclick="runAction('turn',{angle_deg:-30})">Turn 30° ▶</button>
+            <button class="dpad-btn" onclick="runAction('spin',{angle_deg:-30})">Turn 30° ▶</button>
           </div>
           <div class="dpad-row">
             <button class="dpad-btn" onclick="runAction('drive',{direction:'backward',distance_mm:200})">▼ Back 200mm</button>
@@ -1345,6 +1646,85 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 </main>
 
+<!-- "Why did it do that?" row: the robot's own map, its reasoning stream, and its drives -->
+<section class="insight-grid">
+  <!-- Spatial map (robot's own, odometry frame) -->
+  <div class="panel-card" id="mapPanel">
+    <div class="panel-header">
+      <div class="panel-title">
+        <svg class="panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
+        SPATIAL MAP (ROBOT'S OWN)
+      </div>
+      <div class="toggle-row">
+        <label class="toggle-label" title="Shade floor the camera has looked at"><input type="checkbox" id="coverageToggle" checked /> COVERAGE</label>
+        <label class="toggle-label" title="Overlay simulator ground truth (not known to the robot)"><input type="checkbox" id="truthToggle" /> SIM TRUTH</label>
+      </div>
+    </div>
+    <div class="map-canvas-wrap">
+      <canvas id="mapCanvas" width="520" height="520"></canvas>
+    </div>
+    <div class="map-legend">
+      <span><span class="legend-swatch" style="background:#38bdf8"></span>tracked object (fades with age, dashed = from earlier session)</span>
+      <span><span class="legend-swatch" style="background:#f43f5e"></span>ToF occupied</span>
+      <span><span class="legend-swatch" style="background:rgba(0,240,255,0.25)"></span>camera coverage</span>
+      <span><span class="legend-swatch" style="background:#f59e0b"></span>place</span>
+      <span><span class="legend-swatch" style="border:1px dashed #94a3b8"></span>sim truth</span>
+    </div>
+    <div class="stat-line" id="mapStats">Loading map...</div>
+    <div class="item-list-box" id="mapObjList"><div class="empty-hint">No tracked objects yet</div></div>
+    <details class="prompt-details">
+      <summary>What the model is told about the world</summary>
+      <pre id="mapPromptText"></pre>
+    </details>
+  </div>
+
+  <!-- Thinking stream -->
+  <div class="panel-card" id="thinkPanel">
+    <div class="panel-header">
+      <div class="panel-title">
+        <svg class="panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.74V17h8v-2.26A7 7 0 0 0 12 2z"/></svg>
+        THINKING (WHY IT ACTED)
+      </div>
+      <div class="panel-tag" id="thinkStatusTag">IDLE</div>
+    </div>
+    <div class="goal-line" id="thinkGoal">No goal yet.</div>
+    <div class="think-split">
+      <div>
+        <div class="frame-wrap">
+          <canvas id="viewCanvas" width="512" height="384"></canvas>
+          <div class="frame-empty" id="viewEmpty">No camera view yet: the robot has not looked (observe / look_around).</div>
+        </div>
+        <div class="frame-caption" id="viewCaption"></div>
+      </div>
+      <div class="think-log" id="thinkLog"><div class="empty-hint">Waiting for the first turn...</div></div>
+    </div>
+  </div>
+
+  <!-- Drives & autonomy -->
+  <div class="panel-card" id="drivesPanel">
+    <div class="panel-header">
+      <div class="panel-title">
+        <svg class="panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        DRIVES &amp; AUTONOMY
+      </div>
+      <div class="panel-tag" id="autoModeTag">—</div>
+    </div>
+    <div class="pill-row" id="autoPills"></div>
+    <div class="btn-group-row">
+      <button class="btn btn-sm" onclick="setAutonomy({enabled:true,paused:false})">On / resume</button>
+      <button class="btn btn-sm" onclick="setAutonomy({enabled:false})">Off</button>
+      <button class="btn btn-sm" onclick="setAutonomy({paused:true})">Stay here</button>
+      <button class="btn btn-sm" onclick="setAutonomy({quiet:true})">Quiet</button>
+      <button class="btn btn-sm" onclick="setAutonomy({quiet:false})">Share</button>
+    </div>
+    <dl class="kv-list" id="autoDetails"></dl>
+    <div class="section-subtitle">DRIVES (bar = level, white line = threshold)</div>
+    <div id="driveBars" style="display:flex;flex-direction:column;gap:8px;"></div>
+    <div class="section-subtitle">BATTERY</div>
+    <div id="batteryBox"></div>
+  </div>
+</section>
+
 <script>
 let targetFace = null;
 let animFace = null;
@@ -1356,6 +1736,8 @@ let pendingUserMsg = null;
 let isRefreshing = false;
 let lastCamUrl = '';
 const htmlCache = {};
+// Panels poll / redraw only while on screen (IntersectionObserver), to keep a Pi's CPU free.
+const panelVisible = {face: true, map: true, think: true, drives: true};
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1677,12 +2059,12 @@ function drawRadar(world, obsList) {
 function renderChatBox(turns) {
   window._lastTurns = turns;
   let html = (turns || []).map(t => {
-    const camVer = t.camera_verification ? ` | cam_check: ${esc(t.camera_verification)}` : '';
     const userLine = t.user ? `<div class="chat-bubble chat-u"><strong>You:</strong> ${esc(t.user)}</div>` : '';
     const label = t.origin === 'autonomous' ? 'Sprocket (Autonomous)' : 'Sprocket';
+    const tools = (t.actions || []).map(a => `${a.tool}${a.ok === false ? ' (failed)' : ''}`).join(', ') || 'none';
     return `${userLine}<div class="chat-bubble chat-r">` +
       `<div><strong>${label}:</strong> ${esc(t.say)}</div>` +
-      `<div class="chat-meta">[emotion:${esc(t.emotion)} | sound:${esc(t.sound)} | actions:${esc(JSON.stringify(t.actions))}${camVer} | ${esc(t.backend)} ${esc(t.latency_ms)}ms]</div></div>`;
+      `<div class="chat-meta">[${esc(t.status || 'completed')} · ${esc(t.steps || 0)} step(s) | tools: ${esc(tools)} | emotion:${esc(t.emotion)} | sound:${esc(t.sound)} | ${esc(t.backend)} ${esc(t.latency_ms)}ms]</div></div>`;
   }).join('');
   if (pendingUserMsg) {
     html += `<div class="chat-bubble chat-u"><strong>You:</strong> ${esc(pendingUserMsg)}</div>` +
@@ -1714,7 +2096,7 @@ function stepClientAnimation() {
       animFace.mouth_open = lerp(animFace.mouth_open || 0.04, targetFace.mouth_open || 0.04, 0.35);
       animFace.mouth_curve = lerp(animFace.mouth_curve || 0.2, targetFace.mouth_curve || 0.2, alpha);
     }
-    drawFace(animFace);
+    if (panelVisible.face) drawFace(animFace);  // no per-frame canvas work while scrolled away
   }
   requestAnimationFrame(stepClientAnimation);
 }
@@ -1875,12 +2257,13 @@ async function refreshState() {
     const a = st.autonomy || {}, g = st.goal || {};
     document.getElementById('initiativeState').textContent =
       `${a.paused ? 'Staying here' : a.enabled ? 'Autonomy on' : 'Autonomy off'} · ${a.reason || ''}` +
-      (g.status === 'continue' ? ` · ${g.phase || 'working'} ${g.target || ''}` : '');
+      (g.status === 'running' ? ` · working on "${(g.objective || '').slice(0, 60)}" (step ${g.step || 0})` : '');
     const autoInd = document.getElementById('autoIndicator');
     if (autoInd) {
       autoInd.style.background = a.paused ? 'var(--amber)' : (a.enabled ? 'var(--accent)' : 'var(--text-muted)');
       autoInd.style.boxShadow = `0 0 8px ${autoInd.style.background}`;
     }
+    if (panelVisible.drives) renderDrives(a, (st.telemetry && st.telemetry.sensors) || {}, g);
 
     // Chat History
     const turns = st.recent_conversations || [];
@@ -1929,8 +2312,546 @@ async function pollLoop() {
   setTimeout(pollLoop, document.hidden ? 1000 : 200);
 }
 
+// ---------------------------------------------------------------------------------------------
+// "Why" panels: the robot's own spatial map, its thinking stream, and its drives.
+// ---------------------------------------------------------------------------------------------
+function observeVisibility(id, key) {
+  const el = document.getElementById(id);
+  if (!el || !('IntersectionObserver' in window)) return;
+  new IntersectionObserver(entries => {
+    panelVisible[key] = entries.some(e => e.isIntersecting);
+  }, {rootMargin: '120px'}).observe(el);
+}
+
+function storageGet(key, fallback) {
+  try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; }
+}
+
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) { /* storage unavailable: keep the default */ }
+}
+
+const COLOR_WORDS = {
+  red: [244, 63, 94], blue: [59, 130, 246], green: [16, 185, 129], yellow: [234, 179, 8],
+  orange: [249, 115, 22], brown: [217, 119, 6], cardboard: [217, 119, 6], tan: [210, 180, 140],
+  beige: [214, 196, 160], purple: [139, 92, 246], violet: [139, 92, 246], lavender: [196, 181, 253],
+  pink: [236, 72, 153], white: [226, 232, 240], black: [100, 116, 139], gray: [148, 163, 184],
+  grey: [148, 163, 184], teal: [20, 184, 166], cyan: [0, 240, 255], gold: [234, 179, 8],
+  silver: [203, 213, 225], magenta: [217, 70, 239],
+};
+const FALLBACK_COLORS = [[56, 189, 248], [52, 211, 153], [251, 191, 36], [244, 114, 182], [167, 139, 250], [45, 212, 191]];
+
+function labelRgb(label) {
+  const words = String(label || '').toLowerCase().match(/[a-z]+/g) || [];
+  for (const w of words) if (COLOR_WORDS[w]) return COLOR_WORDS[w];
+  let h = 0;
+  for (const ch of String(label || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return FALLBACK_COLORS[h % FALLBACK_COLORS.length];
+}
+
+function rgba(rgb, a) { return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`; }
+
+function fmtAge(s) {
+  if (s == null || !isFinite(s)) return '?';
+  if (s < 1) return 'just now';
+  if (s < 90) return `${Math.round(s)}s ago`;
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  return `${Math.round(s / 3600)} h ago`;
+}
+
+function fmtClock(ts) {
+  if (ts == null) return '';
+  if (ts > 1e9) return new Date(ts * 1000).toLocaleTimeString();
+  return `t=${Number(ts).toFixed(1)}s`;
+}
+
+function fmtArgs(args) {
+  if (args == null) return '';
+  if (typeof args !== 'object') return String(args);
+  return Object.entries(args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+}
+
+// ---- Spatial map ------------------------------------------------------------------------------
+let mapText = '';
+let latestMap = null;
+let showTruth = storageGet('dash.simTruth', '0') === '1';
+let showCoverage = storageGet('dash.coverage', '1') === '1';
+
+function mapView(m, W) {
+  const pts = [[m.robot.x_mm, m.robot.y_mm]];
+  (m.objects || []).forEach(o => pts.push([o.x_mm, o.y_mm]));
+  Object.values(m.places || {}).forEach(p => pts.push(p));
+  (m.occupied_cells || []).forEach(p => pts.push(p));
+  if (m.sim_truth) {
+    const h = m.sim_truth.room_half_extent_mm;
+    pts.push([-h, -h], [h, h]);
+  }
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  pts.forEach(([x, y]) => {
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+  });
+  // Fit everything, in coarse steps so the view does not jitter while the robot moves.
+  const half = Math.ceil(Math.max(1000, Math.max(maxX - minX, maxY - minY) / 2 + 400) / 250) * 250;
+  return {vx: Math.round((minX + maxX) / 200) * 100, vy: Math.round((minY + maxY) / 200) * 100,
+          half, scale: (W / 2 - 8) / half};
+}
+
+function renderMap(m) {
+  const c = document.getElementById('mapCanvas');
+  if (!c || !m || !m.robot) return;
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height;
+  const v = mapView(m, W);
+  // Odometry frame drawn with +x (the start heading) up and +y (left) to the left.
+  const S = (x, y) => [W / 2 - (y - v.vy) * v.scale, H / 2 - (x - v.vx) * v.scale];
+  ctx.fillStyle = '#05080f';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'left';
+
+  // 0.5 m grid; the axes through the start point are brighter.
+  ctx.lineWidth = 1;
+  const step = 500;
+  for (let x = Math.floor((v.vx - v.half) / step) * step; x <= v.vx + v.half; x += step) {
+    const sy = S(x, 0)[1];
+    ctx.strokeStyle = x === 0 ? 'rgba(0,240,255,0.2)' : 'rgba(148,163,184,0.08)';
+    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(W, sy); ctx.stroke();
+  }
+  for (let y = Math.floor((v.vy - v.half) / step) * step; y <= v.vy + v.half; y += step) {
+    const sx = S(0, y)[0];
+    ctx.strokeStyle = y === 0 ? 'rgba(0,240,255,0.2)' : 'rgba(148,163,184,0.08)';
+    ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, H); ctx.stroke();
+  }
+
+  // Camera coverage: runs of looked-at cells per row, drawn as single rectangles.
+  const cg = m.coverage_grid;
+  if (showCoverage && cg && cg.bits) {
+    ctx.fillStyle = 'rgba(0,240,255,0.07)';
+    const px = cg.cell_mm * v.scale;
+    for (let i = 0; i < cg.n; i++) {
+      const row = i * cg.n;
+      const x = cg.origin_mm + (i + 0.5) * cg.cell_mm;
+      let j = 0;
+      while (j < cg.n) {
+        if (cg.bits.charCodeAt(row + j) !== 49) { j++; continue; }
+        const start = j;
+        while (j < cg.n && cg.bits.charCodeAt(row + j) === 49) j++;
+        const [sxA, sy] = S(x, cg.origin_mm + start * cg.cell_mm);
+        const sxB = S(x, cg.origin_mm + j * cg.cell_mm)[0];
+        ctx.fillRect(sxB, sy - px / 2, sxA - sxB, px);
+      }
+    }
+  }
+
+  // Range-sensor occupancy.
+  ctx.fillStyle = 'rgba(244,63,94,0.75)';
+  const cpx = Math.max(2, m.cell_mm * v.scale);
+  (m.occupied_cells || []).forEach(([x, y]) => {
+    const [sx, sy] = S(x, y);
+    ctx.fillRect(sx - cpx / 2, sy - cpx / 2, cpx, cpx);
+  });
+
+  // Simulator ground truth (never shown to the robot).
+  if (m.sim_truth) {
+    const t = m.sim_truth, h = t.room_half_extent_mm;
+    ctx.save();
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(148,163,184,0.5)';
+    const [ax, ay] = S(h, h), [bx, by] = S(-h, -h);
+    ctx.strokeRect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay));
+    ctx.font = '10px Consolas, monospace';
+    (t.objects || []).forEach(o => {
+      const [sx, sy] = S(o.x_mm, o.y_mm);
+      ctx.strokeStyle = 'rgba(203,213,225,0.55)';
+      if (o.shape === 'box') {
+        const w = o.depth_mm * v.scale, hh = o.width_mm * v.scale;
+        ctx.strokeRect(sx - w / 2, sy - hh / 2, w, hh);
+      } else {
+        ctx.beginPath();
+        ctx.arc(sx, sy, Math.max(3, 0.5 * Math.max(o.width_mm, o.depth_mm) * v.scale), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(203,213,225,0.55)';
+      ctx.fillText(`sim: ${o.label}`, sx - 20, sy + 18);
+    });
+    if (t.robot) {
+      const [tx, ty] = S(t.robot.x_mm, t.robot.y_mm);
+      ctx.strokeStyle = 'rgba(245,158,11,0.7)';
+      ctx.beginPath(); ctx.arc(tx, ty, 11, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.fillStyle = 'rgba(245,158,11,0.95)';
+    ctx.font = 'bold 11px -apple-system, sans-serif';
+    ctx.fillText('SIM TRUTH overlay (dashed): not known to the robot', 8, H - 10);
+  }
+
+  // Camera field of view and coverage range from the current pose.
+  const r = m.robot;
+  const [rx, ry] = S(r.x_mm, r.y_mm);
+  const hd = r.heading_deg * Math.PI / 180;
+  const fov = ((m.camera && m.camera.hfov_deg) || 65) * Math.PI / 360;
+  const range = ((m.camera && m.camera.coverage_range_mm) || 2200) * v.scale;
+  const phi = -Math.PI / 2 - hd;  // canvas angle of the heading
+  const grad = ctx.createRadialGradient(rx, ry, 4, rx, ry, range);
+  grad.addColorStop(0, 'rgba(0,240,255,0.18)');
+  grad.addColorStop(1, 'rgba(0,240,255,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.moveTo(rx, ry); ctx.arc(rx, ry, range, phi - fov, phi + fov); ctx.closePath(); ctx.fill();
+
+  // Named places.
+  Object.entries(m.places || {}).forEach(([name, p]) => {
+    const [sx, sy] = S(p[0], p[1]);
+    ctx.fillStyle = '#f59e0b';
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 6); ctx.lineTo(sx + 6, sy); ctx.lineTo(sx, sy + 6); ctx.lineTo(sx - 6, sy);
+    ctx.closePath(); ctx.fill();
+    ctx.font = '10px -apple-system, sans-serif';
+    ctx.fillText(name, sx + 8, sy - 6);
+  });
+
+  // Tracked objects: fade with time since last seen; dashed = restored from an earlier session.
+  (m.objects || []).forEach(o => {
+    const [sx, sy] = S(o.x_mm, o.y_mm);
+    const age = o.age_s || 0;
+    const alpha = Math.max(0.25, Math.min(1, 1 - age / 300)) * (o.stale ? 0.7 : 1);
+    const rgb = labelRgb(o.label);
+    const rad = Math.max(5, o.radius_mm * v.scale);
+    ctx.save();
+    if (o.stale) ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 2;
+    ctx.fillStyle = rgba(rgb, 0.28 * alpha);
+    ctx.strokeStyle = rgba(rgb, alpha);
+    ctx.beginPath(); ctx.arc(sx, sy, rad, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = `rgba(241,245,249,${alpha})`;
+    ctx.font = 'bold 11px -apple-system, sans-serif';
+    ctx.fillText(o.id, sx + rad + 4, sy - 2);
+    ctx.fillStyle = `rgba(148,163,184,${alpha})`;
+    ctx.font = '10px -apple-system, sans-serif';
+    ctx.fillText(`${o.label} · ${Math.round((o.confidence || 0) * 100)}% · ${fmtAge(age)}`, sx + rad + 4, sy + 10);
+  });
+
+  // Robot pose estimate and heading.
+  ctx.save();
+  ctx.translate(rx, ry);
+  ctx.rotate(-hd);
+  ctx.fillStyle = '#00f0ff';
+  ctx.shadowColor = '#00f0ff';
+  ctx.shadowBlur = 10;
+  ctx.beginPath(); ctx.moveTo(0, -13); ctx.lineTo(9, 9); ctx.lineTo(-9, 9); ctx.closePath(); ctx.fill();
+  ctx.restore();
+
+  ctx.fillStyle = 'rgba(148,163,184,0.7)';
+  ctx.font = '10px Consolas, monospace';
+  ctx.fillText(`up = +x (start heading) · grid 0.5 m · view ±${(v.half / 1000).toFixed(2)} m`, 8, 14);
+
+  const objs = (m.objects || []).slice().sort((a, b) => a.distance_mm - b.distance_mm);
+  setHtmlIfChanged('mapStats',
+    `objects <strong>${objs.length}</strong> · occupied cells <strong>${(m.occupied_cells || []).length}</strong>` +
+    ` · coverage <strong>${(100 * (m.coverage || 0)).toFixed(1)}%</strong> of map` +
+    ` · pose (<strong>${Math.round(r.x_mm)}, ${Math.round(r.y_mm)}</strong>) ${Math.round(r.heading_deg)}°`);
+  setHtmlIfChanged('mapObjList', objs.map(o =>
+    `<div class="list-row"><div class="list-row-main"><strong style="color:${rgba(labelRgb(o.label), 1)}">${esc(o.id)}</strong> ${esc(o.label)}` +
+    `${o.stale ? ' <em style="color:var(--text-muted)">(earlier session)</em>' : ''}</div>` +
+    `<span class="obs-meta">${(o.distance_mm / 1000).toFixed(1)} m · ${Math.round(o.bearing_deg)}° · ${esc(o.seen_count)}x · conf ${Math.round(100 * o.confidence)}% · ${fmtAge(o.age_s)}</span></div>`
+  ).join('') || '<div class="empty-hint">No tracked objects yet (the robot has not looked around)</div>');
+  const prompt = document.getElementById('mapPromptText');
+  if (prompt && prompt.textContent !== (m.prompt_view || '')) prompt.textContent = m.prompt_view || '';
+}
+
+async function fetchMap() {
+  const r = await fetch('/api/map' + (showTruth ? '?truth=1' : ''));
+  const txt = await r.text();
+  if (r.ok && txt !== mapText) {
+    mapText = txt;
+    latestMap = JSON.parse(txt);
+    renderMap(latestMap);
+  }
+}
+
+async function pollMap() {
+  let delay = 1000;
+  try {
+    if (!document.hidden && panelVisible.map) await fetchMap();
+    else delay = 1500;
+  } catch (err) {
+    console.error(err);
+    delay = 3000;
+  }
+  setTimeout(pollMap, delay);
+}
+
+// ---- Thinking stream --------------------------------------------------------------------------
+let thinkSeq = 0;
+let thinkEntries = [];
+let viewVersion = -1;
+let viewPinned = false;  // the user opened an older frame from the log
+let serverView = null;
+
+function drawView(img, view, note) {
+  const c = document.getElementById('viewCanvas');
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height;
+  ctx.fillStyle = '#05080f';
+  ctx.fillRect(0, 0, W, H);
+  if (img) ctx.drawImage(img, 0, 0, W, H);
+  const empty = document.getElementById('viewEmpty');
+  empty.style.display = img ? 'none' : 'flex';
+  if (!img) empty.textContent = note || 'No image was kept for this view.';
+  ctx.textAlign = 'left';
+  (view.detections || []).forEach(d => {
+    const [x1, y1, x2, y2] = d.bbox;
+    const rgb = labelRgb(d.label);
+    ctx.strokeStyle = rgba(rgb, 1);
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x1 * W, y1 * H, (x2 - x1) * W, (y2 - y1) * H);
+    ctx.font = 'bold 12px -apple-system, sans-serif';
+    const tw = ctx.measureText(d.label).width + 8;
+    const ty = y1 * H >= 16 ? y1 * H - 16 : y1 * H;
+    ctx.fillStyle = rgba(rgb, 0.85);
+    ctx.fillRect(x1 * W, ty, tw, 16);
+    ctx.fillStyle = '#05080f';
+    ctx.fillText(d.label, x1 * W + 4, ty + 12);
+  });
+  const p = view.pose;
+  const dets = view.detections || [];
+  const parts = [`<strong>view #${esc(view.version)}</strong> ${esc(fmtClock(view.ts))}`];
+  if (p) parts.push(`pose (${Math.round(p.x_mm)}, ${Math.round(p.y_mm)}) ${Math.round(p.heading_deg)}° tilt ${Math.round(p.head_tilt_deg)}°`);
+  parts.push(view.query ? `looked for "${esc(view.query)}"` : 'looked for everything');
+  parts.push(`${dets.length} detection(s): ${esc(dets.map(d => d.label).join(', ') || 'none')}`);
+  if ((view.seen || []).length) parts.push(`map ids: ${esc(view.seen.join(', '))}`);
+  if ((view.lost || []).length) parts.push(`<span style="color:var(--rose)">lost: ${esc(view.lost.join(', '))}</span>`);
+  if (viewPinned) parts.push('<span class="step-link" data-view-latest="1">back to latest view</span>');
+  setHtmlIfChanged('viewCaption', parts.join(' · '));
+}
+
+function showView(view) {
+  viewVersion = view.version;
+  if (!view.has_image) { drawView(null, view); return; }
+  const img = new Image();
+  img.onload = () => { if (viewVersion === view.version) drawView(img, view); };
+  img.onerror = () => {
+    if (viewVersion === view.version) drawView(null, view, 'This frame is no longer kept on the server.');
+  };
+  img.src = `/api/thinking/frame?v=${encodeURIComponent(view.version)}`;
+}
+
+function renderStep(e) {
+  switch (e.type) {
+    case 'cognition.model_call': {
+      const tok = e.prompt_tokens ? ` · ${e.prompt_tokens} tok in` + (e.completion_tokens ? ` / ${e.completion_tokens} out` : '') : '';
+      const calls = (e.tool_calls || []).map(c => `<code>${esc(c.name)}(${esc(fmtArgs(c.args))})</code>`).join(' ');
+      let body = '<div class="step-muted">(empty reply)</div>';
+      if (calls) body = `<div>calls ${calls}</div>` + (e.content ? `<div class="step-muted">${esc(e.content)}</div>` : '');
+      else if (e.content) body = `<div class="step-say">"${esc(e.content)}"</div>`;
+      return `<div class="step step-model"><span class="step-k">MODEL #${esc(e.step)}</span>` +
+        `<span class="step-muted">${esc(Math.round(e.latency_ms || 0))} ms${esc(tok)}</span>${body}</div>`;
+    }
+    case 'skill.completed': {
+      let data = '';
+      if (typeof e.data === 'string') data = e.data;
+      else if (e.data && Object.keys(e.data).length) data = JSON.stringify(e.data);
+      return `<div class="step step-skill ${e.ok ? 'ok' : 'fail'}"><span class="step-k">${e.ok ? '✓' : '✗'} ${esc(e.tool)}</span>` +
+        `<code>${esc(fmtArgs(e.args))}</code><div>${esc(e.message)}` +
+        `${!e.ok && e.status ? ` <span class="step-muted">[${esc(e.status)}]</span>` : ''}</div>` +
+        (data ? `<div class="step-muted"><code>${esc(data)}</code></div>` : '') + '</div>';
+    }
+    case 'perception.view': {
+      const labels = (e.detections || []).map(d => d.label).join(', ') || 'nothing';
+      const extra = [e.query ? `looked for "${e.query}"` : '',
+        (e.seen || []).length ? `ids ${e.seen.join(', ')}` : '',
+        (e.lost || []).length ? `lost ${e.lost.join(', ')}` : ''].filter(Boolean).join(' · ');
+      return `<div class="step step-view"><span class="step-k">SAW</span>${esc(labels)}` +
+        (extra ? ` <span class="step-muted">${esc(extra)}</span>` : '') +
+        (e.has_image ? `<span class="step-link" data-view="${esc(e.version)}">frame #${esc(e.version)}</span>` : '') + '</div>';
+    }
+    case 'memory.retrieved':
+      return `<div class="step step-mem"><span class="step-k">MEMORY</span>${esc(e.count)} recalled` +
+        `${(e.memories || []).length ? ': ' + esc(e.memories.join(' | ')) : ''}</div>`;
+    case 'cognition.recovered_calls':
+      return `<div class="step step-warn"><span class="step-k">RECOVERED</span>tool call(s) written as text: ${esc((e.calls || []).join(', '))}</div>`;
+    case 'cognition.unavailable':
+      return `<div class="step step-warn"><span class="step-k">MODEL OFFLINE</span>${esc(e.error)}</div>`;
+    case 'turn.cancelled':
+      return '<div class="step step-warn"><span class="step-k">CANCELLED</span>the turn was interrupted</div>';
+    case 'reflex.triggered':
+      return `<div class="step step-warn"><span class="step-k">REFLEX</span><code>${esc(fmtArgs(e.detail))}</code></div>`;
+    default:
+      return `<div class="step"><span class="step-k">${esc(e.type)}</span><code>${esc(fmtArgs(e.detail))}</code></div>`;
+  }
+}
+
+function renderTurn(g) {
+  const h = g.head || {};
+  const origin = h.origin || (g.final && g.final.origin) || (g.key.startsWith('sys-') ? 'system' : 'user');
+  let html = `<div class="turn-head"><span class="turn-badge">${esc(origin.toUpperCase())}</span>` +
+    (h.trigger ? `<span class="turn-trigger">${esc(h.trigger)}</span>` : '') +
+    `<span class="turn-time">${esc(fmtClock(g.ts))}</span></div>` +
+    (h.objective ? `<div class="turn-objective">"${esc(h.objective)}"</div>` : '');
+  // A started skill is shown only until its completion arrives.
+  const completions = {};
+  g.items.forEach(e => { if (e.type === 'skill.completed') completions[e.tool] = (completions[e.tool] || 0) + 1; });
+  g.items.forEach(e => {
+    if (e.type !== 'skill.started') { html += renderStep(e); return; }
+    if (completions[e.tool] > 0) { completions[e.tool] -= 1; return; }
+    html += `<div class="step step-skill running"><span class="step-k">RUNNING ${esc(e.tool)}</span><code>${esc(fmtArgs(e.args))}</code></div>`;
+  });
+  if (g.final) {
+    const f = g.final;
+    const bad = f.status !== 'completed';
+    const meta = [`${f.steps} step(s)`, `${Math.round(f.latency_ms || 0)} ms`, f.backend,
+      f.emotion ? `feels ${f.emotion}` : '', f.next_wake_s != null ? `wake again in ${f.next_wake_s}s` : '']
+      .filter(Boolean).join(' · ');
+    html += `<div class="turn-final${bad ? ' status-bad' : ''}"><span class="step-k">${esc(String(f.status || '').toUpperCase())}</span>` +
+      `<span class="step-muted">${esc(meta)}</span>` +
+      (f.say ? `<div class="step-say">"${esc(f.say)}"</div>` : '<div class="step-muted">(said nothing)</div>') + '</div>';
+    if (g.lateCancel) html += '<div class="step-muted">cancel notice arrived after the reply was sent (no effect)</div>';
+  }
+  return `<div class="turn-card origin-${esc(origin)}">${html}</div>`;
+}
+
+function renderThinking() {
+  const groups = [];
+  const byTurn = {};
+  let current = null;
+  thinkEntries.forEach(e => {
+    // Events without a turn id (reflexes) belong to the turn that is still running, if any.
+    let g = e.turn ? byTurn[e.turn] : (current && !current.final ? current : null);
+    if (!g) {
+      g = {key: e.turn || `sys-${e.seq}`, head: null, items: [], final: null, ts: e.ts};
+      groups.push(g);
+      byTurn[g.key] = g;
+    }
+    if (e.type === 'turn.started') g.head = e;
+    else if (e.type === 'robot.response') g.final = e;
+    else if (e.type === 'turn.cancelled' && g.final) g.lateCancel = true;  // after the reply: no effect
+    else g.items.push(e);
+    current = g;
+  });
+  const box = document.getElementById('thinkLog');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  setHtmlIfChanged('thinkLog',
+    groups.slice(-12).map(renderTurn).join('') || '<div class="empty-hint">Waiting for the first turn...</div>');
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function renderThinkStatus(d) {
+  document.getElementById('thinkStatusTag').textContent =
+    d.busy ? `THINKING · ${String(d.fsm_state || '').toUpperCase()}` : `IDLE · ${d.backend || ''}`;
+  const g = d.goal;
+  setHtmlIfChanged('thinkGoal', g
+    ? `GOAL <strong>"${esc(g.objective)}"</strong> · ${esc(g.status)} · step ${esc(g.step)} · ${esc(g.origin)}`
+    : 'No goal yet.');
+}
+
+async function pollThinking() {
+  let delay = 1500;
+  try {
+    if (!document.hidden && panelVisible.think) {
+      const r = await fetch(`/api/thinking?since=${thinkSeq}`);
+      const d = await r.json();
+      if (d.reset) thinkEntries = [];
+      if (d.reset || (d.entries && d.entries.length)) {
+        thinkEntries = thinkEntries.concat(d.entries || []).slice(-300);
+        renderThinking();
+      }
+      thinkSeq = d.latest_seq;
+      renderThinkStatus(d);
+      serverView = d.view;
+      if (d.view && !viewPinned && d.view.version !== viewVersion) showView(d.view);
+      delay = d.busy ? 500 : 1200;
+    }
+  } catch (err) {
+    console.error(err);
+    delay = 3000;
+  }
+  setTimeout(pollThinking, delay);
+}
+
+// ---- Drives & autonomy (fed by /api/state, no extra request) ---------------------------------
+function renderDrives(a, sensors, goal) {
+  document.getElementById('autoModeTag').textContent =
+    !a.enabled ? 'OFF' : a.paused ? 'PAUSED' : a.active ? 'DECIDING' : 'ON';
+  const pill = (label, cls) => `<span class="mode-pill ${cls}">${esc(label)}</span>`;
+  setHtmlIfChanged('autoPills', [
+    pill(a.enabled ? 'ENABLED' : 'DISABLED', a.enabled ? 'on' : ''),
+    pill(a.paused ? 'PAUSED (staying here)' : 'NOT PAUSED', a.paused ? 'warn' : 'on'),
+    pill(a.quiet ? 'QUIET' : 'MAY TALK', a.quiet ? 'warn' : 'on'),
+    a.active ? pill('BACKGROUND TURN RUNNING', 'busy') : '',
+    goal && goal.status === 'running' ? pill(`${goal.origin || 'user'} goal running`, 'busy') : '',
+  ].join(''));
+  const kv = [
+    ['Reason', a.reason || '-'],
+    ['Last trigger', a.last_trigger || 'none yet'],
+    ['Requested wake', a.next_decision_in_s != null ? `in ${a.next_decision_in_s}s` : 'none'],
+    ['Since human', `${a.minutes_since_human != null ? a.minutes_since_human : 0} min`],
+    ['Unexplored', a.unexplored_fraction != null ? `${Math.round(a.unexplored_fraction * 100)}% within 1.5 m` : '?'],
+  ];
+  setHtmlIfChanged('autoDetails', kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join(''));
+  const bars = Object.entries(a.drives || {}).map(([name, d]) => {
+    const lvl = Math.max(0, Math.min(1, d.level || 0)), th = Math.max(0, Math.min(1, d.threshold || 0));
+    const urgent = th > 0 && lvl >= th;
+    return `<div class="drive-row"><div class="drive-head"><span>${esc(name)}${urgent ? ' · <span style="color:var(--amber)">URGE</span>' : ''}</span>` +
+      `<span class="num">${lvl.toFixed(2)} / ${th.toFixed(2)}${d.rate_per_min ? ` · +${esc(d.rate_per_min)}/min` : ''}</span></div>` +
+      `<div class="drive-track"><div class="drive-fill${urgent ? ' urgent' : ''}" style="width:${(lvl * 100).toFixed(1)}%"></div>` +
+      `<div class="drive-thresh" style="left:calc(${(th * 100).toFixed(1)}% - 1px)"></div></div></div>`;
+  }).join('') || '<div class="empty-hint">No drive data</div>';
+  setHtmlIfChanged('driveBars', bars);
+  // Live body reading first; the drive system only samples it on autonomy ticks.
+  const battery = sensors.battery_pct != null ? sensors.battery_pct : a.battery_pct;
+  const charging = sensors.battery_pct != null ? sensors.charging : a.charging;
+  if (battery == null) {
+    setHtmlIfChanged('batteryBox', '<div class="empty-hint">No battery reading</div>');
+  } else {
+    const pct = Math.max(0, Math.min(100, battery));
+    const cls = pct < 20 ? ' low' : pct < 35 ? ' urgent' : '';
+    setHtmlIfChanged('batteryBox',
+      `<div class="drive-row"><div class="drive-head"><span>${charging ? 'CHARGING on dock' : 'ON BATTERY'}</span>` +
+      `<span class="num">${pct.toFixed(1)}%</span></div>` +
+      `<div class="drive-track"><div class="drive-fill${cls}" style="width:${pct.toFixed(1)}%"></div></div></div>`);
+  }
+}
+
+(function initInsightPanels() {
+  observeVisibility('faceCanvas', 'face');
+  observeVisibility('mapPanel', 'map');
+  observeVisibility('thinkPanel', 'think');
+  observeVisibility('drivesPanel', 'drives');
+  const truth = document.getElementById('truthToggle');
+  const coverage = document.getElementById('coverageToggle');
+  truth.checked = showTruth;
+  coverage.checked = showCoverage;
+  truth.addEventListener('change', () => {
+    showTruth = truth.checked;
+    storageSet('dash.simTruth', showTruth ? '1' : '0');
+    fetchMap().catch(err => console.error(err));
+  });
+  coverage.addEventListener('change', () => {
+    showCoverage = coverage.checked;
+    storageSet('dash.coverage', showCoverage ? '1' : '0');
+    if (latestMap) renderMap(latestMap);
+  });
+  document.getElementById('thinkLog').addEventListener('click', ev => {
+    const link = ev.target.closest('[data-view]');
+    if (!link) return;
+    const entry = thinkEntries.find(e => e.type === 'perception.view' && String(e.version) === link.dataset.view);
+    if (!entry) return;
+    viewPinned = true;
+    showView(entry);
+  });
+  document.getElementById('viewCaption').addEventListener('click', ev => {
+    if (!ev.target.closest('[data-view-latest]')) return;
+    viewPinned = false;
+    if (serverView) showView(serverView);
+  });
+})();
+
 requestAnimationFrame(stepClientAnimation);
 pollLoop();
+pollMap();
+pollThinking();
 </script>
 </body>
 </html>
@@ -1964,6 +2885,13 @@ class DashboardServer:
         self._memory_cache: dict[str, Any] | None = None
         self._memory_revision = -1
         self._clients: set[asyncio.Task] = set()
+        # "Thinking" stream: why the robot did what it did.
+        self._thinking: deque[dict[str, Any]] = deque(maxlen=MAX_THINKING_ENTRIES)
+        self._thinking_seq = 0
+        self._thinking_turn: str | None = None
+        self._view: dict[str, Any] | None = None  # latest camera view the robot itself looked at
+        self._view_frames: deque[tuple[int, bytes]] = deque(maxlen=KEPT_VIEW_FRAMES)
+        self._view_version = 0
 
     @property
     def url(self) -> str:
@@ -1977,6 +2905,12 @@ class DashboardServer:
                 "*", self._on_any_event, name="dashboard:tap", max_queue_size=64, lossy=True
             )
         )
+        for pattern in THINKING_PATTERNS:
+            self._sub_ids.append(
+                self.harness.bus.subscribe(
+                    pattern, self._on_thinking_event, name=f"dashboard:think:{pattern}", immediate=True
+                )
+            )
         self._server = await asyncio.start_server(
             self._handle_client,
             host=self.host,
@@ -2107,13 +3041,240 @@ class DashboardServer:
                     "emotion": (p.get("emotion") or {}).get("name", "neutral"),
                     "sound": p.get("sound", "none"),
                     "actions": p.get("actions", []),
-                    "camera_verification": p.get("camera_verification"),
                     "status": p.get("status", "completed"),
+                    "steps": p.get("steps", 0),
                     "goal_state": p.get("goal_state"),
                     "backend": p.get("backend", "unknown"),
                     "latency_ms": p.get("latency_ms", 0.0),
                 }
             )
+
+    # ---- "why" views: spatial map, thinking stream, drives ------------------------------------------
+    def build_map_payload(self, *, truth: bool = False) -> dict[str, Any]:
+        """The robot's own spatial map (odometry frame) for `/api/map`; `truth` adds simulator ground truth."""
+        harness = self.harness
+        pose = harness.body.pose()
+        smap = harness.spatial_map
+        data = smap.snapshot(pose)
+        for obj in data["objects"]:
+            for key in ("x_mm", "y_mm", "radius_mm", "first_seen", "last_seen"):
+                obj[key] = round(float(obj[key]), 1)
+            obj["confidence"] = round(float(obj["confidence"]), 2)
+        seen = np.asarray(smap.seen, dtype=bool)
+        k = COVERAGE_DOWNSAMPLE
+        m = seen.shape[0] // k
+        coarse = seen[: m * k, : m * k].reshape(m, k, m, k).any(axis=(1, 3))
+        model = getattr(harness.camera, "model", None)
+        data.update(
+            {
+                "robot": {
+                    "x_mm": round(pose.x_mm, 1),
+                    "y_mm": round(pose.y_mm, 1),
+                    "heading_deg": round(pose.heading_deg, 1),
+                    "head_tilt_deg": round(pose.head_tilt_deg, 1),
+                },
+                "half_extent_mm": smap.half,
+                "cell_mm": CELL_MM,
+                "coverage_grid": {
+                    "n": m,
+                    "cell_mm": CELL_MM * k,
+                    "origin_mm": -smap.half,
+                    # Row i is x, column j is y: bits[i * n + j].
+                    "bits": "".join("1" if v else "0" for v in coarse.ravel().tolist()),
+                },
+                "camera": {
+                    "hfov_deg": round(float(model.hfov_deg), 1) if model is not None else 65.0,
+                    "coverage_range_mm": 2200.0,
+                },
+                "prompt_view": smap.render_for_prompt(pose),
+            }
+        )
+        if truth:
+            sandbox = harness.sandbox
+            true_pose_fn = getattr(harness.body, "true_pose", None)
+            true_pose = true_pose_fn() if callable(true_pose_fn) else pose
+            data["sim_truth"] = {
+                "room_half_extent_mm": sandbox.room_half_extent_mm,
+                "robot": {
+                    "x_mm": round(true_pose.x_mm, 1),
+                    "y_mm": round(true_pose.y_mm, 1),
+                    "heading_deg": round(true_pose.heading_deg, 1),
+                },
+                "objects": [
+                    {
+                        key: obj[key]
+                        for key in ("id", "label", "shape", "x_mm", "y_mm", "width_mm", "depth_mm", "color")
+                    }
+                    for obj in sandbox.list_objects()
+                ],
+            }
+        return data
+
+    def build_thinking_payload(self, since: int = 0) -> dict[str, Any]:
+        """Thinking entries newer than `since`, plus the goal and the latest view the robot looked at."""
+        since = max(0, since)
+        reset = since > self._thinking_seq  # the server restarted under a long-lived page
+        entries = [e for e in self._thinking if reset or e["seq"] > since]
+        arbiter = self.harness.arbiter
+        return {
+            "now": self.harness.clock.now(),
+            "latest_seq": self._thinking_seq,
+            "reset": reset,
+            "entries": entries,
+            "view": self._view,
+            "kept_frames": [version for version, _ in self._view_frames],
+            "goal": dict(arbiter.active_goal) if arbiter.active_goal else None,
+            "busy": arbiter.busy,
+            "fsm_state": str(self.harness.fsm.state),
+            "backend": getattr(self.harness.backend, "name", type(self.harness.backend).__name__),
+        }
+
+    def build_autonomy_payload(self) -> dict[str, Any]:
+        """Autonomy switches, drive levels and the body's battery for `/api/autonomy`."""
+        sensors = self.harness.body.sensors()
+        arbiter = self.harness.arbiter
+        return {
+            **self.harness.autonomy.snapshot(),
+            "body": {
+                "battery_pct": round(float(getattr(sensors, "battery_pct", 100.0)), 1),
+                "charging": bool(getattr(sensors, "charging", False)),
+            },
+            "goal": dict(arbiter.active_goal) if arbiter.active_goal else None,
+            "busy": arbiter.busy,
+        }
+
+    def view_frame(self, version: int | None = None) -> bytes | None:
+        """PNG of a recent view the robot looked at (the latest when `version` is None)."""
+        if not self._view_frames:
+            return None
+        if version is None:
+            return self._view_frames[-1][1]
+        return next((png for v, png in self._view_frames if v == version), None)
+
+    def _on_thinking_event(self, event: Event) -> None:
+        try:
+            self._record_thinking(event)
+        except Exception:  # an observer must never disturb the robot
+            logger.debug("Dashboard could not record %s", event.type, exc_info=True)
+
+    def _append_thinking(self, kind: str, event: Event, data: dict[str, Any]) -> None:
+        self._thinking_seq += 1
+        self._thinking.append(
+            {"seq": self._thinking_seq, "ts": event.ts, "type": kind, "turn": event.correlation_id, **data}
+        )
+
+    def _turn_header(self, turn: str, payload: dict[str, Any]) -> dict[str, Any]:
+        goal = self.harness.arbiter.active_goal or {}
+        if goal.get("correlation_id") == turn:
+            origin = str(goal.get("origin", "user"))
+            objective = str(goal.get("objective", ""))
+        else:
+            origin = str(payload.get("origin", "user"))
+            objective = self._last_user_text if origin == "user" else ""
+        trigger = self.harness.autonomy.last_trigger if origin == "autonomous" else None
+        return {"origin": origin, "objective": _clip_text(objective, 300), "trigger": trigger}
+
+    def _record_thinking(self, event: Event) -> None:
+        kind, p, turn = event.type, event.payload, event.correlation_id
+        if turn and turn != self._thinking_turn and kind not in ("turn.cancelled", "reflex.triggered"):
+            self._thinking_turn = turn
+            self._append_thinking("turn.started", event, self._turn_header(turn, p))
+        if kind == "cognition.model_call":
+            calls = [c for c in (p.get("tool_calls") or []) if isinstance(c, dict)][:8]
+            data = {
+                "step": p.get("step"),
+                "latency_ms": p.get("latency_ms"),
+                "prompt_tokens": p.get("prompt_tokens"),
+                "completion_tokens": p.get("completion_tokens"),
+                "content": _clip_text(p.get("content"), 400),
+                "tool_calls": [
+                    {"name": _clip_text(c.get("name"), 40), "args": _clip_json(c.get("args"), 300)} for c in calls
+                ],
+            }
+        elif kind == "skill.started":
+            data = {"tool": _clip_text(p.get("tool"), 40), "args": _clip_json(p.get("args"), 300)}
+        elif kind == "skill.completed":
+            data = {
+                "tool": _clip_text(p.get("tool"), 40),
+                "args": _clip_json(p.get("args"), 300),
+                "ok": bool(p.get("ok")),
+                "status": _clip_text(p.get("status"), 24),
+                "message": _clip_text(p.get("message"), 400),
+                "data": _clip_json(p.get("data"), 600),
+            }
+        elif kind == "perception.view":
+            data = self._record_view(event)
+        elif kind == "memory.retrieved":
+            memories = [m for m in (p.get("memories") or []) if isinstance(m, dict)][:4]
+            data = {
+                "count": int(p.get("count", len(memories)) or 0),
+                "memories": [_clip_text(m.get("content", ""), 140) for m in memories],
+            }
+        elif kind == "robot.response":
+            emotion = p.get("emotion") if isinstance(p.get("emotion"), dict) else {}
+            data = {
+                "say": _clip_text(p.get("say"), 400),
+                "status": _clip_text(p.get("status", "completed"), 24),
+                "steps": p.get("steps", 0),
+                "backend": _clip_text(p.get("backend", ""), 40),
+                "latency_ms": p.get("latency_ms", 0.0),
+                "origin": _clip_text(p.get("origin", "user"), 16),
+                "next_wake_s": p.get("next_wake_s"),
+                "emotion": _clip_text(emotion.get("name", ""), 24),
+                "tools": [_clip_text(t.get("tool"), 40) for t in (p.get("actions") or []) if isinstance(t, dict)],
+            }
+        elif kind == "cognition.recovered_calls":
+            data = {"calls": [_clip_text(c, 40) for c in (p.get("calls") or [])][:8]}
+        elif kind == "cognition.unavailable":
+            data = {"error": _clip_text(p.get("error"), 200)}
+        else:  # turn.cancelled, reflex.triggered, any other cognition.* event
+            data = {"detail": _clip_json(p, 300)}
+        self._append_thinking(kind, event, data)
+
+    def _record_view(self, event: Event) -> dict[str, Any]:
+        """Pair a perception.view with the frame it was detected on.
+
+        `perceive()` stores the captured frame on the skill context right before emitting the view,
+        and this handler runs synchronously inside that emit, so the pairing is exact.
+        """
+        p = event.payload
+        detections = []
+        for det in (p.get("detections") or [])[:16]:
+            if not isinstance(det, dict):
+                continue
+            try:
+                bbox = [round(float(v), 3) for v in det.get("bbox", [])][:4]
+            except (TypeError, ValueError):
+                continue
+            if len(bbox) == 4:
+                detections.append({"label": _clip_text(det.get("label"), 48), "bbox": bbox})
+        frame = getattr(getattr(self.harness, "skill_context", None), "attached_image", None)
+        png = getattr(frame, "png_bytes", None)
+        has_image = isinstance(png, bytes | bytearray) and len(png) > 0
+        self._view_version += 1
+        if has_image:
+            self._view_frames.append((self._view_version, bytes(png)))
+        pose = getattr(frame, "pose", None)
+        view = {
+            "version": self._view_version,
+            "ts": event.ts,
+            "turn": event.correlation_id,
+            "has_image": has_image,
+            "pose": None
+            if pose is None
+            else {
+                "x_mm": round(pose.x_mm, 1),
+                "y_mm": round(pose.y_mm, 1),
+                "heading_deg": round(pose.heading_deg, 1),
+                "head_tilt_deg": round(pose.head_tilt_deg, 1),
+            },
+            "query": _clip_text(p.get("query"), 60) if p.get("query") else None,
+            "detections": detections,
+            "seen": [_clip_text(i, 32) for i in (p.get("seen") or [])][:16],
+            "lost": [_clip_text(i, 32) for i in (p.get("lost") or [])][:16],
+        }
+        self._view = view
+        return {k: v for k, v in view.items() if k not in ("ts", "turn")}
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
@@ -2207,7 +3368,7 @@ class DashboardServer:
         self,
         method: str,
         path: str,
-        _query: dict[str, list[str]],
+        query: dict[str, list[str]],
         body: dict[str, Any],
     ) -> tuple[str, str, bytes]:
         if method == "GET" and path in ("/", "/index.html"):
@@ -2220,6 +3381,25 @@ class DashboardServer:
         if method == "GET" and path == "/api/events":
             data = {"events": list(self._events)}
             return "200 OK", "application/json", json.dumps(data).encode("utf-8")
+
+        if method == "GET" and path == "/api/map":
+            data = self.build_map_payload(truth=_query_flag(query, "truth"))
+            return "200 OK", "application/json", json.dumps(data).encode("utf-8")
+
+        if method == "GET" and path == "/api/thinking":
+            since = int((query.get("since") or ["0"])[0] or 0)
+            data = self.build_thinking_payload(since)
+            return "200 OK", "application/json", json.dumps(data).encode("utf-8")
+
+        if method == "GET" and path == "/api/thinking/frame":
+            raw_version = (query.get("v") or [""])[0]
+            png = self.view_frame(int(raw_version) if raw_version else None)
+            if png is None:
+                return "404 Not Found", "application/json", b'{"error":"no camera view kept for that version"}'
+            return "200 OK", "image/png", png
+
+        if method == "GET" and path == "/api/autonomy":
+            return "200 OK", "application/json", json.dumps(self.build_autonomy_payload()).encode("utf-8")
 
         if method == "POST" and path == "/api/message":
             text = str(body.get("text", "")).strip()
