@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# whisper.cpp transcribes silence and noise as tags such as "[BLANK_AUDIO]" or "(wind blowing)".
+_NON_SPEECH = re.compile(r"\[[^\]]*\]|\([^)]*\)|[♪♫]")
 
 
 @dataclass(frozen=True)
@@ -104,11 +109,13 @@ class SpeechRecognizer:
                 ],
                 check=True,
                 capture_output=True,
-                text=True,
+                # whisper.cpp prints UTF-8; the locale code page (cp1252 on Windows) garbles or rejects it.
+                encoding="utf-8",
+                errors="replace",
                 timeout=15.0,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                creationflags=_NO_WINDOW,
             )
-            text = proc.stdout.strip()[:4096]
+            text = " ".join(_NON_SPEECH.sub(" ", proc.stdout).split())[:4096]
             return ASRResult(text, 0.8 if text else 0.0, (time.perf_counter() - start) * 1000, "whisper_cpp")
         except (OSError, subprocess.SubprocessError):
             return None
@@ -134,6 +141,7 @@ class SpeechRecognizer:
                 capture_output=True,
                 text=True,
                 timeout=6.0,
+                creationflags=_NO_WINDOW,
             )
             dt_ms = (time.perf_counter() - t0) * 1000.0
             out = proc.stdout.strip()
@@ -183,7 +191,9 @@ class SpeechRecognizer:
             "48",
         ]
         try:
-            proc = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30.0)
+            proc = subprocess.run(
+                cmd, check=True, capture_output=True, text=True, timeout=30.0, creationflags=_NO_WINDOW
+            )
             dt_ms = (time.perf_counter() - t0) * 1000.0
             raw = proc.stdout.strip()
             if "<think></think>" in raw:

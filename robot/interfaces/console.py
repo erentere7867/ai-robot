@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 from typing import TYPE_CHECKING, Any
 
 from robot.core.bus import EventBus
@@ -11,6 +12,33 @@ from robot.core.events import Event, EventPriority
 
 if TYPE_CHECKING:
     from robot.main import RobotHarness
+
+
+async def _read_line(prompt: str) -> str:
+    """Read stdin on a daemon thread; an executor thread blocked in input() stalls interpreter exit."""
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[str] = loop.create_future()
+
+    def deliver(line: str | None, error: Exception | None) -> None:
+        if future.done():
+            return
+        if error is not None:
+            future.set_exception(error)
+        else:
+            future.set_result(line or "")
+
+    def reader() -> None:
+        try:
+            line, error = input(prompt), None
+        except Exception as exc:
+            line, error = None, exc
+        try:
+            loop.call_soon_threadsafe(deliver, line, error)
+        except RuntimeError:
+            pass  # The loop closed while we were blocked on the terminal.
+
+    threading.Thread(target=reader, name="console-input", daemon=True).start()
+    return await future
 
 
 class ConsoleInterface:
@@ -71,11 +99,10 @@ class ConsoleInterface:
         print("           /observe <label> [dist_mm] [bearing_deg] | /estop on|off | /quit")
         print("=" * 72)
 
-        loop = asyncio.get_running_loop()
         while True:
             try:
-                line = await loop.run_in_executor(None, lambda: input("\nYou > "))
-            except (EOFError, KeyboardInterrupt):
+                line = await _read_line("\nYou > ")
+            except (EOFError, KeyboardInterrupt, OSError):
                 print("\n[console] Exiting interactive console...")
                 break
 
@@ -84,11 +111,14 @@ class ConsoleInterface:
                 continue
             if cmd.lower() in ("/quit", "/exit", "exit", "quit"):
                 break
-            if cmd.startswith("/"):
-                await self._handle_slash_command(cmd)
-                continue
-
-            await self.send_and_wait(cmd)
+            try:
+                if cmd.startswith("/"):
+                    await self._handle_slash_command(cmd)
+                else:
+                    await self.send_and_wait(cmd)
+            except Exception as exc:
+                # A typo such as `/emotion happy high` must not shut the whole robot down.
+                print(f"[console] Command failed: {exc}")
 
     async def _handle_slash_command(self, cmd: str) -> None:
         parts = cmd.split()

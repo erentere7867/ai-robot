@@ -24,6 +24,30 @@ def load_yaml_file(path: Path | str) -> dict[str, Any]:
     raise RuntimeError(f"PyYAML is required to load {file_path}")
 
 
+_BOOL_WORDS = {"true": True, "yes": True, "on": True, "1": True, "false": False, "no": False, "off": False, "0": False}
+
+
+def _as_bool(value: Any, key: str) -> bool:
+    """Parse a YAML switch strictly; `bool("false")` would silently be True."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in _BOOL_WORDS:
+        return _BOOL_WORDS[value.strip().lower()]
+    raise ValueError(f"{key} must be a boolean")
+
+
+def _section(raw: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return a config section; a header whose keys are all commented out loads as None."""
+    value = raw.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Config section '{key}' must be a mapping")
+    return value
+
+
 @dataclass
 class ContextBudgetConfig:
     total_tokens: int = 2048
@@ -172,11 +196,18 @@ class RobotConfig:
             cwd_candidate = (Path.cwd() / cfg_path).resolve()
             cfg_path = cwd_candidate if cwd_candidate.exists() else (root / cfg_path).resolve()
         raw = load_yaml_file(cfg_path)
-        r = raw.get("robot", {})
-        rt = raw.get("runtime", {})
-        bus = raw.get("bus", {})
-        llm_raw = raw.get("llm", {})
-        cb_raw = raw.get("context_budget", {})
+        r = _section(raw, "robot")
+        rt = _section(raw, "runtime")
+        bus = _section(raw, "bus")
+        llm_raw = _section(raw, "llm")
+        cb_raw = _section(raw, "context_budget")
+        audio_raw = _section(raw, "audio")
+        wake_words = r.get("wake_words", ["sprocket", "hey sprocket", "robot", "hey robot"])
+        if isinstance(wake_words, str):
+            # `wake_words: "sprocket"` would otherwise become one wake word per letter.
+            wake_words = [wake_words]
+        if not isinstance(wake_words, list):
+            raise ValueError("robot.wake_words must be a list of phrases")
 
         def _resolve(p: str, default_rel: bool = False) -> Path:
             expanded = Path(p).expanduser()
@@ -186,7 +217,7 @@ class RobotConfig:
 
         llm = LLMConfig(
             backend=str(llm_raw.get("backend", "auto")),
-            auto_start_server=bool(llm_raw.get("auto_start_server", True)),
+            auto_start_server=_as_bool(llm_raw.get("auto_start_server", True), "llm.auto_start_server"),
             base_url=str(llm_raw.get("base_url", "http://127.0.0.1:8080")),
             model_name=str(llm_raw.get("model_name", "LFM3-VL-2B-Q4_K_M")),
             model_path=_resolve(str(llm_raw.get("model_path", "~/Downloads/LFM3-VL-2B-Q4_K_M.gguf"))),
@@ -215,10 +246,7 @@ class RobotConfig:
         )
         return cls(
             name=str(r.get("name", "Sprocket")),
-            wake_words=[
-                str(w).lower()
-                for w in r.get("wake_words", ["sprocket", "hey sprocket", "robot", "hey robot"])
-            ],
+            wake_words=[str(w).strip().lower() for w in wake_words if str(w).strip()],
             follow_up_window_s=float(r.get("follow_up_window_s", 8.0)),
             idle_sleepy_timeout_s=float(r.get("idle_sleepy_timeout_s", 45.0)),
             emotion_decay_rate_per_s=float(r.get("emotion_decay_rate_per_s", 0.08)),
@@ -229,17 +257,17 @@ class RobotConfig:
             body_config_path=_resolve(str(rt.get("body_config_path", "config/body.yaml")), default_rel=True),
             sim_tick_hz=float(rt.get("sim_tick_hz", 20.0)),
             max_queue_size=int(bus.get("max_queue_size", 256)),
-            record_events=bool(bus.get("record_events", True)),
+            record_events=_as_bool(bus.get("record_events", True), "bus.record_events"),
             face_fps=float(rt.get("face_fps", 30.0)),
-            asr_mode=str(raw.get("audio", {}).get("asr_mode", "auto")),
+            asr_mode=str(audio_raw.get("asr_mode", "auto")),
             asr_bin=_resolve(
-                str(raw.get("audio", {}).get("asr_bin", "~/robot-runtime/whisper.cpp/build/bin/whisper-cli"))
+                str(audio_raw.get("asr_bin", "~/robot-runtime/whisper.cpp/build/bin/whisper-cli"))
             ),
             asr_model_path=_resolve(
-                str(raw.get("audio", {}).get("asr_model_path", "~/robot-runtime/models/ggml-tiny.en.bin"))
+                str(audio_raw.get("asr_model_path", "~/robot-runtime/models/ggml-tiny.en.bin"))
             ),
             llm=llm,
             context_budget=cb,
-            agent=AgentConfig(**raw.get("agent", {})),
-            autonomy=AutonomyConfig(**raw.get("autonomy", {})),
+            agent=AgentConfig(**_section(raw, "agent")),
+            autonomy=AutonomyConfig(**_section(raw, "autonomy")),
         )

@@ -288,7 +288,12 @@ class EventBus:
                     await res
                 sub.delivered_count += 1
             except asyncio.CancelledError:
-                break
+                current = asyncio.current_task()
+                if current is None or current.cancelling():
+                    break
+                # The handler awaited something that was cancelled; the worker itself was not.
+                sub.error_count += 1
+                logger.warning("Subscriber %s was cancelled internally handling %s", sub.id, event.type)
             except Exception:
                 sub.error_count += 1
                 logger.exception(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -25,6 +26,10 @@ from robot.core.service import ServiceHealth
 from robot.face.process import FaceProcessBridge
 
 logger = logging.getLogger(__name__)
+
+MIC_STALL_TIMEOUT_S = 3.0
+MIC_RETRY_INITIAL_S = 1.0
+MIC_RETRY_MAX_S = 30.0
 
 
 class AudioService:
@@ -79,6 +84,7 @@ class AudioService:
         self._asr_future: asyncio.Future | None = None
         self._asr_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self._mic_generation = 0
+        self._mic_retry_s = MIC_RETRY_INITIAL_S
 
     async def start(self) -> None:
         if self._running:
@@ -123,10 +129,14 @@ class AudioService:
         self._pool_closed = True
 
     async def health(self) -> ServiceHealth:
+        mic_alive = self._mic_task is not None and not self._mic_task.done()
+        # Without sounddevice a restart cannot help; it would only cut off speech every check.
+        mic_missing = self.enable_mic and sd is None
+        status = "speaking" if self.is_speaking else "ok"
         return ServiceHealth(
             name=self.name,
-            healthy=not self.enable_mic or (self._mic_task is not None and not self._mic_task.done()),
-            status="speaking" if self.is_speaking else "ok",
+            healthy=not self.enable_mic or mic_missing or mic_alive,
+            status="mic_unavailable" if mic_missing else status,
             details={
                 "enable_speaker": self.enable_speaker,
                 "enable_mic": self.enable_mic,
@@ -230,7 +240,11 @@ class AudioService:
             # Cancelling an await cannot kill a running native synthesizer. Reuse
             # one owned future instead of accumulating jobs in the executor.
             if self._synthesis_future is not None and not self._synthesis_future.done():
-                await asyncio.shield(self._synthesis_future)
+                try:
+                    await asyncio.shield(self._synthesis_future)
+                except Exception:
+                    # An abandoned utterance's failure belongs to that utterance, not this one.
+                    logger.debug("Abandoned speech synthesis failed", exc_info=True)
             if epoch != self._speech_epoch:
                 return SynthesizedSpeech("", np.zeros(0, dtype=np.float32), 24000, [])
             self._synthesis_future = loop.run_in_executor(None, self.tts.synthesize, text[:400])
@@ -347,32 +361,81 @@ class AudioService:
         if sd is None:
             logger.warning("sounddevice not available; microphone capture disabled")
             return
+        self._mic_retry_s = MIC_RETRY_INITIAL_S
+        while self._running and self.enable_mic:
+            try:
+                await self._capture_mic_stream()
+                return  # Only returns once the service stopped or the mic was disabled.
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                # Device unplugged, busy or stalled: reopen with backoff instead of going deaf.
+                logger.warning(
+                    "Microphone input stream stopped; retrying in %.1fs", self._mic_retry_s, exc_info=True
+                )
+            try:
+                await asyncio.sleep(self._mic_retry_s)
+            except asyncio.CancelledError:
+                return
+            self._mic_retry_s = min(MIC_RETRY_MAX_S, self._mic_retry_s * 2)
+
+    async def _capture_mic_stream(self) -> None:
         sr = self.vad.sample_rate
         blocksize = int(sr * self.vad.frame_ms / 1000)
         q: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=16)
         loop = asyncio.get_running_loop()
 
+        def enqueue(mono: np.ndarray) -> None:
+            if q.full():
+                q.get_nowait()
+            q.put_nowait(mono)
+
         def _callback(indata: np.ndarray, _frames: int, _time_info: Any, _status: Any) -> None:
-            mono = indata[:, 0].copy()
+            try:
+                loop.call_soon_threadsafe(enqueue, indata[:, 0].copy())
+            except RuntimeError:
+                pass  # The loop closed while PortAudio was still delivering a block.
 
-            def enqueue():
-                if q.full():
-                    q.get_nowait()
-                q.put_nowait(mono)
-
-            loop.call_soon_threadsafe(enqueue)
-
-        try:
-            with sd.InputStream(
+        def _open() -> Any:
+            stream = sd.InputStream(
                 samplerate=sr, channels=1, dtype="float32", blocksize=blocksize, callback=_callback
-            ):
-                while self._running and self.enable_mic:
-                    frame = await q.get()
-                    await self.process_mic_frame(frame)
+            )
+            try:
+                stream.start()
+            except BaseException:
+                stream.close()
+                raise
+            return stream
+
+        def _close_abandoned(opening: asyncio.Future) -> None:
+            if opening.cancelled() or opening.exception() is not None:
+                return
+            # The device pool may already be shut down; never block the loop on PortAudio.
+            threading.Thread(target=opening.result().close, name="audio-mic-close", daemon=True).start()
+
+        # Opening and closing a device can block for hundreds of ms; keep it off the loop.
+        opening = loop.run_in_executor(self._device_pool, _open)
+        try:
+            stream = await asyncio.shield(opening)
         except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.warning("Microphone input stream stopped", exc_info=True)
+            # Stopped mid-open: the thread still finishes opening, so close what it opens.
+            opening.add_done_callback(_close_abandoned)
+            raise
+        try:
+            while self._running and self.enable_mic:
+                try:
+                    frame = await asyncio.wait_for(q.get(), MIC_STALL_TIMEOUT_S)
+                except TimeoutError:
+                    raise OSError("Microphone stream delivered no audio") from None
+                self._mic_retry_s = MIC_RETRY_INITIAL_S  # A working stream earns a fast retry next time.
+                await self.process_mic_frame(frame)
+        finally:
+            try:
+                await asyncio.shield(loop.run_in_executor(self._device_pool, stream.close))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Closing microphone stream failed", exc_info=True)
 
     async def _run_playback_with_mouth_sync(
         self,
@@ -417,13 +480,19 @@ class AudioService:
 
             # Drive FaceAnimator.mouth_open from the real RMS audio envelope at 60 Hz!
             if realtime:
+                # Schedule against a deadline: sleep(dt) per frame drifts by the timer
+                # granularity (~15.6 ms on Windows), stretching speech far past the audio.
+                loop = asyncio.get_running_loop()
                 dt = 1.0 / max(1, speech.envelope_fps)
-                for mouth_val in speech.mouth_envelope:
-                    if self._cancel_playback:
+                envelope = speech.mouth_envelope
+                started = loop.time()
+                while not self._cancel_playback:
+                    index = int((loop.time() - started) / dt)
+                    if index >= len(envelope):
                         break
                     if self.face_bridge is not None:
-                        self.face_bridge.set_mouth_open(float(mouth_val))
-                    await asyncio.sleep(dt)
+                        self.face_bridge.set_mouth_open(float(envelope[index]))
+                    await asyncio.sleep(max(0.0, started + (index + 1) * dt - loop.time()))
             else:
                 if self.face_bridge is not None and speech.mouth_envelope:
                     self.face_bridge.set_mouth_open(max(speech.mouth_envelope))
@@ -471,6 +540,9 @@ class AudioService:
             event = self._response_queue.get_nowait()
             try:
                 await self._produce_response(event)
+            except Exception:
+                # One failed sentence must not strand the rest of the queue until the next reply.
+                logger.exception("Speech production failed for %s", event.id)
             finally:
                 self._response_queue.task_done()
 
