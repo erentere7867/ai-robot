@@ -88,20 +88,27 @@ def recover_text_tool_calls(content: str, tool_names: set[str]) -> list[ToolCall
     return calls
 
 
-def speakable(text: str, spatial_ids: dict[str, str]) -> str:
-    """Remove emoji and internal ids ("box_1" -> "the box") from text meant for the human."""
+def speakable(text: str, spatial_ids: dict[str, str], robot_name: str = "") -> str:
+    """Remove emoji and internal ids ("box_1" -> "the box") from text meant for the human.
+
+    Also drops the robot's own name used as a vocative ("Hi, Sprocket!"): a small model sometimes
+    addresses the human by the robot's name. "I'm Sprocket" is left alone.
+    """
     def repl(match: re.Match[str]) -> str:
         return f"the {match.group(1)}" if match.group(0) in spatial_ids else match.group(0)
     text = _EMOJI.sub("", text)
     text = re.sub(r"\bthe the\b", "the", _ID.sub(repl, text), flags=re.I)
+    if robot_name:
+        text = re.sub(rf",\s*{re.escape(robot_name)}\s*(?=[!?.,])", "", text, flags=re.I)
     return re.sub(r"\s{2,}", " ", text).strip()
 
 
 class AgentLoop:
     def __init__(self, backend: InferenceBackend, skills: SkillRegistry, config: AgentConfig,
                  *, prompt_limit_tokens: int = 3300, on_event: Callable[[str, dict[str, Any]], Awaitable[None]]
-                 | None = None) -> None:
+                 | None = None, robot_name: str = "") -> None:
         self.backend = backend
+        self.robot_name = robot_name
         self.skills = skills
         self.config = config
         self.prompt_limit_tokens = prompt_limit_tokens
@@ -193,7 +200,7 @@ class AgentLoop:
         result.next_wake_s = ctx.wake_request_s
         result.expression = dict(ctx.expression)
         result.transcript = transcript
-        result.say = speakable(result.say, ctx.spatial_map.objects if ctx.spatial_map else {})
+        result.say = speakable(result.say, ctx.spatial_map.objects if ctx.spatial_map else {}, self.robot_name)
         return result
 
     @staticmethod

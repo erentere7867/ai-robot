@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from robot.actions.tools import ToolCallRequest
 from robot.behavior.fsm import InteractionState
 from robot.body.hal import BodyCapabilities, BodyCommand
 from robot.body.sim_body import SimBody
-from robot.cognition.backend import InferenceResult
+from robot.cognition.backend import ChatResult, ScriptedBackend, ToolCall
 from robot.core.bus import EventBus
 from robot.core.clock import ReplayClock
 from robot.core.config import RobotConfig
@@ -19,22 +20,13 @@ from robot.main import RobotHarness
 from robot.memory.models import MemoryProvenance
 
 
-class FaultyBackend:
-    """Fault-injection backend returning malformed/broken model outputs."""
+def answer_from_prompt(word: str, reply: str):
+    """A stand-in model that can only know `word` if the harness put it in the prompt."""
+    from robot.cognition.backend import message_text
 
-    name = "faulty_backend"
-
-    def __init__(self, outputs: list[str]) -> None:
-        self.outputs = list(outputs)
-        self._idx = 0
-
-    async def is_available(self) -> bool:
-        return True
-
-    async def generate(self, messages, *, json_schema=None) -> InferenceResult:
-        out = self.outputs[min(self._idx, len(self.outputs) - 1)]
-        self._idx += 1
-        return InferenceResult(raw_text=out, backend_name=self.name, latency_ms=2.0)
+    def respond(messages, _tools):
+        return reply if word in message_text(messages[-1]).lower() else "I don't know."
+    return ScriptedBackend(default=respond)
 
 
 @pytest.mark.asyncio
@@ -66,11 +58,10 @@ async def test_validator_and_head_tilt_limit_clamping(tmp_path: Path) -> None:
     harness = RobotHarness(cfg, clock=ReplayClock())
     await harness.start()
     try:
-        # "Tilt your head up 200 degrees" -> clamped to +35° physical limit and explained
-        resp = await harness.arbiter.handle_user_turn("Tilt your head up 200 degrees")
+        # Whatever a skill or the dashboard asks for, joint limits are enforced at the executor.
+        result = await harness.executor.execute_call(ToolCallRequest("tilt_head", {"angle_deg": 200}))
         assert harness.body.pose().head_tilt_deg == 35.0
-        assert any("clamped" in w.lower() or "35" in w for w in resp.warnings)
-        assert "35" in resp.say or "limit" in resp.say.lower() or "clamped" in resp.say.lower()
+        assert result.status == "clamped" and "35" in result.message
     finally:
         await harness.stop()
 
@@ -80,31 +71,27 @@ async def test_malformed_model_output_never_crashes(tmp_path: Path) -> None:
     cfg = RobotConfig.from_yaml()
     cfg.database_path = tmp_path / "mem.db"
     cfg.record_events = False
-
-    bad_outputs = [
+    backend = ScriptedBackend([
         "NOT JSON AT ALL {{{",
-        '{"say": "hi", "sound": "explosion_noise", "emotion": {"name": "rage", "intensity": 99}, '
-        '"actions": [{"tool": "raw_gpio_write", "args": {"pin": 17}}], "memory": "bad"}',
+        ChatResult("", [ToolCall("a", "raw_gpio_write", {"pin": 17}),
+                        ToolCall("b", "move", {}, invalid_arguments=True)]),
+        "I could not do that.",
+        ChatResult("", [ToolCall("c", "turn", {"direction": "sideways", "degrees": "lots"})]),
         "",
-    ]
-    harness = RobotHarness(cfg, clock=ReplayClock(), backend=FaultyBackend(bad_outputs))
+    ])
+    harness = RobotHarness(cfg, clock=ReplayClock(), backend=backend)
     await harness.start()
     try:
         r1 = await harness.arbiter.handle_user_turn("Hello?")
-        assert r1.fallback_used is True
-        assert r1.emotion.name == "confused"
+        assert r1.status == "completed" and r1.say == "NOT JSON AT ALL {{{"
 
-        r2 = await harness.arbiter.handle_user_turn("Try bad tools and emotions")
-        assert r2.fallback_used is False
-        assert r2.sound == "none"
-        assert r2.emotion.name == "neutral"
-        assert r2.emotion.intensity == 1.0
-        assert len(r2.actions) == 0
-        assert len(r2.rejected_actions) == 1
-        assert r2.rejected_actions[0]["tool"] == "raw_gpio_write"
+        r2 = await harness.arbiter.handle_user_turn("Try bad tools")
+        assert [entry["ok"] for entry in r2.tool_log] == [False]  # unknown tool rejected, the rest skipped
+        assert "no tool named" in r2.tool_log[0]["message"]
 
-        r3 = await harness.arbiter.handle_user_turn("Empty output test")
-        assert r3.fallback_used is True
+        r3 = await harness.arbiter.handle_user_turn("Bad arguments")
+        assert r3.tool_log[0]["ok"] is False
+        assert harness.body.pose().x_mm == 0 and harness.body.pose().heading_deg == 0
     finally:
         await harness.stop()
 
@@ -132,7 +119,7 @@ async def test_memory_persistence_restart_and_forget_tombstone(tmp_path: Path) -
     cfg2.record_events = False
     cfg2.llm.backend = "null"
 
-    h2 = RobotHarness(cfg2, clock=clock)
+    h2 = RobotHarness(cfg2, clock=clock, backend=answer_from_prompt("green", "It's green!"))
     await h2.start()
     recall_resp = await h2.arbiter.handle_user_turn("What's my favorite color?")
     assert "green" in recall_resp.say.lower()
@@ -153,7 +140,7 @@ async def test_memory_persistence_restart_and_forget_tombstone(tmp_path: Path) -
 
     # Session 3 (after second restart): Verify forgotten memory does not come back
     clock.advance(10.0)
-    h3 = RobotHarness(cfg2, clock=clock)
+    h3 = RobotHarness(cfg2, clock=clock, backend=answer_from_prompt("green", "It's green!"))
     await h3.start()
     post_forget_resp = await h3.arbiter.handle_user_turn("What's my favorite color?")
     assert "green" not in post_forget_resp.say.lower()
@@ -168,10 +155,16 @@ async def test_spatial_short_term_memory_what_was_behind_me(tmp_path: Path) -> N
     cfg.record_events = False
     cfg.llm.backend = "null"
 
-    harness = RobotHarness(cfg, clock=clock)
+    harness = RobotHarness(cfg, clock=clock, backend=ScriptedBackend(
+        [{"call": "turn", "args": {"direction": "around"}}, "Turned around."]))
     await harness.start()
     try:
         # 1. Observe a blue backpack 900mm directly in front (bearing 0°)
+        from robot.world.spatial_map import TrackedObject
+
+        now = clock.monotonic()
+        harness.spatial_map.objects["backpack_1"] = TrackedObject(
+            "backpack_1", "blue backpack", 900.0, 0.0, 120.0, now, now, 2, 0.9)
         harness.world.record_ego_observation(
             "obs_1",
             "blue backpack",
@@ -190,9 +183,9 @@ async def test_spatial_short_term_memory_what_was_behind_me(tmp_path: Path) -> N
         obs_after_spin = harness.world.active_observations()
         assert obs_after_spin[0]["direction"] == "behind"
 
-        resp = await harness.arbiter.handle_user_turn("What was behind you?")
-        assert "behind" in resp.say.lower()
-        assert "blue backpack" in resp.say.lower()
+        # The robot's own spatial memory (what the model is told) turns with it the same way.
+        rendered = harness.spatial_map.render_for_prompt(harness.body.pose())
+        assert "backpack_1 (blue backpack): 0.9 m behind me" in rendered
     finally:
         await harness.stop()
 
@@ -230,11 +223,12 @@ async def test_fsm_follow_up_emotion_decay_and_idle_sleepy(tmp_path: Path) -> No
     cfg.record_events = False
     cfg.llm.backend = "null"
 
-    harness = RobotHarness(cfg, clock=clock)
+    harness = RobotHarness(cfg, clock=clock, backend=ScriptedBackend(
+        [{"call": "express", "args": {"emotion": "excited", "gesture": "dance"}}, "Wheee!"]))
     await harness.start()
     try:
         resp = await harness.arbiter.handle_user_turn("Do a dance!")
-        assert resp.emotion.name == "excited"
+        assert resp.expression["emotion"] == "excited"
         assert harness.fsm.state == InteractionState.FOLLOW_UP
         assert harness.fsm.in_follow_up_window() is True
 

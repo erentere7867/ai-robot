@@ -169,9 +169,10 @@ def test_head_noun():
 
 
 # ---- spatial map ---------------------------------------------------------------------------------------
-def det_at(x: float, y: float, label: str, pose: BodyPose = BodyPose(), half_width_mm: float = 60.0,
+def det_at(x: float, y: float, label: str, pose: BodyPose | None = None, half_width_mm: float = 60.0,
            height_mm: float = 120.0) -> Detection:
     """A box as a perfect detector would draw it for an object centred at (x, y)."""
+    pose = pose or BodyPose()
     yaw = math.radians(pose.heading_deg)
     rx = (x - pose.x_mm) * math.cos(yaw) + (y - pose.y_mm) * math.sin(yaw)
     ry = -(x - pose.x_mm) * math.sin(yaw) + (y - pose.y_mm) * math.cos(yaw)

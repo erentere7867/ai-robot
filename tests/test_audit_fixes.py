@@ -26,7 +26,7 @@ from robot.audio.asr import SpeechRecognizer
 from robot.audio.service import AudioService
 from robot.audio.tts import RobotTTSEngine, SynthesizedSpeech
 from robot.core.bus import EventBus
-from robot.core.config import RobotConfig
+from robot.core.config import AgentConfig, RobotConfig
 from robot.core.events import Event
 from robot.core.recorder import EventRecorder
 from robot.core.service import ServiceSupervisor
@@ -509,7 +509,7 @@ def test_config_tolerates_empty_sections_and_rejects_ambiguous_values(tmp_path):
     cfg = RobotConfig.from_yaml(path, project_root=PROJECT_ROOT)
     assert cfg.wake_words == ["sprocket"]
     assert cfg.record_events is False
-    assert cfg.agent.max_steps == 32 and cfg.autonomy.enabled is True
+    assert cfg.agent.max_steps == AgentConfig().max_steps and cfg.autonomy.enabled is True
 
     path.write_text('llm:\n  auto_start_server: "sometimes"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="auto_start_server"):

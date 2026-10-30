@@ -151,7 +151,7 @@ class RobotHarness:
         budget = self.config.context_budget
         self.agent = AgentLoop(self.backend, self.skills, self.config.agent,
                                prompt_limit_tokens=budget.total_tokens - budget.response_reserve_tokens,
-                               on_event=self._emit_skill_event)
+                               on_event=self._emit_skill_event, robot_name=self.config.name)
         self.arbiter = BehaviorArbiter(
             bus=self.bus, fsm=self.fsm, emotion=self.emotion, prompts=self.prompts, agent=self.agent,
             skill_context=self.skill_context, memory=self.memory, world=self.world,

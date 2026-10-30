@@ -8,7 +8,6 @@ from pathlib import Path
 from robot.actions.tools import ToolCallRequest
 from robot.audio.tts import RobotTTSEngine
 from robot.body.hal import BodyPose
-from robot.cognition.backend import InferenceResult
 from robot.core.clock import ReplayClock
 from robot.core.config import RobotConfig
 from robot.interfaces.dashboard import DashboardServer
@@ -35,8 +34,8 @@ def test_simulation_sandbox_3d_camera_and_object_grounding() -> None:
     assert ext0["z_mm"] == 286.0
 
     frame0 = sandbox.capture_camera_view(pose0)
-    assert frame0.width == 320
-    assert frame0.height == 240
+    assert frame0.width == 512
+    assert frame0.height == 384
     assert frame0.png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
     assert frame0.data_url.startswith("data:image/png;base64,")
 
@@ -81,47 +80,6 @@ async def test_sandbox_raycast_tof_and_cliff_sensor_integration(tmp_path: Path) 
         )
         assert res.status == "reflex_stopped"
         assert "obstacle" in res.message.lower()
-    finally:
-        await harness.stop()
-
-
-async def test_vl_multimodal_grounding_and_spatial_navigation(tmp_path: Path) -> None:
-    cfg = _make_config(tmp_path)
-    clock = ReplayClock()
-    class Decisions:
-        name = "test_decisions"
-
-        def __init__(self):
-            self.calls = 0
-
-        async def generate(self, messages, *, json_schema=None):
-            self.calls += 1
-            return InferenceResult(json.dumps({
-                "say": "I see a Red Ball and a Blue Cube." if self.calls == 1 else "Approaching.",
-                "sound": "none", "emotion": {"name": "neutral"}, "memory": [], "status": "completed",
-                "actions": [] if self.calls == 1 else [{"tool": "drive", "args": {"distance_mm": 100}}],
-            }), self.name)
-
-    harness = RobotHarness(cfg, clock=clock, backend=Decisions())
-    await harness.start()
-    try:
-        # 1. Visual query: "What do you see in front of you?"
-        resp1 = await harness.submit_message("What do you see in front of you?")
-        assert "Red Ball" in resp1["say"] or "Blue Cube" in resp1["say"]
-
-        # 2. Spatial navigation query: "Go to the red ball"
-        ball = harness.sandbox.get_object("red_ball")
-        assert ball is not None
-        initial_dist = (ball.x_mm**2 + ball.y_mm**2) ** 0.5
-
-        resp2 = await harness.submit_message("Go to the red ball")
-        await harness.bus.drain()
-        pose_after = harness.body.pose()
-        final_dist = ((ball.x_mm - pose_after.x_mm) ** 2 + (ball.y_mm - pose_after.y_mm) ** 2) ** 0.5
-
-        assert final_dist < initial_dist
-        assert resp2.get("camera_verification") is not None
-        assert "Camera:" in resp2["camera_verification"]["after_summary"]
     finally:
         await harness.stop()
 

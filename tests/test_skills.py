@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from robot_fakes import clear_scene, make_harness
 
 

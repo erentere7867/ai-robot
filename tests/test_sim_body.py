@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import pytest
+from robot_fakes import clear_scene
 
 from robot.body.hal import BodyCommand
 from robot.body.sim_body import SimBody
 from robot.core.bus import EventBus
 from robot.core.clock import ReplayClock
 from robot.world.sandbox import SimulationSandbox
-from robot_fakes import clear_scene
 
 
 @pytest.fixture

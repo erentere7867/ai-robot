@@ -21,10 +21,10 @@ from robot.audio.tts import SynthesizedSpeech
 from robot.audio.vad import VADEvent
 from robot.body.hal import BodyCapabilities, BodyCommand, JointSpec
 from robot.body.sim_body import SimBody
-from robot.cognition.backend import InferenceResult, NullBackend
-from robot.cognition.context import ContextBuilder, estimate_tokens, truncate_to_token_budget
+from robot.cognition.agent import recover_text_tool_calls
+from robot.cognition.backend import BackendUnavailable, ChatResult, NullBackend, ToolCall
 from robot.cognition.llamacpp import AutoBackend, LlamaCppBackend
-from robot.cognition.validator import ResponseValidator
+from robot.cognition.prompts import PromptBuilder, estimate_tokens, truncate_to_tokens
 from robot.core.bus import BusOverloaded, EventBus
 from robot.core.clock import RealClock, ReplayClock
 from robot.core.config import LLMConfig, RobotConfig
@@ -33,6 +33,7 @@ from robot.core.recorder import EventRecorder
 from robot.main import RobotHarness
 from robot.memory.models import MemoryProvenance
 from robot.memory.store import MemoryStore
+from robot.skills.base import SkillError, _coerce
 from robot.world.state import WorldState
 
 
@@ -56,15 +57,19 @@ def make_harness(tmp_path: Path, *, backend=None, real=False, dashboard=False):
 
 
 class ControlledBackend:
+    """Blocks the first decision of each turn until released, then proposes `calls`; answers after results."""
+
     name = "controlled"
 
-    def __init__(self, actions=None, ignore_cancel=False):
+    def __init__(self, calls=None, ignore_cancel=False):
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
-        self.actions = actions or [{"tool": "drive", "args": {"distance_mm": 300}}]
+        self.calls = calls or [("move", {"direction": "forward", "distance_cm": 30})]
         self.ignore_cancel = ignore_cancel
 
-    async def generate(self, messages, *, json_schema=None):
+    async def chat(self, messages, *, tools=None, max_tokens=None):
+        if messages and messages[-1].get("role") == "tool":
+            return ChatResult("Done.", backend_name=self.name)
         self.entered.set()
         try:
             await self.release.wait()
@@ -72,18 +77,8 @@ class ControlledBackend:
             if not self.ignore_cancel:
                 raise
             await self.release.wait()
-        return InferenceResult(
-            json.dumps(
-                {
-                    "say": "Moving.",
-                    "sound": "none",
-                    "emotion": {"name": "neutral"},
-                    "actions": self.actions,
-                    "memory": [],
-                }
-            ),
-            self.name,
-        )
+        return ChatResult("", [ToolCall(f"c{i}", name, args) for i, (name, args) in enumerate(self.calls)],
+                          backend_name=self.name)
 
 
 @pytest.mark.asyncio
@@ -104,7 +99,7 @@ async def test_stop_invalidates_even_uncancellable_late_inference(tmp_path):
 @pytest.mark.asyncio
 async def test_cancel_cannot_run_remaining_plan(tmp_path):
     backend = ControlledBackend(
-        actions=[{"tool": "drive", "args": {"distance_mm": 300}}, {"tool": "spin", "args": {"angle_deg": 90}}]
+        calls=[("move", {"direction": "forward", "distance_cm": 30}), ("turn", {"direction": "left"})]
     )
     backend.release.set()
     async with make_harness(tmp_path, backend=backend, real=True) as harness:
@@ -276,16 +271,16 @@ def test_retrieval_never_pads_unrelated_results(tmp_path):
 
 
 def test_context_and_retained_turns_are_bounded_for_multibyte_input():
-    registry = CapabilityRegistry(BodyCapabilities())
-    context = ContextBuilder(Path("config/SOUL.md"), registry)
+    prompts = PromptBuilder(Path("config/SOUL.md"))
     for _ in range(100):
-        context.add_turn("user", "世界" * 5000)
-    messages, usage = context.build_messages("世界" * 20000, memories=[], world_state=WorldState(EventBus()))
-    assert usage["total_tokens"] + usage["response_reserve_tokens"] <= context.budget.total_tokens
-    assert sum(estimate_tokens(message["content"]) + 6 for message in messages) == usage["total_tokens"]
-    assert len(context._recent_turns) <= context.budget.max_recent_turns
-    assert "Safety overrides personality" in messages[0]["content"]
-    assert truncate_to_token_budget("hello", 0) == ""
+        prompts.add_exchange("世界" * 5000, "世界" * 5000)
+    messages = prompts.build("hello", prompts.situation(world="Known objects: none yet.", core_facts=[],
+                                                        memories=[], recent=[]), background=False)
+    history = messages[1:-1]
+    assert len(prompts.history) <= prompts.budget.max_recent_turns
+    assert sum(estimate_tokens(m["content"]) + 6 for m in history) <= prompts.budget.recent_turns_tokens
+    assert "Safety always wins" in messages[0]["content"]
+    assert truncate_to_tokens("hello", 0) == ""
 
 
 def test_spatial_observations_are_bounded_and_expire_on_monotonic_clock():
@@ -326,15 +321,15 @@ async def test_auto_backend_backoff_prevents_repeated_failed_requests():
     class Failing:
         calls = 0
 
-        async def generate(self, *args, **kwargs):
+        async def chat(self, *args, **kwargs):
             self.calls += 1
-            raise OSError("offline")
+            raise BackendUnavailable("offline")
 
     primary = Failing()
     backend = AutoBackend(primary)
     for _ in range(5):
-        result = await backend.generate([])
-        assert result.backend_name == "inference_unavailable"
+        with pytest.raises(BackendUnavailable):
+            await backend.chat([])
     assert primary.calls == 1
 
 
@@ -343,16 +338,12 @@ def test_pi_profile_and_strict_response_validation():
     assert cfg.max_queue_size == 64
     assert cfg.record_events is False
     assert cfg.face_fps == 30
-    registry = CapabilityRegistry(BodyCapabilities())
-    response = ResponseValidator(registry).validate(
-        {
-            "say": "hello",
-            "emotion": {"name": "happy", "intensity": "NaN"},
-            "actions": [{"tool": "stop", "args": {}}, {"tool": "spin", "args": {"angle_deg": 90}}],
-        }
-    )
-    assert math.isfinite(response.emotion.intensity)
-    assert [action.tool for action in response.actions] == ["stop"]
+    # Model-supplied numbers are validated before any skill runs: NaN never reaches a motor.
+    with pytest.raises(SkillError):
+        _coerce("degrees", {"type": "number"}, "NaN")
+    assert _coerce("degrees", {"type": "number", "minimum": 5, "maximum": 360}, 9999) == 360
+    assert not CapabilityRegistry(BodyCapabilities()).validate_tool_call(
+        ToolCallRequest("spin", {"angle_deg": float("nan")})).valid
 
 
 @pytest.mark.asyncio
@@ -447,7 +438,7 @@ async def test_transcription_never_blocks_vad_and_pending_audio_is_bounded():
 
 @pytest.mark.asyncio
 async def test_follow_up_window_starts_after_actual_speech(tmp_path):
-    backend = ControlledBackend(actions=[{"tool": "set_gaze", "args": {"target": "center"}}])
+    backend = ControlledBackend(calls=[("express", {"emotion": "happy"})])
     backend.release.set()
     harness = make_harness(tmp_path, backend=backend, real=True)
     harness.audio.realtime_sync = True
@@ -509,16 +500,17 @@ def test_recording_rotation_is_streamed_and_session_size_is_capped(tmp_path):
 @pytest.mark.asyncio
 async def test_long_input_cannot_apply_partial_memory_operations(tmp_path):
     async with make_harness(tmp_path) as harness:
-        with pytest.raises(ValueError, match="context budget"):
+        with pytest.raises(ValueError, match="too long"):
             await harness.submit_message("Remember my name is " + "a" * 3000)
         assert harness.memory.list_active() == []
 
 
-def test_corrupt_deeply_nested_model_json_never_escapes_validator():
-    validator = ResponseValidator(CapabilityRegistry(BodyCapabilities()))
-    response = validator.validate('{"x":' + "[" * 4000 + "0" + "]" * 4000 + "}")
-    assert response.fallback_used
-    assert response.actions == []
+def test_corrupt_deeply_nested_model_json_never_escapes_parsers():
+    nested = '{"x":' + "[" * 4000 + "0" + "]" * 4000 + "}"
+    calls = LlamaCppBackend.parse_tool_calls([{"id": "a", "function": {"name": "move", "arguments": nested}}])
+    assert calls[0].name == "move" and (calls[0].invalid_arguments or "x" in calls[0].arguments)
+    assert recover_text_tool_calls(nested, {"move"}) == []
+    assert recover_text_tool_calls("move(" * 2000 + ")" * 2000, {"move"}) == []
 
 
 @pytest.mark.asyncio
@@ -561,7 +553,7 @@ async def test_inference_transport_is_bounded_without_loading_a_model(oversized)
         assert payload["stream"] is False
         if oversized:
             return httpx.Response(200, content=b"x" * 70000)
-        return httpx.Response(200, json={"choices": [{"message": {"content": '{"say":"hello"}'}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "hello"}}]})
 
     client = LlamaCppBackend(LLMConfig(auto_start_server=False))
     await client._client.aclose()
@@ -569,8 +561,8 @@ async def test_inference_transport_is_bounded_without_loading_a_model(oversized)
     try:
         if oversized:
             with pytest.raises(ValueError, match="64 KiB"):
-                await client.generate([])
+                await client.chat([])
         else:
-            assert json.loads((await client.generate([])).raw_text)["say"] == "hello"
+            assert (await client.chat([])).content == "hello"
     finally:
         await client.close()

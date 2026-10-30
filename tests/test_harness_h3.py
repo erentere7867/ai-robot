@@ -12,15 +12,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from robot.actions.registry import CapabilityRegistry
 from robot.audio.asr import SpeechRecognizer
 from robot.audio.sfx import PetSoundSynthesizer
 from robot.audio.tts import RobotTTSEngine, compute_mouth_envelope
 from robot.audio.vad import VoiceActivityDetector
 from robot.behavior.fsm import InteractionState
-from robot.body.hal import BodyCapabilities
+from robot.cognition.agent import speakable
 from robot.cognition.backend import NullBackend
-from robot.cognition.validator import ResponseValidator
 from robot.core.clock import ReplayClock
 from robot.core.config import RobotConfig
 from robot.main import RobotHarness
@@ -244,10 +242,8 @@ def test_offline_windows_asr_transcribes_speech() -> None:
 
 def test_self_name_vocative_stripping() -> None:
     """Ensure the robot never addresses the human user by its own name ('Sprocket')."""
-    validator = ResponseValidator(CapabilityRegistry(BodyCapabilities()))
-    v1 = validator.validate({"say": "Hey there, Sprocket! I'm ready to help you out."})
-    assert v1.say == "Hey there! I'm ready to help you out."
-    v2 = validator.validate({"say": "I'm doing well, Sprocket! How are you?"})
-    assert v2.say == "I'm doing well! How are you?"
-    v3 = validator.validate({"say": "Hi! I'm Sprocket, your companion robot."})
-    assert v3.say == "Hi! I'm Sprocket, your companion robot."
+    assert speakable("Hey there, Sprocket! I'm ready to help you out.", {}, "Sprocket") == (
+        "Hey there! I'm ready to help you out.")
+    assert speakable("I'm doing well, Sprocket! How are you?", {}, "Sprocket") == "I'm doing well! How are you?"
+    assert speakable("Hi! I'm Sprocket, your companion robot.", {}, "Sprocket") == (
+        "Hi! I'm Sprocket, your companion robot.")

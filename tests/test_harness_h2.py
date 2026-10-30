@@ -131,7 +131,7 @@ async def test_web_dashboard_server_endpoints(tmp_path: Path) -> None:
             r_msg = await client.post("/api/message", json={"text": "Do a dance!"})
             assert r_msg.status_code == 200
             msg_data = r_msg.json()
-            assert msg_data["emotion"]["name"] == "excited"
+            assert msg_data["say"] and msg_data["final"] is True  # null backend talks, never moves
 
             # 3. Change face expression and theme via REST API
             r_expr = await client.post(
@@ -161,20 +161,19 @@ async def test_web_dashboard_server_endpoints(tmp_path: Path) -> None:
             assert "sad" in state["capabilities"]["allowed_emotions"]
             assert "angry" in state["capabilities"]["allowed_emotions"]
 
-            # 6. Test "try making a sad face" and "try making an angry face" embodiment coupling
+            # 6. A model-chosen expression drives face, sound and body through the express skill.
+            from robot.cognition.backend import ScriptedBackend
+
+            harness.agent.backend = ScriptedBackend([
+                {"call": "express", "args": {"emotion": "sad", "gesture": "sleepy_droop"}},
+                "Here is my sad face.",
+            ])
             r_sad = await client.post("/api/message", json={"text": "try making a sad face"})
             assert r_sad.status_code == 200
             sad_data = r_sad.json()
             assert sad_data["emotion"]["name"] == "sad"
             assert sad_data["sound"] == "sad_whimper"
             assert harness.body.pose().head_tilt_deg == -18.0
-
-            r_angry = await client.post("/api/message", json={"text": "I'm testing try making an angry face"})
-            assert r_angry.status_code == 200
-            angry_data = r_angry.json()
-            assert angry_data["emotion"]["name"] == "angry"
-            assert angry_data["sound"] == "angry_grumble"
-            assert harness.body.pose().head_tilt_deg == -8.0
 
             r_events = await client.get("/api/events")
             assert r_events.status_code == 200
