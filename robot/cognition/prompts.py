@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,12 +44,6 @@ Examples of good plans (always use real tool calls, never write a tool name as t
 - "find my keys": use look_around with query keys, then answer.
 - "come back to where you started": use go_to with target start, then answer.
 - "my name is Ana": use remember with the fact "The user's name is Ana.", then answer."""
-
-
-@dataclass(frozen=True, slots=True)
-class Turn:
-    role: str
-    content: str
 
 
 class PromptBuilder:

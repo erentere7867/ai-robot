@@ -14,7 +14,7 @@ ROBOT_CLEARANCE_MM = 220.0  # from an object's surface to my centre: half my len
 ARRIVE_TOLERANCE_MM = 120.0
 MAX_SEGMENT_MM = 600.0
 START_WORDS = {"start", "start point", "starting point", "home", "where i started", "where you started", "origin"}
-RELATIONS = ["near", "behind", "in_front_of", "left_of", "right_of", "between"]
+RELATIONS = ["near", "behind", "in_front_of", "left_of", "right_of", "between", "on"]
 
 
 def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -135,6 +135,9 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
                                       "too narrow for me.")
         goal = (0.5 * (ox + second.x_mm), 0.5 * (oy + second.y_mm))
         exclude = {obj.id, second.id}  # the planner would otherwise refuse a goal touching both
+    elif relation == "on":
+        goal = (ox, oy)  # something flat to drive onto (a dock, a mat): not an obstacle this time
+        exclude = {obj.id}
     elif relation == "behind":
         goal = (ox + ux * gap, oy + uy * gap)
     elif relation in ("near", "in_front_of"):
@@ -148,8 +151,10 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
     ok, why = await navigate_to(ctx, goal, exclude=exclude)
     end = ctx.pose()
     off = _dist((end.x_mm, end.y_mm), goal)
-    await ctx.face_point(*face)
-    verified = await _verify_target(ctx, obj.id)
+    verified = ""
+    if relation != "on":
+        await ctx.face_point(*face)
+        verified = await _verify_target(ctx, obj.id)
     obj = ctx.spatial_map.objects.get(obj.id, obj)
     end = ctx.pose()
     holds = _relation_holds(relation, (obj.x_mm, obj.y_mm), obj.radius_mm, start, (end.x_mm, end.y_mm), goal,
@@ -173,6 +178,8 @@ def _relation_holds(relation: str, obj: tuple[float, float], radius: float, star
     dist = math.hypot(*rel)
     if relation == "between":
         return _dist(end, goal) < 250.0
+    if relation == "on":
+        return dist < max(120.0, 0.7 * radius)
     if dist > radius + 650.0 or dist < 1.0:
         return False
     along = (rel[0] * view[0] + rel[1] * view[1]) / dist  # +1 = far side of the object as first seen
@@ -265,7 +272,7 @@ def skills() -> list[Skill]:
     return [
         Skill("go_to", "Drive to a spot relative to a known object; plans a safe path around obstacles and "
               "turns to face the object at the end. 'behind' means the far side of the object from where you "
-              "are now. For 'between' also give 'other'.",
+              "are now; 'on' drives onto something flat like a dock or mat. For 'between' also give 'other'.",
               {"target": target, "relation": {"type": "string", "enum": RELATIONS},
                "other": {"type": "string", "description": "second object id, only for between"},
                "distance_cm": {"type": "number", "minimum": 5, "maximum": 150,

@@ -2,12 +2,25 @@
 
 Local-first embodied AI robot harness for `companion_r1` (4-wheel skid-steer base, tiltable head, 5" 800×480 face display, LFM3-VL-2B).
 
-The model decides what to do, which body tools to use, and when it is finished.
-Native function calls execute body actions. The model requests the camera with `observe` when it needs vision; normal conversation has no automatic scene input.
-It can continue without another prompt, or finish immediately with no movement.
-Startup is silent. Changed observations or a model-requested wake trigger background decisions; an unchanged room makes no model calls.
-Use `stop` to interrupt and pause autonomy, and **Autonomy on** / `resume autonomy`
-to resume. See [model loop](docs/agentic-runtime.md) for the execution contract.
+A small vision-language model decides what to do; generic closed-loop skills do it. The robot sees
+with open-vocabulary detection (the VLM's own grounding), places what it sees on a map with camera
+geometry, plans paths around obstacles it has sensed, and remembers facts, places and events.
+"What do you see?" → "go behind that box" works without any task-specific code: the model calls
+`observe`, then `go_to(target=box_1, relation=behind)`, and the skill plans, drives, replans and
+checks the result.
+
+When nobody is talking to it, drives (curiosity, social, play, battery) and camera changes give the
+pet its own reasons to act; the model decides whether and how. Use `stop` to interrupt and pause
+autonomy, and **Autonomy on** / `resume autonomy` to resume.
+
+See [architecture](docs/architecture.md) for how it works, how to measure it, and the Raspberry Pi
+plan, and [evaluation](docs/evaluation.md) for the simulator test suite.
+
+Try it from a terminal (needs the model files below):
+
+```bash
+python scripts/try_robot.py "what do you see?" "go behind that box" "now come back to where you started"
+```
 
 ## Quick Start
 
@@ -21,20 +34,21 @@ For the Raspberry Pi 5 (4 GB), use the harness resource profile:
 python -m robot --config config/robot.pi5.yaml --headless --no-dashboard
 ```
 
-This profile changes queue/history limits, animation rate, and diagnostic recording. It leaves
-model settings at their existing defaults. To retain a custom model configuration, copy its `llm`
-section into the profile. Add `--mic` when microphone input is wanted; microphone input requires
-a wake word by default. Console/dashboard messages are direct input.
+This profile uses CPU inference, smaller history, and a slower autonomy cadence. Add `--mic` when
+microphone input is wanted; microphone input requires a wake word by default. Console/dashboard
+messages are direct input.
 
-Use `--backend null --mute` for a simulation-only smoke test. The repository currently provides
-`SimBody`; a physical motor/sensor driver is still required for real hardware.
+Use `--backend null --mute` for a wiring smoke test without the model (the robot talks but never
+moves). The repository provides simulated bodies (`SimBody`, and a MuJoCo-dynamics body selected
+with `runtime.body_backend: physics`); a physical motor/sensor driver is still required for real
+hardware.
 
 ### 1. Run Automated Tests
 ```powershell
 & "$env:USERPROFILE\robot-runtime\venv\Scripts\python.exe" -m pytest -v
 ```
 
-### 2. Start the Local LFM3-Omni-2B Server (Optional — Offline Mode Works Without It)
+### 2. Start the Local LFM3-VL-2B Server (the harness also starts it automatically)
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\start_llm.ps1
 ```
@@ -51,7 +65,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_llm.ps1
 & "$env:USERPROFILE\robot-runtime\venv\Scripts\python.exe" -m robot.face.process
 ```
 
-### 4. Benchmark LFM3-Omni-2B on Your Laptop GPU
+### 4. Benchmark the Model on Your Machine
 ```powershell
 & "$env:USERPROFILE\robot-runtime\venv\Scripts\python.exe" .\scripts\bench_llm.py
 ```
