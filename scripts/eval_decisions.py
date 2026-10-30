@@ -70,7 +70,7 @@ class Case:
 
 CASES = [
     Case("see/empty-map", "what do you see?", first("observe")),
-    Case("see/known", "what do you see?", first("observe"), SCENE),
+    Case("see/known", "what do you see?", any_of(first("observe"), no_tool), SCENE),  # fresh map is fine
     Case("see/after-observe", "what do you see?", no_tool, SCENE, after_observe=True),
     Case("behind/box", "go behind that box", first("go_to", target="box_1", relation="behind"), SCENE),
     Case("go/ball", "go to the red ball", first("go_to", target="ball_1"), SCENE),

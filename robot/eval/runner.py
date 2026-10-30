@@ -115,6 +115,9 @@ def apply_scene(sandbox: Any, scenario: Scenario, seed: int) -> None:
 def build_config(options: RunOptions, db_path: Path) -> RobotConfig:
     cfg = RobotConfig.from_yaml(options.config_path)
     cfg.database_path = db_path
+    # The spatial map is persisted on shutdown; sharing it would leak one scene's objects into the next.
+    if hasattr(cfg, "spatial_map_path"):
+        cfg.spatial_map_path = db_path.with_name(db_path.stem + "_map.json")
     cfg.record_events = False
     cfg.autonomy.enabled = False
     if options.backend:
