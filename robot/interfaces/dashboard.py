@@ -2867,7 +2867,7 @@ class DashboardServer:
         self,
         harness: RobotHarness,
         *,
-        host: str = "127.0.0.1",
+        host: str = "0.0.0.0",
         port: int = 8090,
         max_events: int = 120,
     ) -> None:
@@ -2895,7 +2895,8 @@ class DashboardServer:
 
     @property
     def url(self) -> str:
-        return f"http://{self.host}:{self.bound_port}"
+        h = "127.0.0.1" if self.host in ("0.0.0.0", "::", "") else self.host
+        return f"http://{h}:{self.bound_port}"
 
     async def start(self) -> None:
         if self._server is not None:
@@ -3275,6 +3276,27 @@ class DashboardServer:
         }
         self._view = view
         return {k: v for k, v in view.items() if k not in ("ts", "turn")}
+    @staticmethod
+    def _is_allowed_origin(origin: str, host_header: str | None) -> bool:
+        if not origin:
+            return True
+        try:
+            from urllib.parse import urlparse
+            import ipaddress
+            parsed = urlparse(origin)
+            if parsed.scheme not in ("http", "https"):
+                return False
+            if host_header and parsed.netloc.lower() == host_header.lower():
+                return True
+            orig_host = (parsed.hostname or "").lower()
+            if orig_host in ("localhost", "127.0.0.1", "::1") or orig_host.endswith(".ts.net") or "." not in orig_host:
+                return True
+            ip = ipaddress.ip_address(orig_host)
+            return True
+        except Exception:
+            pass
+        return False
+
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
@@ -3314,12 +3336,9 @@ class DashboardServer:
                         headers[key] = value.strip()
                     else:
                         raise ValueError("Too many headers")
-                    allowed_hosts = {f"127.0.0.1:{self.bound_port}", f"localhost:{self.bound_port}"}
-                    if headers.get("host") not in allowed_hosts:
-                        raise PermissionError("Invalid Host")
-                    if headers.get("origin") and headers["origin"] not in {
-                        "http://" + h for h in allowed_hosts
-                    }:
+                    if "host" not in headers:
+                        raise ValueError("Missing Host header")
+                    if headers.get("origin") and not self._is_allowed_origin(headers.get("origin"), headers.get("host")):
                         raise PermissionError("Cross-origin control is forbidden")
                     length = int(headers.get("content-length", "0"))
                     if not 0 <= length <= 16384 or "transfer-encoding" in headers:
