@@ -95,6 +95,12 @@ rams it); `stop` without the human asking to stop is refused (the model confuses
 6. Fusion is Kalman-style and time-weighted. A sighting's variance grows with range (close looks
    outweigh distant ones); frames from a continuous stream each count for less (`weight`), so detector
    flicker neither creates nor deletes objects; a box cut off by the image's edge is weak evidence.
+7. The trained detector's labels outrank remembered ones: a track it keeps calling something else (about
+   one full view's worth of sightings) is renamed, with a new id if the old one names the old kind
+   ("box_2" -> "cube_1"; the old id still finds it). Found in a real session: a map restored from an
+   older detector held the blue cube as "box" and the red ball as "pink ball", and the model answered
+   from those names. The catch-all "object" never renames a named track, and an "object" box lying over
+   a named one is dropped (the same thing seen twice, which put phantom objects next to real ones).
 
 The simulator's ground truth (`sandbox.detect_objects`, `render_head_labels`) is used for training data,
 the dashboard's debug view and the evaluation graders, never by the robot while it runs.
@@ -117,16 +123,33 @@ messages, never as text summaries of actions, or it starts *writing* actions ins
   written in words (code-like examples make it print calls as text).
 - `recover_text_tool_calls` accepts a reply that is *only* a call written as text.
 - Loop guards: the same call three times, or four failures, ends the turn with an honest message;
-  a second `observe` from the same pose returns the cached view.
+  a second `observe` from the same pose returns the cached view, object list included (it used to say
+  only "I can see 4 things", and with the first list trimmed from an over-long prompt the model answered
+  "I don't see a cardboard box" with one in view). Trimmed results keep the names of what was seen.
 - A successful idempotent call (`go_to`, `turn_to`, `look_around`, ...) repeated from the same spot is
   not run again: the model is told it is already done and its next answer must be a reply
   (`tool_choice: none`). A small model otherwise re-issues the call after success until the loop guard
   stops it with a misleading "I keep trying".
-- The last tool result of each step carries a `next` hint built from the human's words. A request with
-  several steps ("then", "after", "and go ...") is restated ("Answer the human now, unless the request
-  asks for another step that is not done yet"), so "go to the ball and then to the cube" is not dropped
-  after the first part; a one-step request gets "If that finishes ..., answer the human now". Merged
-  into the result text instead, the hint was obeyed as an instruction and made things worse (measured).
+- The last tool result of each step carries a `next` hint built from the human's words ("If that
+  finishes ..., answer the human now"). Merged into the result text instead, the hint was obeyed as an
+  instruction and made things worse (measured).
+- A to-do list for requests with several parts (`cognition/planner.py`): "go to that ball and come back"
+  is cut into "go to that ball" | "come back" at sequencing words ("then", "after that", "and" + an action
+  verb), in the human's own words, and the model gets one part at a time. A part ends when its main
+  action succeeds (`go_to`, `circle_around`, `move`, `express`, ...; looking and turning are steps
+  towards it), or, for a spoken part ("tell me what you see"), when the model answers; then the next part
+  is handed over with a fresh view of where things are. Only the answers are spoken, questions in between
+  are dropped. Tried first and dropped: letting the model write the plan. As tool steps or as parts, the
+  2B model left parts out, paraphrased them wrongly ("back up a little" -> "stop") and invented new ones
+  ("hi!" -> two parts); writing a one-line plan before its first call made that call worse
+  (23/27 -> 18/27 right first calls). Ending a part on the model's own "done" failed too: it kept calling
+  tools ("I'm at the ball. Let me come back now." + `go_to` the ball).
+- Arguments are checked against the current part's words, not the whole request: `go_to` relations
+  (below), and "come back" / "return": the robot remembers where it was when the human asked
+  (`where_asked`), and a "come back" part that calls `go_to` on something it does not name goes there
+  instead (the 2B model called `go_to(ball_1)` for "come back", with the place listed and an example).
+- Calls written as markup (`<tool_call><function=go_to>...`) are recovered as real calls and never spoken.
+- `look_around(query="behind me")` turns that way and looks instead of searching for a "behind me".
 - `go_to` checks its arguments against the request: if the human named exactly one relation
   ("between", "behind", "left of", ...) and the call says `near`, it is rejected with the relation to use.
 - Only `observe` puts a camera image in the model's context. The views skills take for their own checks
@@ -175,8 +198,15 @@ use slot 0 and camera requests slot 1 (`id_slot`), so a VLM look never evicts th
   find the duck and go to it 41 → 8 s, come back to the start 15 → 9 s, look around and report 4.4 → 2.7 s.
 - Reaction time, request to wheels moving: median 0.84 s, 90th percentile 2.3 s (it includes the model's
   decision; "stop" bypasses the model and halts within one control tick).
-- Decision benchmark (`eval_decisions.py`, first tool call in 21 situations): 95% at 0.5 s per decision
-  (67% at the start of the rework). With LFM3-VL-2B-QAD-Q4_0: 83%.
+- Several-part tasks in a person's own words (`--scenarios tasks`, 7 tasks x 3 layouts, added with the
+  to-do list): 20/21 (`v27-tasks-plan.json`, and `v28-back-plan.json` for "go to that ball and come back"
+  after its scene was fixed). "Go to that ball and come back": 3/3 with the to-do list, 0/3 without it
+  (the robot stayed at the ball). Circling the box (unseen first, clockwise, "the thing behind you"),
+  "do you see a cardboard box?" and "look behind you and tell me what you see": all 3/3. The other sets on
+  the same code (`v26-all.json`): core 28/28, harder 22/22 with `back_up` 2/2, real-time 8/8.
+- Decision benchmark (`eval_decisions.py`, first tool call in 21 situations): 90% at 0.8 s per decision
+  with the F16 vision projector (re-measured 2026-11-01; 95% at 0.5 s in an earlier run). With
+  LFM3-VL-2B-QAD-Q4_0 (the November download): 71%, and no faster on this GPU.
 - Fast detector: 16 ms per frame with NCNN on the laptop CPU (4 threads), 12 ms with PyTorch CUDA;
   validation mAP50 0.988; on fresh scenes 0.90 precision / 0.91 recall at IoU 0.5. Map fusion 0.5 ms.
 - Autonomy (`try_autonomy.py`): left alone, the curiosity drive woke it, it explored, found new
@@ -186,8 +216,12 @@ Known limitations:
 
 - The detector is trained on the simulator's objects. On the real robot, add camera frames of your room
   and objects (and a `person` class) and retrain; the pipeline is the same.
-- The remaining eval misses are a stop 1.5 cm past the 45 cm limit where another object blocks the
-  exact spot, and the model occasionally choosing an odd tool (e.g. a half turn for "back up a little").
+- The remaining eval misses come from the 2B model's choices: an odd tool now and then (a half turn for
+  "back up a little"), circling the object in front for "the thing behind you" once, parking 8 cm too
+  far once. "Come back" works through the request check in `go_to`, not because the model maps it to the
+  right place.
+- The robot cannot see people yet and does not know who spoke, so "follow me" does not work: that needs a
+  `person` class in the detector and a direction-of-arrival microphone array; not built yet.
 - The general "what is here" detection sometimes invents objects (a "laptop", a "banner") from walls
   or the dock's base. Searches for a specific thing are confirmed on a crop with a yes/no question;
   the general inventory is not, to keep it to one model call per view.

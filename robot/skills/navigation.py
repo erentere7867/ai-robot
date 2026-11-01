@@ -23,8 +23,8 @@ from robot.control.behaviors import (
     occupied_points,
 )
 from robot.skills.base import Skill, SkillContext, SkillError, SkillResult
-from robot.skills.perception import find, look_around
-from robot.world.spatial_map import TrackedObject
+from robot.skills.perception import find, in_view, look_around
+from robot.world.spatial_map import ASKED_PLACE, TrackedObject, head_noun
 
 START_WORDS = {"start", "start point", "starting point", "home", "where i started", "where you started", "origin"}
 RELATIONS = ["near", "behind", "in_front_of", "left_of", "right_of", "between", "on"]
@@ -43,6 +43,11 @@ RELATION_WORDS = {"between": re.compile(r"\bbetween\b"), "behind": re.compile(r"
                   "left_of": re.compile(r"\bleft (?:of|side)\b"),
                   "right_of": re.compile(r"\bright (?:of|side)\b")}
 _BETWEEN = re.compile(r"\bbetween (?:the )?(.+?) and (?:the )?(.+?)(?:[.,!?]|$)")
+# "come back", "go back", "return": a way home, not a thing. Grounded in the request like the relations.
+# A distance the human said ("30 cm", "half a metre"); otherwise a distance in the call is the model's guess.
+_SAID_DISTANCE = re.compile(r"\d|\b(?:half|quarter)\b|\b(?:cm|centimet\w*|met(?:er|re)s?|inch\w*|feet|foot)\b",
+                            re.I)
+_RETURN = re.compile(r"\b(?:come|go|get|head|drive|walk|roll) back\b|\breturn\b|\bcome here\b", re.I)
 _ON_WORDS = re.compile(r"\b(?:on|onto|on top|dock|charg\w*|mat|platform|pad)\b", re.I)
 
 
@@ -79,16 +84,48 @@ async def _resolve(ctx: SkillContext, target: str) -> TrackedObject:
     return obj
 
 
+def _return_place(ctx: SkillContext, target: str) -> str | None:
+    """The place a "come back" request means when the call names something the request does not.
+
+    Measured: handed the part "come back" after reaching the ball, the 2B model called go_to(ball_1) again
+    even with the place listed and an example in the rules.
+    """
+    request = (ctx.request or "").lower()
+    if not _RETURN.search(request) or ctx.spatial_map.place(target) is not None:
+        return None
+    if target.strip().lower() in START_WORDS:
+        return None
+    obj = ctx.spatial_map.resolve(target, ctx.pose())
+    if obj is not None and (obj.id in request or head_noun(obj.label) in request.replace("_", " ")):
+        return None  # "come back to the box": the object is the goal
+    if "start" in request and "start" in ctx.spatial_map.places:
+        return "start"
+    return ASKED_PLACE if ASKED_PLACE in ctx.spatial_map.places else None
+
+
 async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: str = "",
                 distance_cm: float | None = None) -> SkillResult:
-    if target.strip().lower() in START_WORDS:
+    target = _return_place(ctx, target) or target
+    place = ctx.spatial_map.place(target)
+    if target.strip().lower() in START_WORDS or (place is not None and place[0] == "start"):
         goal = ctx.spatial_map.places.get("start", (0.0, 0.0))
         done = await ctx.behave(GoToPoint(goal, "my start point"))
         msg = "I'm back at my start point." if done.ok else done.message
         pose = ctx.pose()
         return SkillResult(done.ok, msg, {"distance_to_goal_m": round(math.hypot(pose.x_mm - goal[0],
                                                                                  pose.y_mm - goal[1]) / 1000, 2)})
+    if place is not None:
+        name, goal = place
+        words = "where I was when you asked" if name == ASKED_PLACE else name.replace("_", " ")
+        done = await ctx.behave(GoToPoint(goal, words))
+        msg = f"I'm back {words}." if done.ok else done.message
+        pose = ctx.pose()
+        return SkillResult(done.ok, msg, {"distance_to_goal_m": round(math.hypot(pose.x_mm - goal[0],
+                                                                                 pose.y_mm - goal[1]) / 1000, 2)})
     obj = await _resolve(ctx, target)
+    if distance_cm is not None and ctx.request and not _SAID_DISTANCE.search(ctx.request):
+        # Measured: for "park next to it" the 2B model passed distance_cm=100 and stopped a metre away.
+        distance_cm = None
     asked = _asked_relation(ctx.request)
     repaired = ""
     if asked and relation in ("near", "in_front_of"):
@@ -167,15 +204,20 @@ async def turn(ctx: SkillContext, direction: str, degrees: float | None = None) 
     ctx.attached_image = None
     if not done.ok:
         return SkillResult(False, done.message)
-    return SkillResult(True, f"Turned {direction} {abs(angle):.0f} degrees.")
+    return SkillResult(True, f"Turned {direction} {abs(angle):.0f} degrees.", in_view(ctx))
 
 
 ALL_WORDS = {"all", "everything", "objects", "all objects", "all of the objects", "all the objects", "things",
              "all things", "the objects", "room"}
 
 
-async def circle_around(ctx: SkillContext, target: str = "all", laps: float = 1.0) -> SkillResult:
-    """Drive a loop around one object, or around everything known, at a safe distance."""
+async def circle_around(ctx: SkillContext, target: str = "all", laps: float = 1.0, direction: str = "left",
+                        radius_cm: float | None = None) -> SkillResult:
+    """Drive a loop around one object, or around everything known, at a safe distance.
+
+    "left" keeps the object on my left (anticlockwise seen from above), "right" on my right. A radius
+    smaller than the safe one is raised to it.
+    """
     key = target.strip().lower()
     if key in ALL_WORDS:
         objs = [o for o in ctx.spatial_map.objects.values() if o.confidence >= 0.3]
@@ -191,8 +233,12 @@ async def circle_around(ctx: SkillContext, target: str = "all", laps: float = 1.
     cx = sum(o.x_mm for o in objs) / len(objs)
     cy = sum(o.y_mm for o in objs) / len(objs)
     radius = max(math.hypot(o.x_mm - cx, o.y_mm - cy) + o.radius_mm for o in objs) + ROBOT_CLEARANCE_MM + 80.0
+    if radius_cm is not None:
+        radius = max(radius, min(1500.0, 10.0 * float(radius_cm)))
     pose = ctx.pose()
-    done = await ctx.behave(Orbit((cx, cy), radius, laps, math.atan2(pose.y_mm - cy, pose.x_mm - cx), name))
+    clockwise = str(direction).strip().lower() in {"right", "clockwise", "cw"}
+    done = await ctx.behave(Orbit((cx, cy), radius, laps, math.atan2(pose.y_mm - cy, pose.x_mm - cx), name,
+                                  clockwise))
     return SkillResult(done.ok, done.message)
 
 
@@ -284,7 +330,10 @@ def skills() -> list[Skill]:
               turn, ["direction"]),
         Skill("circle_around", "Drive a loop around one object or around all known objects, keeping a safe "
               "distance.", {"target": {"type": "string", "description": "object id, or all"},
-                            "laps": {"type": "number", "minimum": 0.25, "maximum": 3}},
+                            "laps": {"type": "number", "minimum": 0.25, "maximum": 3},
+                            "direction": {"type": "string", "enum": ["left", "right"],
+                                          "description": "left = anticlockwise (default), right = clockwise"},
+                            "radius_cm": {"type": "number", "description": "optional: a wider circle"}},
               circle_around),
         Skill("move", "Drive straight forward or backward. 'A little' is about 20 cm.",
               {"direction": {"type": "string", "enum": ["forward", "backward"]},

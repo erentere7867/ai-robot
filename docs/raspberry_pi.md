@@ -58,7 +58,10 @@ from a serial terminal to test the base before starting the robot software.
 * **Lazy PNG**: frames are only PNG-encoded when the VLM needs one (~10-20 ms of a Pi core saved per frame).
 * **One loop for perception and control**: no thread contention; the detector runs in one worker thread.
 * **Q4_K_M, not QAD-Q4_0, by default**: QAD-Q4_0 is faster on ARM (repacked for the dot-product
-  instructions) but scored 83% vs 95% on the decision benchmark. To trade accuracy for speed, swap the
-  two model lines in `config/robot.pi5.yaml`.
+  instructions) but measured worse in the simulator (2026-11-01: decisions 71% vs 90%, core tasks 24/28
+  vs 28/28, several-part tasks 17/21 vs 20/21). To trade accuracy for speed, swap the two model lines in
+  `config/robot.pi5.yaml`, and measure `scripts/bench_pi.py` on the Pi before deciding.
+* **F16 vision projector** (380 MB; Q8_0 is 205 MB): the user's choice for image quality; on a 4 GB Pi the
+  Q8_0 file is the fallback if memory runs short.
 * **Prompt caching**: decisions reuse ~2,100 cached prompt tokens and process only ~40 new ones, which is
   what makes a CPU-only 2B model usable for decisions at all.

@@ -24,10 +24,12 @@ agent:
   max_steps: 14        # model calls per request
   max_actions: 200
   timeout_s: 300.0
+  plan: true           # several-part requests ("... and come back") are done one part at a time
 
 autonomy:
   enabled: true
   idle_after_s: 20.0          # quiet time after the human spoke before acting alone
+  speak_interval_s: 180.0     # says something unasked at most this often
   observation_interval_s: 1.0 # cheap checks (drives, camera thumbnail); no model calls
   think_interval_s: 45.0      # minimum gap between background decisions
   drive_rate_scale: 1.0       # >1 makes curiosity/social/play build up faster (demos)
@@ -37,7 +39,7 @@ llm:
   base_url: "http://127.0.0.1:8080"
   model_name: "LFM3-VL-2B-Q4_K_M"
   model_path: "~/Downloads/LFM3-VL-2B-Q4_K_M.gguf"
-  mmproj_path: "~/Downloads/mmproj-LFM3-VL-2B-Q8_0.gguf"
+  mmproj_path: "~/Downloads/mmproj-LFM3-VL-2B-F16.gguf"
   llama_server_bin: "~/robot-runtime/llama.cpp/llama-server.exe"
   ctx_size: 8192
   timeout_s: 90.0

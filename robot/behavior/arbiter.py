@@ -21,6 +21,7 @@ from robot.memory.consolidator import MemoryConsolidator
 from robot.memory.policy import extract_explicit_memory_proposals
 from robot.memory.store import MemoryStore
 from robot.skills.base import SkillContext
+from robot.world.spatial_map import ASKED_PLACE
 from robot.world.state import WorldState
 
 logger = logging.getLogger(__name__)
@@ -236,6 +237,8 @@ class BehaviorArbiter:
         core = [m.content for m in self.memory.core_facts(limit=5)] if hasattr(self.memory, "core_facts") else []
         memories = [m for m in memories if m not in core]
         pose = self.ctx.pose()
+        if not autonomous:
+            self.ctx.spatial_map.places[ASKED_PLACE] = (pose.x_mm, pose.y_mm)
         battery = getattr(self.ctx.body.sensors(), "battery_pct", None)
         situation = self.prompts.situation(
             world=self.ctx.spatial_map.render_for_prompt(pose), core_facts=core, memories=memories,

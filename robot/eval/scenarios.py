@@ -639,26 +639,71 @@ def grade_sad_face(run: ScenarioRun) -> Grade:
                      (bool(turn.say.strip()), "replied" if turn.say.strip() else "empty reply")], {})
 
 
-def grade_circle_box(run: ScenarioRun) -> Grade:
-    box = run.object("cardboard_box")
-    if box is None:
-        return _missing("cardboard_box")
-    bx, by = float(box["x_mm"]), float(box["y_mm"])
-    # Sweep of the robot's bearing as seen from the box, unwrapped along the path.
+def _sweep_deg(poses: Iterable[Pose], obj: SceneObject) -> tuple[float, float]:
+    """(coverage, net signed sweep) of the robot's bearing as seen from the object, unwrapped along the path;
+    a positive sweep is anticlockwise."""
+    bx, by = float(obj["x_mm"]), float(obj["y_mm"])
     swept, last, lo, hi = 0.0, None, 0.0, 0.0
-    for p in run.turns[-1].poses():
+    for p in poses:
         a = math.degrees(math.atan2(float(p["y_mm"]) - by, float(p["x_mm"]) - bx))
         if last is not None:
             swept += wrap_deg(a - last)
             lo, hi = min(lo, swept), max(hi, swept)
         last = a
-    coverage = hi - lo
-    hits = _collisions(run, box)
-    return _verdict(
-        [(coverage >= 300.0, f"went {coverage:.0f} deg around the box"),
-         (not hits["contacts"], f"{hits['contacts']} contact poses")],
-        {"coverage_deg": round(coverage, 1), **hits},
-    )
+    return hi - lo, swept
+
+
+def _circle_grader(obj_id: str, clockwise: bool | None = None) -> Callable[[ScenarioRun], Grade]:
+    def grade(run: ScenarioRun) -> Grade:
+        obj = run.object(obj_id)
+        if obj is None:
+            return _missing(obj_id)
+        coverage, swept = _sweep_deg(run.turns[-1].poses(), obj)
+        hits = _collisions(run, obj)
+        checks = [(coverage >= 300.0, f"went {coverage:.0f} deg around {obj_id}"),
+                  (not hits["contacts"], f"{hits['contacts']} contact poses")]
+        if clockwise is not None:
+            checks.append(((swept < 0) == clockwise, "clockwise" if swept < 0 else "anticlockwise"))
+        return _verdict(checks, {"coverage_deg": round(coverage, 1), "swept_deg": round(swept, 1), **hits})
+
+    return grade
+
+
+grade_circle_box = _circle_grader("cardboard_box")
+
+
+def grade_there_and_back(run: ScenarioRun) -> Grade:
+    ball = run.object("red_ball")
+    if ball is None:
+        return _missing("red_ball")
+    start, end = run.turns[0].pose_before, run.turns[-1].pose_after
+    closest = min(distance_mm(p, ball) for p in run.all_poses())
+    away = max(distance_mm(start, p) for p in run.all_poses())
+    back = distance_mm(start, end)
+    return _verdict([(closest <= 450.0, f"came within {closest:.0f} mm of the ball"),
+                     (back <= 300.0 and away - back >= 400.0, f"ended {back:.0f} mm from where it started, "
+                                                               f"after going {away:.0f} mm away")],
+                    {"ball_min_mm": round(closest, 1), "away_mm": round(away, 1), "end_from_start_mm": round(back, 1)})
+
+
+_YES = re.compile(r"\b(?:yes|yeah|yep|i (?:can )?see (?:a|the|one)|there(?:'s| is) a)\b", re.I)
+_NO = re.compile(r"\b(?:no|don't see|do not see|can't see|cannot see|not see)\b", re.I)
+
+
+def grade_sees_box(run: ScenarioRun) -> Grade:
+    say = run.turns[-1].say
+    yes = bool(_YES.search(say)) and not _NO.search(say)
+    return _verdict([(yes, "said yes" if yes else f"did not say yes: {say[:70]!r}")], {})
+
+
+def grade_look_back_and_tell(run: ScenarioRun) -> Grade:
+    turn = run.turns[-1]
+    turned = abs(heading_change_deg(turn.pose_before, turn.pose_after))
+    behind = visible_families([turn.pose_after], run.objects, run.camera)
+    named = mentioned_families(turn.say) & behind
+    return _verdict([(turned >= 140.0, f"turned {turned:.0f} deg"),
+                     (bool(named), f"named {sorted(named)} of {sorted(behind)} now in view")],
+                    {"turned_deg": round(turned, 1), "in_view": sorted(behind), "named": sorted(named)})
 
 
 def _near_grader(obj_id: str, limit_mm: float) -> Callable[[ScenarioRun], Grade]:
@@ -743,6 +788,7 @@ class Scenario:
     setup: SceneSetup = field(default_factory=SceneSetup)
     restart_before: frozenset[int] = frozenset()
     hard: bool = False  # the harder set: repeats, chained steps, references to earlier turns
+    tasks: bool = False  # several-step tasks in a person's own words (what the task list is for)
     realtime: bool = False  # moving objects, following, interruptions
     # Per utterance index: seconds to keep watching after the reply (persistent behaviours, moving scenes).
     hold_s: tuple[float, ...] = ()
@@ -918,21 +964,48 @@ HARD_SCENARIOS: tuple[Scenario, ...] = (
              grade_left_of_box, SceneSetup(overrides={"cardboard_box": (900.0, 0.0), "green_mug": (1150.0, -700.0)}),
              hard=True),
 )
-SCENARIO_LIST = SCENARIO_LIST + HARD_SCENARIOS + REALTIME_SCENARIOS
+# Open space around the box so a loop fits; "behind" puts the one object behind the robot at the start.
+_ROOMY_BOX = {"cardboard_box": (700.0, 0.0), "red_ball": (300.0, 900.0), "blue_cube": (300.0, -900.0),
+              "green_mug": (1250.0, -900.0), "yellow_duck": (1250.0, 900.0)}
+_BOX_BEHIND = {"cardboard_box": (-750.0, 0.0), "red_ball": (650.0, 450.0), "blue_cube": (650.0, -450.0),
+               "green_mug": (-400.0, 1100.0), "yellow_duck": (-400.0, -1100.0), "charging_dock": (1100.0, -1100.0)}
+TASK_SCENARIOS: tuple[Scenario, ...] = (
+    Scenario("there_and_back", "Go to the ball and come back, in one request", ("go to that ball and come back",),
+             grade_there_and_back, SceneSetup(overrides={"red_ball": (1000.0, 300.0), "cardboard_box": (-300.0, -1000.0),
+                                                        "yellow_duck": (-700.0, 700.0)},
+                                              jitter_mm=60.0), tasks=True),
+    Scenario("circle_behind", "Circle the thing that is behind the robot", ("do a circle around the thing behind you",),
+             grade_circle_box, SceneSetup(overrides=_BOX_BEHIND, jitter_mm=40.0), tasks=True),
+    Scenario("circle_unseen", "Circle the box without having looked first", ("do a circle around the cardboard box",),
+             grade_circle_box, SceneSetup(overrides=_ROOMY_BOX, jitter_mm=40.0), tasks=True),
+    Scenario("circle_clockwise", "Circle the box clockwise", ("drive around the cardboard box clockwise",),
+             _circle_grader("cardboard_box", clockwise=True), SceneSetup(overrides=_ROOMY_BOX, jitter_mm=40.0),
+             tasks=True),
+    Scenario("see_box", "Say yes when asked about a box that is in view", ("do you see a cardboard box?",),
+             grade_sees_box, tasks=True),
+    Scenario("find_and_park", "Find a duck behind the robot and park next to it",
+             ("find the duck and park next to it",), _near_grader("yellow_duck", 450.0),
+             SceneSetup(overrides={"yellow_duck": (-800.0, -350.0)}), tasks=True),
+    Scenario("look_back_tell", "Turn around and say what is there", ("look behind you and tell me what you see",),
+             grade_look_back_and_tell, SceneSetup(overrides=_BOX_BEHIND, jitter_mm=40.0), tasks=True),
+)
+SCENARIO_LIST = SCENARIO_LIST + HARD_SCENARIOS + REALTIME_SCENARIOS + TASK_SCENARIOS
 SCENARIOS: dict[str, Scenario] = {s.name: s for s in SCENARIO_LIST}
 
 
 def select_scenarios(spec: str) -> list[Scenario]:
-    """Parse `all`, `core` (the original set), `hard`, or a comma-separated list of scenario names."""
+    """Parse `all`, `core` (the original set), `hard`, `realtime`, `tasks`, or comma-separated names."""
     names = [n.strip() for n in (spec or "all").split(",") if n.strip()]
     if not names or names == ["all"]:
         return list(SCENARIO_LIST)
     if names == ["core"]:
-        return [s for s in SCENARIO_LIST if not s.hard and not s.realtime]
+        return [s for s in SCENARIO_LIST if not s.hard and not s.realtime and not s.tasks]
     if names == ["hard"]:
         return [s for s in SCENARIO_LIST if s.hard]
     if names == ["realtime"]:
         return [s for s in SCENARIO_LIST if s.realtime]
+    if names == ["tasks"]:
+        return [s for s in SCENARIO_LIST if s.tasks]
     unknown = [n for n in names if n not in SCENARIOS]
     if unknown:
         raise ValueError(f"Unknown scenario(s): {', '.join(unknown)}; choose from {', '.join(SCENARIOS)}")

@@ -148,7 +148,9 @@ class FastLoop:
         return asyncio.ensure_future(self.detector.detect(frame, None))
 
     def _fuse(self, frame: Any, detections: list[Any], weight: float) -> Any:
-        update = self.world.integrate_view(frame.pose, frame.model, detections, weight=weight)
+        # A trained detector's fixed classes outrank labels remembered from an older session or detector.
+        update = self.world.integrate_view(frame.pose, frame.model, detections, weight=weight,
+                                           relabel=hasattr(self.detector, "vocabulary"))
         self.last_detections, self.last_frame = detections, frame
         return update
 

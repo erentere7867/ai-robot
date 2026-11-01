@@ -1,0 +1,1012 @@
+{
+  "schema": 1,
+  "started_at": "2026-11-01T14:08:43+00:00",
+  "finished_at": "2026-11-01T14:09:10+00:00",
+  "git_commit": "79ea48b",
+  "backend": "auto",
+  "options": {
+    "config": "config/robot.noplan.yaml",
+    "timeout_s": 300.0,
+    "allow_server_start": false,
+    "scenarios": [
+      "there_and_back"
+    ],
+    "seeds": [
+      0,
+      1,
+      2
+    ]
+  },
+  "summary": {
+    "total": 3,
+    "passed": 0,
+    "pass_rate": 0.0,
+    "errors": 0,
+    "model_calls": 12,
+    "seconds": 26.2,
+    "by_scenario": {
+      "there_and_back": {
+        "passed": 0,
+        "total": 3
+      }
+    }
+  },
+  "results": [
+    {
+      "scenario": "there_and_back",
+      "description": "Go to the ball and come back, in one request",
+      "seed": 0,
+      "passed": false,
+      "reason": "ended 627 mm from where it started, after going 627 mm away",
+      "details": {
+        "ball_min_mm": 386.9,
+        "away_mm": 627.5,
+        "end_from_start_mm": 627.5
+      },
+      "error": null,
+      "seconds": 9.0,
+      "model_calls": 4,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 954.7,
+          "y_mm": 306.7,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 649.2,
+          "y_mm": -253.3,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -664.3,
+          "y_mm": 676.7,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 847.0,
+          "y_mm": -62.3,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": -326.8,
+          "y_mm": -985.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -718.1,
+          "y_mm": -2.7,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 954.7,
+          "y_mm": 306.7,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 649.2,
+          "y_mm": -253.3,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -664.3,
+          "y_mm": 676.7,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 847.0,
+          "y_mm": -62.3,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": -326.8,
+          "y_mm": -985.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -718.1,
+          "y_mm": -2.7,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "go to that ball and come back",
+          "say": "I'm at the ball and ready to come back! What would you like me to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 4,
+          "seconds": 8.79,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 3.79,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 570.4,
+            "y_mm": 261.5,
+            "heading_deg": 8.7,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {},
+              "ok": true,
+              "message": "I can see 3 thing(s)."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "ball_1"
+              },
+              "ok": true,
+              "message": "Arrived near ball_1 (as close as the space allows). I can see ball_1 0.4 m away."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              7.4,
+              0.4,
+              4.5,
+              0.0
+            ],
+            [
+              25.6,
+              3.0,
+              9.4,
+              0.0
+            ],
+            [
+              53.4,
+              8.8,
+              12.6,
+              0.0
+            ],
+            [
+              87.0,
+              17.4,
+              14.9,
+              0.0
+            ],
+            [
+              251.6,
+              73.2,
+              20.7,
+              0.0
+            ],
+            [
+              273.9,
+              83.0,
+              24.8,
+              0.0
+            ],
+            [
+              296.1,
+              94.2,
+              27.5,
+              0.0
+            ],
+            [
+              323.1,
+              109.6,
+              30.2,
+              0.0
+            ],
+            [
+              342.7,
+              121.4,
+              31.5,
+              0.0
+            ],
+            [
+              368.4,
+              137.9,
+              32.9,
+              0.0
+            ],
+            [
+              493.7,
+              227.7,
+              37.1,
+              0.0
+            ],
+            [
+              515.0,
+              241.8,
+              29.1,
+              0.0
+            ],
+            [
+              525.2,
+              246.8,
+              24.7,
+              0.0
+            ],
+            [
+              570.1,
+              261.4,
+              13.4,
+              0.0
+            ],
+            [
+              570.4,
+              261.5,
+              9.1,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "there_and_back",
+      "description": "Go to the ball and come back, in one request",
+      "seed": 1,
+      "passed": false,
+      "reason": "came within 492 mm of the ball; ended 607 mm from where it started, after going 607 mm away",
+      "details": {
+        "ball_min_mm": 491.8,
+        "away_mm": 607.0,
+        "end_from_start_mm": 607.0
+      },
+      "error": null,
+      "seconds": 8.32,
+      "model_calls": 4,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 1020.3,
+          "y_mm": 266.1,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 656.7,
+          "y_mm": -168.7,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -699.8,
+          "y_mm": 697.3,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 849.5,
+          "y_mm": -23.6,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": -297.4,
+          "y_mm": -1030.2,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -720.2,
+          "y_mm": 1.2,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 1020.3,
+          "y_mm": 266.1,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 656.7,
+          "y_mm": -168.7,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -699.8,
+          "y_mm": 697.3,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 849.5,
+          "y_mm": -23.6,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": -297.4,
+          "y_mm": -1030.2,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -720.2,
+          "y_mm": 1.2,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "go to that ball and come back",
+          "say": "I'm at the ball and ready to come back! What would you like me to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 4,
+          "seconds": 8.25,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 2.91,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 529.5,
+            "y_mm": 296.7,
+            "heading_deg": -0.1,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {},
+              "ok": true,
+              "message": "I can see 3 thing(s)."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "ball_1",
+                "relation": "near"
+              },
+              "ok": true,
+              "message": "Arrived near ball_1 (as close as the space allows). I can see ball_1 0.5 m away."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              6.0,
+              0.3,
+              4.0,
+              0.0
+            ],
+            [
+              26.0,
+              3.6,
+              11.3,
+              0.0
+            ],
+            [
+              56.7,
+              11.5,
+              15.5,
+              0.0
+            ],
+            [
+              87.2,
+              21.0,
+              18.0,
+              0.0
+            ],
+            [
+              121.1,
+              32.9,
+              19.9,
+              0.0
+            ],
+            [
+              152.3,
+              44.7,
+              21.1,
+              0.0
+            ],
+            [
+              174.8,
+              53.7,
+              21.8,
+              0.0
+            ],
+            [
+              202.9,
+              65.2,
+              22.5,
+              0.0
+            ],
+            [
+              234.5,
+              79.7,
+              26.3,
+              0.0
+            ],
+            [
+              263.3,
+              95.7,
+              30.2,
+              0.0
+            ],
+            [
+              292.7,
+              114.3,
+              33.2,
+              0.0
+            ],
+            [
+              320.2,
+              133.3,
+              35.2,
+              0.0
+            ],
+            [
+              348.6,
+              154.0,
+              36.6,
+              0.0
+            ],
+            [
+              480.7,
+              261.8,
+              40.5,
+              0.0
+            ],
+            [
+              520.2,
+              290.8,
+              32.7,
+              0.0
+            ],
+            [
+              529.5,
+              296.7,
+              28.0,
+              0.0
+            ],
+            [
+              529.5,
+              296.7,
+              18.2,
+              0.0
+            ],
+            [
+              529.5,
+              296.7,
+              11.3,
+              0.0
+            ],
+            [
+              529.5,
+              296.7,
+              5.8,
+              0.0
+            ],
+            [
+              529.5,
+              296.7,
+              0.2,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "there_and_back",
+      "description": "Go to the ball and come back, in one request",
+      "seed": 2,
+      "passed": false,
+      "reason": "ended 719 mm from where it started, after going 719 mm away",
+      "details": {
+        "ball_min_mm": 339.0,
+        "away_mm": 719.5,
+        "end_from_start_mm": 719.5
+      },
+      "error": null,
+      "seconds": 8.82,
+      "model_calls": 4,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 963.2,
+          "y_mm": 271.1,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 676.2,
+          "y_mm": -225.9,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -720.8,
+          "y_mm": 688.3,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 823.9,
+          "y_mm": -59.2,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": -283.6,
+          "y_mm": -993.9,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -653.7,
+          "y_mm": -44.2,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 963.2,
+          "y_mm": 271.1,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 676.2,
+          "y_mm": -225.9,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -720.8,
+          "y_mm": 688.3,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 823.9,
+          "y_mm": -59.2,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": -283.6,
+          "y_mm": -993.9,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -653.7,
+          "y_mm": -44.2,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "go to that ball and come back",
+          "say": "I'm at the ball and ready to come back! What would you like me to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 4,
+          "seconds": 8.76,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 2.78,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 632.1,
+            "y_mm": 343.7,
+            "heading_deg": -10.8,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {},
+              "ok": true,
+              "message": "I can see 3 thing(s)."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "ball_1"
+              },
+              "ok": true,
+              "message": "Arrived near ball_1 (as close as the space allows). I can see ball_1 0.4 m away."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              12.3,
+              1.1,
+              7.4,
+              0.0
+            ],
+            [
+              34.3,
+              5.6,
+              12.8,
+              0.0
+            ],
+            [
+              64.2,
+              13.7,
+              16.2,
+              0.0
+            ],
+            [
+              98.1,
+              24.7,
+              18.7,
+              0.0
+            ],
+            [
+              252.9,
+              89.3,
+              24.7,
+              0.0
+            ],
+            [
+              290.3,
+              108.8,
+              29.0,
+              0.0
+            ],
+            [
+              323.1,
+              128.2,
+              31.3,
+              0.0
+            ],
+            [
+              355.8,
+              148.9,
+              32.7,
+              0.0
+            ],
+            [
+              386.7,
+              169.2,
+              33.7,
+              0.0
+            ],
+            [
+              416.2,
+              189.2,
+              34.3,
+              0.0
+            ],
+            [
+              435.2,
+              202.3,
+              34.7,
+              0.0
+            ],
+            [
+              455.0,
+              216.1,
+              35.0,
+              0.0
+            ],
+            [
+              481.6,
+              234.9,
+              35.3,
+              0.0
+            ],
+            [
+              501.4,
+              249.0,
+              35.5,
+              0.0
+            ],
+            [
+              522.0,
+              263.8,
+              35.7,
+              0.0
+            ],
+            [
+              545.2,
+              280.6,
+              35.9,
+              0.0
+            ],
+            [
+              562.5,
+              293.1,
+              35.9,
+              0.0
+            ],
+            [
+              609.4,
+              327.2,
+              36.1,
+              0.0
+            ],
+            [
+              626.4,
+              339.6,
+              36.1,
+              0.0
+            ],
+            [
+              632.1,
+              343.7,
+              -13.8,
+              0.0
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

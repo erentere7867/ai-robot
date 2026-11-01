@@ -206,6 +206,30 @@ def test_same_object_seen_twice_is_one_track():
     assert obj.seen_count == 2 and obj.last_seen == 5 and obj.confidence == pytest.approx(1.0)
 
 
+def test_trained_detector_renames_a_track_it_keeps_calling_something_else():
+    spatial, clock = fresh_map()
+    spatial.objects["box_2"] = TrackedObject("box_2", "box", 1100, 400, 60, 0, 0)  # from an older session
+    spatial.objects["ball_1"] = TrackedObject("ball_1", "pink ball", 1000, 0, 50, 0, 0)
+    spatial.integrate_view(BodyPose(), MODEL, [det_at(1100, 400, "blue cube"), det_at(1000, 0, "red ball")],
+                           weight=0.4, relabel=True)
+    assert spatial.objects["box_2"].label == "box"  # one glimpse is not enough
+    for _ in range(2):
+        clock.advance(0.5)
+        spatial.integrate_view(BodyPose(), MODEL, [det_at(1100, 400, "blue cube"), det_at(1000, 0, "red ball")],
+                               weight=0.4, relabel=True)
+    assert sorted(spatial.objects) == ["ball_1", "cube_1"]  # same kind of id is kept; "box_2" names the old kind
+    assert spatial.objects["box_2"] is spatial.objects["cube_1"]  # the old id still finds it
+    assert spatial.objects["ball_1"].label == "red ball" and spatial.objects["cube_1"].label == "blue cube"
+
+
+def test_catch_all_label_never_renames_a_named_track():
+    spatial, _ = fresh_map()
+    spatial.objects["keys_1"] = TrackedObject("keys_1", "keys", 1000, 0, 40, 0, 0)  # named by the VLM
+    for _ in range(4):
+        spatial.integrate_view(BodyPose(), MODEL, [det_at(1000, 0, "object")], relabel=True)
+    assert list(spatial.objects) == ["keys_1"]
+
+
 def test_new_ids_are_numbered_per_noun():
     spatial, _ = fresh_map()
     update = spatial.integrate_view(BodyPose(), MODEL, [det_at(900, 300, "red ball"), det_at(900, -300, "blue ball"),
@@ -391,3 +415,26 @@ def test_a_well_known_object_is_not_dragged_by_one_far_sighting():
     far = BodyPose(-1000, 0, 0)
     spatial.integrate_view(far, MODEL, [det_at(1500, 0, "red ball", far)])
     assert abs(spatial.objects["ball_1"].x_mm - 1200) < 100
+
+
+def test_catch_all_box_over_a_named_one_is_dropped():
+    from robot.perception.fast_detector import suppress_catch_all
+
+    duck = Detection("yellow duck", (0.40, 0.50, 0.50, 0.70), 0.9)
+    same = Detection("object", (0.41, 0.52, 0.50, 0.69), 0.5)
+    other = Detection("object", (0.70, 0.50, 0.80, 0.70), 0.6)
+    assert suppress_catch_all([duck, same, other]) == [duck, other]
+
+
+def test_named_places_resolve_with_spaces_or_underscores_and_the_asked_spot_is_not_saved(tmp_path):
+    from robot.world.spatial_map import ASKED_PLACE
+
+    spatial, _ = fresh_map()
+    spatial.places.update({"start": (0.0, 0.0), ASKED_PLACE: (500.0, 200.0)})
+    assert spatial.place("where asked") == (ASKED_PLACE, (500.0, 200.0))
+    assert spatial.place("box_1") is None
+    assert "where_asked (where I was when the human asked): 0.5 m" in spatial.render_for_prompt(BodyPose())
+    spatial.save(tmp_path / "map.json")
+    restored, _ = fresh_map()
+    restored.load(tmp_path / "map.json")
+    assert ASKED_PLACE not in restored.places

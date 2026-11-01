@@ -48,6 +48,7 @@ Examples of good plans (always use real tool calls, never write a tool name as t
 - "go to your charging dock": use go_to with target "charging dock" and relation on (it searches if needed).
 - "follow the ball" or "follow me": use follow with that target; it keeps going while you talk. "stop": use stop.
 - "come back to where you started": use go_to with target start, then answer.
+- "come back" or "come back here": use go_to with target where_asked (where you were when asked).
 - "my name is Ana": use remember with the fact "The user's name is Ana.", then answer.
 - "what's my name?" or "what do I like?": "my" and "I" mean the human, not you. Answer from what you know
   about them, speaking to them: "Your name is Ana!\""""

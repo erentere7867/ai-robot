@@ -2,8 +2,10 @@
 #
 # Fast layer: the trained detector (NCNN export) on every camera frame, 20 Hz control loop, motor
 # reflexes on the microcontroller. Slow layer: LFM3-VL-2B Q4_K_M on the CPU. LFM3-VL-2B-QAD-Q4_0 runs
-# faster on the Pi (Q4_0 is repacked for the Cortex-A76's dot-product instructions) but measured 83% vs 95%
-# on the decision benchmark, so it is opt-in: swap the two model lines below.
+# faster on the Pi (Q4_0 is repacked for the Cortex-A76's dot-product instructions) but measured worse in
+# the simulator (2026-11-01: decisions 71% vs 90%, core tasks 24/28 vs 28/28, several-part tasks 17/21 vs
+# 20/21), so it is opt-in: swap the two model lines below. The F16 vision projector takes ~175 MB more RAM
+# than Q8_0.
 robot:
   name: "Sprocket"
   wake_words: ["sprocket", "hey sprocket", "robot", "hey robot"]
@@ -48,7 +50,7 @@ llm:
   model_path: "~/robot-runtime/models/llm/LFM3-VL-2B-Q4_K_M.gguf"
   # model_name: "LFM3-VL-2B-QAD-Q4_0"     # faster, less accurate (see above)
   # model_path: "~/robot-runtime/models/llm/LFM3-VL-2B-QAD-Q4_0.gguf"
-  mmproj_path: "~/robot-runtime/models/llm/mmproj-LFM3-VL-2B-Q8_0.gguf"
+  mmproj_path: "~/robot-runtime/models/llm/mmproj-LFM3-VL-2B-F16.gguf"
   llama_server_bin: "~/robot-runtime/llama.cpp/build/bin/llama-server"
   gpu_layers: 0
   threads: 4

@@ -26,7 +26,7 @@ if [ ! -x "$RT/llama.cpp/build/bin/llama-server" ]; then
 fi
 
 echo "== models (LFM3-VL-2B 4-bit and its vision projector; QAD-Q4_0 is the faster, less accurate option)"
-for f in LFM3-VL-2B-Q4_K_M.gguf LFM3-VL-2B-QAD-Q4_0.gguf mmproj-LFM3-VL-2B-Q8_0.gguf; do
+for f in LFM3-VL-2B-Q4_K_M.gguf LFM3-VL-2B-QAD-Q4_0.gguf mmproj-LFM3-VL-2B-F16.gguf; do
     [ -s "$RT/models/llm/$f" ] || curl -fL -o "$RT/models/llm/$f" "$HF/$f"
 done
 

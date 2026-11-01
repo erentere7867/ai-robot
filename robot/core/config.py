@@ -79,7 +79,7 @@ class LLMConfig:
         default_factory=lambda: Path("~/Downloads/LFM3-VL-2B-Q4_K_M.gguf").expanduser()
     )
     mmproj_path: Path = field(
-        default_factory=lambda: Path("~/Downloads/mmproj-LFM3-VL-2B-Q8_0.gguf").expanduser()
+        default_factory=lambda: Path("~/Downloads/mmproj-LFM3-VL-2B-F16.gguf").expanduser()
     )
     llama_server_bin: Path = field(
         default_factory=lambda: Path(
@@ -126,6 +126,7 @@ class AgentConfig:
     max_steps: int = 14
     max_actions: int = 200
     timeout_s: float = 300.0
+    plan: bool = True  # hand over a request with several parts one part at a time (see cognition/planner.py)
 
     def __post_init__(self) -> None:
         for key in ("max_steps", "max_actions"):
@@ -143,9 +144,13 @@ class AutonomyConfig:
     think_interval_s: float = 45.0
     observation_interval_s: float = 1.0
     drive_rate_scale: float = 1.0
+    # Speaking up unasked at most this often; it still acts (explores, looks) in between. Every 30-40 s
+    # ("I'm feeling a little lonely! Would you like...?") wore people out at a demo.
+    speak_interval_s: float = 180.0
 
     def __post_init__(self) -> None:
-        for key in ("idle_after_s", "think_interval_s", "observation_interval_s", "drive_rate_scale"):
+        for key in ("idle_after_s", "think_interval_s", "observation_interval_s", "drive_rate_scale",
+                    "speak_interval_s"):
             value = getattr(self, key)
             if not math.isfinite(value) or value < 0.1:
                 raise ValueError(f"autonomy.{key} must be finite and at least 0.1 seconds")
@@ -261,7 +266,7 @@ class RobotConfig:
             model_name=str(llm_raw.get("model_name", "LFM3-VL-2B-Q4_K_M")),
             model_path=_resolve(str(llm_raw.get("model_path", "~/Downloads/LFM3-VL-2B-Q4_K_M.gguf"))),
             mmproj_path=_resolve(
-                str(llm_raw.get("mmproj_path", "~/Downloads/mmproj-LFM3-VL-2B-Q8_0.gguf"))
+                str(llm_raw.get("mmproj_path", "~/Downloads/mmproj-LFM3-VL-2B-F16.gguf"))
             ),
             llama_server_bin=_resolve(
                 str(llm_raw.get("llama_server_bin", str(LLMConfig().llama_server_bin)))

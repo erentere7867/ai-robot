@@ -471,15 +471,16 @@ class Orbit(Behavior):
     name = "circle_around"
 
     def __init__(self, center: tuple[float, float], radius_mm: float, laps: float, start_angle: float,
-                 label: str) -> None:
+                 label: str, clockwise: bool = False) -> None:
         super().__init__()
         self.label = label
         cx, cy = center
         points = max(8, int(round(2 * math.pi * radius_mm / 350.0)))
         total = int(round(points * max(0.25, min(3.0, laps))))
         self.center = center
-        self.points = [(cx + radius_mm * math.cos(start_angle + 2 * math.pi * k / points),
-                        cy + radius_mm * math.sin(start_angle + 2 * math.pi * k / points)) for k in range(1, total + 1)]
+        step = (-1.0 if clockwise else 1.0) * 2 * math.pi / points
+        self.points = [(cx + radius_mm * math.cos(start_angle + step * k),
+                        cy + radius_mm * math.sin(start_angle + step * k)) for k in range(1, total + 1)]
         self.total = total
         self.skipped = 0
         self.follower = PathFollower()

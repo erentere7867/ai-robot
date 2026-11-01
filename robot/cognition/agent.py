@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from robot.cognition.backend import BackendUnavailable, ChatResult, InferenceBackend, ToolCall
+from robot.cognition.planner import TaskList, split_parts
 from robot.cognition.prompts import estimate_tokens
 from robot.core.config import AgentConfig
 from robot.skills.base import SkillContext, SkillRegistry, SkillResult
@@ -72,6 +73,12 @@ _CLAIM = re.compile(
     r"approach|park|rotat|sweep)", re.I)
 _ACTION_TOOLS = {"go_to", "turn_to", "turn", "move", "explore", "look_around", "observe", "express", "tilt_head",
                  "circle_around"}
+# Actions that are the point of a part rather than a step towards it (looking, turning first). When one
+# succeeds, that part of a several-part request is done and the next part is handed over. The model is
+# not trusted to say so: it kept calling tools ("I'm at the ball. Let me come back now." + go_to the ball).
+FINISHING_TOOLS = {"go_to", "circle_around", "move", "follow", "stop", "express", "set_eye_color", "remember",
+                   "explore"}
+
 NUDGE = ("(No tool was called, so nothing happened. The request was: \"{request}\". Every request is new, even "
          "if you did the same before. Call the tool that does it now.)")
 
@@ -106,7 +113,15 @@ FIX_REPLY = "(That tool succeeded: {result} Tell the human in one short sentence
 # I already face. A small model often re-issues them after success instead of answering.
 IDEMPOTENT_TOOLS = {"go_to", "turn_to", "look_around", "observe", "set_eye_color", "tilt_head", "remember",
                     "recall"}
+REQUEST_GROUNDED_TOOLS = {"go_to"}
 DUPLICATE = "Already done: {result} Nothing more to do for this; tell the human."
+
+
+def _call_key(call: ToolCall, ctx: SkillContext) -> str:
+    """What makes two calls the same. go_to reads the words of the current part (its relation, "come back"),
+    so go_to(ball_1) for "come back" is a different call from go_to(ball_1) for "go to the ball"."""
+    part = ctx.request if call.name in REQUEST_GROUNDED_TOOLS else ""
+    return json.dumps([call.name, call.arguments, part], sort_keys=True)
 
 
 def _pose(ctx: SkillContext) -> Any:
@@ -131,6 +146,23 @@ PROGRESS = ("Request: \"{request}\". Answer the human now, unless the request as
 
 
 _CALL_TOKENS = re.compile(r"<\|tool_call_(?:start|end)\|>|</?think>|```(?:python|json)?")
+# <tool_call><function=go_to><parameter=target>ball_1</parameter></function></tool_call>
+_XML_CALL = re.compile(r"<function=(\w+)>(.*?)</function>", re.S)
+_XML_PARAM = re.compile(r"<parameter=(\w+)>(.*?)</parameter>", re.S)
+_XML_BLOCK = re.compile(r"<tool_call>.*?(?:</tool_call>|$)|<function=\w+>.*?(?:</function>|$)", re.S)
+
+
+def _xml_value(text: str) -> Any:
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def strip_written_calls(text: str) -> str:
+    """Remove tool calls written out as markup: they must never be spoken."""
+    return _XML_BLOCK.sub("", text or "").strip()
 
 
 def recover_text_tool_calls(content: str, tool_names: set[str]) -> list[ToolCall]:
@@ -138,6 +170,10 @@ def recover_text_tool_calls(content: str, tool_names: set[str]) -> list[ToolCall
 
     Only a reply that is *entirely* calls to known tools is recovered; prose is left alone.
     """
+    xml = _XML_CALL.findall(content or "")
+    if xml and not strip_written_calls(re.sub(r"</?tool_call>", "", content or "")):
+        return [ToolCall(f"recovered_{i}", name, {k: _xml_value(v) for k, v in _XML_PARAM.findall(body)})
+                for i, (name, body) in enumerate(xml[:3]) if name in tool_names]
     text = _CALL_TOKENS.sub("", content or "").strip()
     if not text or len(text) > 400:
         return []
@@ -185,6 +221,19 @@ def speakable(text: str, spatial_ids: dict[str, str], robot_name: str = "") -> s
     return re.sub(r"\s{2,}", " ", text).strip()
 
 
+def _statements(text: str) -> str:
+    return " ".join(s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s and not s.endswith("?"))
+
+
+def _shorten(payload: dict[str, Any]) -> str:
+    """A tool result squeezed for an over-long prompt; what was seen survives (the answer may depend on it)."""
+    text = str(payload.get("result", ""))[:60]
+    objects = payload.get("objects")
+    if isinstance(objects, list) and objects:
+        text += " Seen: " + ", ".join(str(o).split(":")[0] for o in objects[:8])
+    return text
+
+
 class AgentLoop:
     def __init__(self, backend: InferenceBackend, skills: SkillRegistry, config: AgentConfig,
                  *, prompt_limit_tokens: int = 3300, on_event: Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -212,10 +261,18 @@ class AgentLoop:
         failures = 0
         nudged = False
         force_tool = force_reply = False
-        succeeded: dict[str, tuple[Any, str]] = {}  # idempotent call -> (pose after it, its result)
+        succeeded: dict[str, tuple[Any, SkillResult]] = {}  # idempotent call -> (pose after it, its result)
         request = "" if background else request_text(messages)
         hint = PROGRESS if _SEVERAL_PARTS.search(request) else DONE_HINT
         ctx.request = request
+        parts = split_parts(request) if request and self.config.plan else []
+        todo = TaskList(request, parts) if parts else None
+        if todo is not None:
+            ctx.request = todo.current  # what go_to checks its relation against: this part's words
+            await self._emit("cognition.plan", {"request": request, "steps": parts})
+        said: list[str] = []  # answers to the parts before the last one
+        part_ok = True  # no tool of the current part failed
+        part_start = 0  # tool_log index where the current part began
         for step in range(self.config.max_steps):
             ctx.check()
             if time.monotonic() - started > self.config.timeout_s:
@@ -249,7 +306,7 @@ class AgentLoop:
                     reply.content = ""
                     await self._emit("cognition.recovered_calls", {"calls": [c.name for c in reply.tool_calls]})
             if not reply.tool_calls:
-                result.say, leaked = strip_reasoning(reply.content)
+                result.say, leaked = strip_reasoning(strip_written_calls(reply.content))
                 if leaked and not background:
                     # One retry without tools: just say something to the human.
                     messages.append({"role": "user", "content": "(Reply to the human now in one short sentence.)"})
@@ -259,7 +316,16 @@ class AgentLoop:
                     except BackendUnavailable:
                         pass
                     messages.pop()
-                if not nudged and claims_unperformed_action(result.say, result.tool_log):
+                if todo is not None and todo.has_next and part_ok and result.say:
+                    # The answer to one part ("I'm at the ball!") ends that part; hand over the next one.
+                    said.append(result.say)
+                    messages.append({"role": "assistant", "content": reply.content})
+                    await self._next_part(todo, ctx, messages)
+                    part_ok, part_start = True, len(result.tool_log)
+                    result.say = ""
+                    continue
+                # Only this part's tools count: "now I'll head back" after part 1's go_to is still a claim.
+                if not nudged and claims_unperformed_action(result.say, result.tool_log[part_start:]):
                     # The model narrated (or refused) an action instead of doing it, often by copying an
                     # earlier reply. Ask once more and make the next answer a tool call.
                     nudged = force_tool = True
@@ -280,15 +346,20 @@ class AgentLoop:
             messages.append(reply.assistant_message())
             transcript.append(messages[-1])
             stop_batch = False
+            finished_part = False
             for call in reply.tool_calls:
                 if stop_batch:
                     outcome = SkillResult(False, "Not executed because an earlier step failed.", status="skipped")
                 elif call.invalid_arguments:
                     outcome = SkillResult(False, "The arguments were not valid JSON.", status="rejected")
-                elif (key := json.dumps([call.name, call.arguments], sort_keys=True)) in succeeded and \
+                elif (key := _call_key(call, ctx)) in succeeded and \
                         _same_spot(succeeded[key][0], _pose(ctx)):
-                    outcome = SkillResult(True, DUPLICATE.format(result=succeeded[key][1]), status="duplicate")
-                    force_reply = True
+                    # Keep the first call's data (an observe's object list): the model answers from it.
+                    first = succeeded[key][1]
+                    outcome = SkillResult(True, DUPLICATE.format(result=first.message), dict(first.data),
+                                          status="duplicate")
+                    force_reply = todo is None or not todo.has_next
+                    finished_part = finished_part or call.name in FINISHING_TOOLS
                 else:
                     if background and not getattr(self.skills.get(call.name), "background_ok", True):
                         outcome = SkillResult(False, "Not available on your own.", status="rejected")
@@ -301,21 +372,31 @@ class AgentLoop:
                     result.tool_log.append({"tool": call.name, "args": call.arguments, "ok": outcome.ok,
                                             "message": outcome.message})
                     stop_batch = not outcome.ok
+                    part_ok = part_ok and outcome.ok
+                    finished_part = finished_part or (outcome.ok and call.name in FINISHING_TOOLS)
                     failures += 0 if outcome.ok else 1
                     attempts[key] = attempts.get(key, 0) + 1
                     if outcome.ok and call.name in IDEMPOTENT_TOOLS:
-                        succeeded[key] = (_pose(ctx), outcome.message)
+                        succeeded[key] = (_pose(ctx), outcome)
                 payload = outcome.to_model()
-                if request and call is reply.tool_calls[-1] and outcome.status != "duplicate":
-                    # A field of its own: merged into "result" it made the model act on it as an instruction
-                    # (measured: "two_stops" went to the wrong object).
-                    payload["next"] = hint.format(request=request)
+                last_status = outcome.status
                 messages.append({"role": "tool", "tool_call_id": call.id,
                                  "content": json.dumps(payload, ensure_ascii=False)})
                 transcript.append(messages[-1])
+            advance = todo is not None and todo.has_next and part_ok and finished_part
+            if request and (last_status != "duplicate" or todo is not None):
+                # A field of its own: merged into "result" it made the model act on it as an instruction
+                # (measured: "two_stops" went to the wrong object).
+                last = json.loads(messages[-1]["content"])
+                last["next"] = (f"Part {todo.index + 1} (\"{todo.current}\") is done." if advance and todo
+                                else todo.hint() if todo is not None else hint.format(request=request))
+                messages[-1]["content"] = json.dumps(last, ensure_ascii=False)
             if ctx.attached_image is not None:
                 self._attach_image(messages, ctx.attached_image.data_url, reply.tool_calls[-1].name)
                 ctx.attached_image = None
+            if advance and todo is not None:
+                await self._next_part(todo, ctx, messages)
+                part_ok, force_reply, part_start = True, False, len(result.tool_log)
             if max(attempts.values(), default=0) >= 3 or failures >= 4:
                 # Going round in circles: stop and let the human (or a later wake) decide.
                 result.status = "blocked"
@@ -325,11 +406,24 @@ class AgentLoop:
         else:
             result.status = "blocked"
             result.say = "" if background else "I ran out of steps before finishing."
+        if said and result.say:
+            # "I'm at the ball! I'm back where I started." Questions to the human in between are dropped:
+            # the robot carried on without waiting for an answer.
+            kept = [s for s in (_statements(x) for x in said) if s]
+            result.say = " ".join([*kept, result.say])
         result.next_wake_s = ctx.wake_request_s
         result.expression = dict(ctx.expression)
         result.transcript = transcript
         result.say = speakable(result.say, ctx.spatial_map.objects if ctx.spatial_map else {}, self.robot_name)
         return result
+
+    async def _next_part(self, todo: TaskList, ctx: SkillContext, messages: list[dict[str, Any]]) -> None:
+        ctx.request = todo.advance()
+        # The robot has moved since the situation was written ("start: here" is stale).
+        pose = _pose(ctx)
+        world = ctx.spatial_map.render_for_prompt(pose) if ctx.spatial_map is not None and pose else ""
+        messages.append({"role": "user", "content": todo.next_part_message(world)})
+        await self._emit("cognition.next_part", {"part": todo.current, "index": todo.index})
 
     @staticmethod
     def _attach_image(messages: list[dict[str, Any]], data_url: str, tool: str) -> None:
@@ -370,6 +464,5 @@ class AgentLoop:
                 end += 1
             if end - start < 2:
                 break
-            summary = "; ".join(json.loads(messages[k]["content"]).get("result", "")[:60]
-                                for k in range(start + 1, end))
+            summary = "; ".join(_shorten(json.loads(messages[k]["content"])) for k in range(start + 1, end))
             messages[start:end] = [{"role": "user", "content": f"(earlier steps, shortened: {summary})"}]

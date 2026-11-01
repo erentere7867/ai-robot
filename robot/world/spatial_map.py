@@ -42,6 +42,8 @@ FILLER = {"a", "an", "the", "small", "large", "big", "little", "tiny", "toy", "o
           "coloured", "plastic", "wooden", "rubber", "my", "your", "that", "this", "of", "on", "with", "and"}
 
 CELL_MM = 50.0
+ASKED_PLACE = "where_asked"  # where I was when the current request came: what "come back" means
+PLACE_NOTES = {"start": " (where I was switched on)", ASKED_PLACE: " (where I was when the human asked)"}
 
 
 def _tokens(label: str) -> list[str]:
@@ -84,6 +86,12 @@ def label_score(a: str, b: str) -> int:
     if na & nb:
         return 2
     return 1 if _nouns_compatible(na, nb) else 0
+
+
+def _associates(track_label: str, det_label: str) -> bool:
+    """Can this detection be this track? A catch-all "object" box can be anything (by position), including a
+    thing the VLM has since named ("keys")."""
+    return det_label == "object" or labels_match(track_label, det_label)
 
 
 def head_noun(label: str) -> str:
@@ -131,6 +139,8 @@ class TrackedObject:
     confidence: float = 0.7
     stale: bool = False  # restored from a previous session; odometry frames may not match
     var_mm2: float = 300.0 ** 2  # position uncertainty (variance, per axis)
+    alt_label: str = ""  # a different label the detector keeps giving this track
+    alt_votes: float = 0.0
 
     def relative(self, pose: BodyPose) -> tuple[float, float]:
         dx, dy = self.x_mm - pose.x_mm, self.y_mm - pose.y_mm
@@ -155,13 +165,50 @@ class ViewUpdate:
     lost: list[TrackedObject] = field(default_factory=list)
 
 
+RELABEL_VOTES = 1.0  # about one full view's worth of consistent sightings
+
+
+class ObjectTable(dict):
+    """Objects by id. A renamed object stays reachable under its old id, so a behaviour or a model call that
+    still holds "box_2" finds it after it became "cube_2"."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.aliases: dict[str, str] = {}
+
+    def _key(self, key: Any) -> Any:
+        for _ in range(8):
+            if dict.__contains__(self, key) or key not in self.aliases:
+                break
+            key = self.aliases[key]
+        return key
+
+    def __getitem__(self, key: Any) -> TrackedObject:
+        return dict.__getitem__(self, self._key(key))
+
+    def __contains__(self, key: object) -> bool:
+        return dict.__contains__(self, self._key(key))
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        return dict.get(self, self._key(key), default)
+
+    def pop(self, key: Any, *default: Any) -> Any:
+        return dict.pop(self, self._key(key), *default)
+
+    def rename(self, old: str, new: str) -> None:
+        obj = dict.pop(self, old)
+        obj.id = new
+        dict.__setitem__(self, new, obj)
+        self.aliases[old] = new
+
+
 class SpatialMap:
     def __init__(self, clock: Clock, *, half_extent_mm: float = 3000.0, max_objects: int = 48) -> None:
         self.clock = clock
         self.half = float(half_extent_mm)
         self.max_objects = max_objects
         self.n = int(math.ceil(2 * self.half / CELL_MM))
-        self.objects: dict[str, TrackedObject] = {}
+        self.objects: ObjectTable = ObjectTable()
         self.places: dict[str, tuple[float, float]] = {}
         self.occupancy = np.zeros((self.n, self.n), dtype=np.float32)  # log-odds-like evidence
         self.seen = np.zeros((self.n, self.n), dtype=bool)  # floor cells the camera has looked at
@@ -182,7 +229,7 @@ class SpatialMap:
         bearing = model.bearing_deg(det.center_u)
         best, best_err = None, 12.0
         for obj in self.objects.values():
-            if obj.id in matched or not labels_match(obj.label, det.label):
+            if obj.id in matched or not _associates(obj.label, det.label):
                 continue
             dist, rel = obj.relative(pose)
             if dist < 900.0 and abs(rel - bearing) < best_err:
@@ -190,14 +237,16 @@ class SpatialMap:
         return best
 
     def integrate_view(self, pose: BodyPose, model: CameraModel, detections: list[Detection],
-                       *, query: str | None = None, weight: float = 1.0) -> ViewUpdate:
+                       *, query: str | None = None, weight: float = 1.0, relabel: bool = False) -> ViewUpdate:
         """Fuse one camera view: associate detections with tracks and apply negative evidence.
 
         With `query` the detector only looked for that kind of object, so missing detections
         only count against tracks matching the query. `weight` (0..1] is how much evidence one view
         carries: 1 for an occasional look, small for a continuous stream (frames a few hundredths of a
         second apart are nearly the same observation), so a detector that flickers for a frame or two
-        neither creates nor deletes an object.
+        neither creates nor deletes an object. With `relabel` the detector's labels are trusted over the
+        track's (a trained detector with a fixed vocabulary): a track it keeps calling something else is
+        renamed, e.g. a "box" remembered from an older session that the detector sees as a "blue cube".
         """
         w = max(0.05, min(1.0, float(weight)))
         now = self.clock.monotonic()
@@ -227,7 +276,7 @@ class SpatialMap:
             gate = max(350.0, 0.3 * cam_dist, 600.0 if clipped else 0.0)
             best, best_d = None, math.inf
             for obj in self.objects.values():
-                if obj.id in matched or not labels_match(obj.label, det.label):
+                if obj.id in matched or not _associates(obj.label, det.label):
                     continue
                 d = math.hypot(obj.x_mm - x, obj.y_mm - y)
                 # An uncertain track (first seen from far away) accepts a sighting further from its guess.
@@ -259,6 +308,8 @@ class SpatialMap:
                 is_new = False
             matched.add(best.id)
             update.seen.append((best, det, is_new))
+            if relabel and not is_new:
+                self._vote_label(best, det.label, w)
 
         # Negative evidence: an object that should be visible but was not detected fades away.
         seen_us = [model.project(pose, o.x_mm, o.y_mm, 60.0) for o, _, _ in update.seen]
@@ -284,12 +335,29 @@ class SpatialMap:
         self.mark_coverage(pose, model)
         return update
 
+    def _vote_label(self, obj: TrackedObject, label: str, w: float) -> None:
+        if label == obj.label or label == "object":  # "object" is the catch-all; a named track keeps its name
+            obj.alt_label, obj.alt_votes = "", 0.0
+            return
+        if label != obj.alt_label:
+            obj.alt_label, obj.alt_votes = label, 0.0
+        obj.alt_votes += w
+        if obj.alt_votes >= RELABEL_VOTES:
+            obj.label, obj.alt_label, obj.alt_votes = label, "", 0.0
+            if head_noun(label) != obj.id.rpartition("_")[0]:  # the id names the old kind: "box_2" for a cube
+                self.objects.rename(obj.id, self._new_id(label))
+
     def _evict(self) -> None:
         victim = min(self.objects.values(), key=lambda o: (o.confidence, o.last_seen))
         del self.objects[victim.id]
 
     def forget(self, obj_id: str) -> bool:
         return self.objects.pop(obj_id, None) is not None
+
+    def place(self, target: str) -> tuple[str, tuple[float, float]] | None:
+        """A named place ("start", "where_asked", "where asked") as (name, point)."""
+        key = re.sub(r"[\s_]+", "_", str(target or "").strip().lower())
+        return (key, self.places[key]) if key in self.places else None
 
     def resolve(self, target: str, pose: BodyPose | None = None) -> TrackedObject | None:
         """Find an object by id ("box_1") or description ("the brown box"); nearest wins ties."""
@@ -331,7 +399,7 @@ class SpatialMap:
             dist = math.hypot(px - pose.x_mm, py - pose.y_mm)
             bearing = math.degrees(math.atan2(py - pose.y_mm, px - pose.x_mm)) - pose.heading_deg
             where = "here" if dist < 150 else f"{dist / 1000:.1f} m {direction_words(bearing)}"
-            what = " (where I was switched on)" if name == "start" else ""
+            what = PLACE_NOTES.get(name, "")
             places.append(f"{name}{what}: {where}")
         if places:
             lines.append("Places: " + ", ".join(places) + ".")
@@ -411,7 +479,8 @@ class SpatialMap:
 
     def save(self, path: Path) -> None:
         now_mono, now_wall = self.clock.monotonic(), time.time()
-        data = {"saved_at": now_wall, "places": self.places, "objects": [
+        places = {k: v for k, v in self.places.items() if k != ASKED_PLACE}  # only true for one request
+        data = {"saved_at": now_wall, "places": places, "objects": [
             {**asdict(o), "age_s": now_mono - o.last_seen} for o in self.objects.values() if o.confidence >= 0.3]}
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")

@@ -42,6 +42,7 @@ class AutonomyController:
         self.enabled = config.enabled
         self.paused = False
         self.quiet = False
+        self._spoke_at = -math.inf
         self.running = False
         self.reason = "waiting for idle time"
         self.last_user_at = bus.clock.monotonic()
@@ -87,7 +88,12 @@ class AutonomyController:
                 **self.drives.snapshot()}
 
     def allow_speech(self) -> bool:
-        return not self.quiet
+        """May an autonomous turn say something now? Saying it counts, so call this once per reply."""
+        now = self.bus.clock.monotonic()
+        if self.quiet or now - self._spoke_at < self.config.speak_interval_s:
+            return False
+        self._spoke_at = now
+        return True
 
     def _on_response(self, event: Event) -> None:
         if not event.payload.get("final", True) or event.payload.get("backend") == "autonomy_control":

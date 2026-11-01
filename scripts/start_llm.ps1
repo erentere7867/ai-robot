@@ -6,7 +6,7 @@ param(
     [switch]$IncludeProjector,
     [string]$ServerBin = (Join-Path $env:USERPROFILE "robot-runtime\llama.cpp\llama-server.exe"),
     [string]$ModelPath = (Join-Path $env:USERPROFILE "Downloads\LFM3-VL-2B-Q4_K_M.gguf"),
-    [string]$MmprojPath = (Join-Path $env:USERPROFILE "Downloads\mmproj-LFM3-VL-2B-Q8_0.gguf")
+    [string]$MmprojPath = (Join-Path $env:USERPROFILE "Downloads\mmproj-LFM3-VL-2B-F16.gguf")
 )
 
 $ErrorActionPreference = "Stop"

@@ -3,6 +3,7 @@
     python scripts/try_robot.py "what do you see?" "go behind that box"
     python scripts/try_robot.py --keep-memory "my name is Deniz" "what's my name?"
     python scripts/try_robot.py --physics "go to the red ball"
+    python scripts/try_robot.py --scene circle_behind "do a circle around the thing behind you"
 
 Each argument is one human turn. Uses a throwaway memory/map unless --keep-memory is given.
 """
@@ -34,6 +35,8 @@ async def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend", default="llamacpp", choices=["auto", "llamacpp", "null"])
     parser.add_argument("--keep-memory", action="store_true", help="use the normal memory DB and map")
     parser.add_argument("--physics", action="store_true", help="MuJoCo dynamics body (slip, odometry drift)")
+    parser.add_argument("--scene", help="lay the room out as this eval scenario does (see eval_scenarios --list)")
+    parser.add_argument("--seed", type=int, default=0, help="layout seed for --scene")
     args = parser.parse_args(argv)
 
     cfg = RobotConfig.from_yaml(args.config)
@@ -59,8 +62,23 @@ async def main(argv: list[str] | None = None) -> int:
         for line in (p.get("data") or {}).get("objects", [])[:8]:
             print(f"         . {line}")
 
+    def on_plan(event) -> None:
+        print("   parts: " + " | ".join(event.payload["steps"]))
+
+    def on_nudge(event) -> None:
+        print(f"   (sent back: {event.payload.get('reason', 'claimed an action')})")
+
     harness.bus.subscribe("cognition.model_call", on_call, immediate=True)
     harness.bus.subscribe("skill.completed", on_skill, immediate=True)
+    harness.bus.subscribe("cognition.plan", on_plan, immediate=True)
+    harness.bus.subscribe("cognition.nudged", on_nudge, immediate=True)
+    harness.bus.subscribe("cognition.next_part", lambda e: print(f"   next part: {e.payload['part']}"),
+                          immediate=True)
+    if args.scene:
+        from robot.eval.runner import apply_scene
+        from robot.eval.scenarios import SCENARIOS
+
+        apply_scene(harness.sandbox, SCENARIOS[args.scene], args.seed)
     await harness.start()
     try:
         for text in args.messages:

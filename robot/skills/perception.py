@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 from typing import Any
 
 from robot.control.behaviors import Scan, Search
@@ -29,6 +30,20 @@ def _query(text: str) -> str:
     words = [w for w in text.replace("_", " ").split() if w not in {"any", "a", "an", "the", "new", "interesting",
                                                                      "in", "of", "for", "some", "my", "this"}]
     return "" if not words or all(w in GENERIC_QUERIES for w in words) else text
+
+
+_SIDES = {"behind": "around", "back": "around", "backwards": "around", "left": "left", "right": "right"}
+_SIDE_FILLER = {"me", "you", "your", "my", "to", "the", "on", "of", "at", "side", "what", "whats", "is", "there",
+                "thing", "things", "object", "objects", "hand"}
+
+
+def _side(query: str) -> str | None:
+    """"behind me" or "on your left" is a place to look, not a thing to search for: the turn direction."""
+    words = re.findall(r"[a-z]+", query.lower())
+    sides = {_SIDES[w] for w in words if w in _SIDES}
+    if len(sides) == 1 and all(w in _SIDES or w in _SIDE_FILLER for w in words):
+        return sides.pop()
+    return None
 
 
 def _streaming(ctx: SkillContext) -> bool:
@@ -131,6 +146,15 @@ async def observe(ctx: SkillContext) -> SkillResult:
     return SkillResult(True, f"I can see {len(seen) + len(view['unplaced'])} thing(s)." + note, data)
 
 
+def in_view(ctx: SkillContext) -> dict[str, Any]:
+    """What the fast detector sees right now (it watched during the motion): {} without a streaming detector."""
+    if not _streaming(ctx) or ctx.fast.last_frame is None:
+        return {}
+    now = ctx.clock.monotonic()
+    ids = [o.id for o in ctx.spatial_map.objects.values() if now - o.last_seen < 1.5 and o.confidence >= 0.4]
+    return {"in_view_now": _summary(ctx, ids) or ["nothing I can name"]}
+
+
 async def find(ctx: SkillContext, query: str) -> str | None:
     """Search all around for one thing; returns its id (facing it) or None."""
     result = await look_around(ctx, query)
@@ -138,6 +162,15 @@ async def find(ctx: SkillContext, query: str) -> str | None:
 
 
 async def look_around(ctx: SkillContext, query: str = "") -> SkillResult:
+    side = _side(query)
+    if side is not None:
+        from robot.skills.navigation import turn  # navigation imports this module
+
+        turned = await turn(ctx, side)
+        if not turned.ok:
+            return turned
+        seen = await observe(ctx)
+        return SkillResult(seen.ok, f"{turned.message} {seen.message}", seen.data)
     query = _query(query)
     if _streaming(ctx) and (not query or _in_vocabulary(ctx, query)):
         started = ctx.clock.monotonic()

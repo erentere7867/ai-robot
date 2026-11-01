@@ -667,8 +667,7 @@ async def test_a_request_with_several_parts_is_restated_after_each_step():
     _, backend, _ = await run(script, messages=request("look, then move forward"))
     results = [json.loads(m["content"]) for m in backend.requests[1]["messages"] if m["role"] == "tool"]
     assert "next" not in results[0]  # the reminder rides on the step's last result only
-    assert results[1]["next"] == ('Request: "look, then move forward". Answer the human now, unless the '
-                                  "request asks for another step that is not done yet.")
+    assert results[1]["next"] == 'Part 1 ("look") is done.'  # the move finished it, and the second part
 
 
 @pytest.mark.parametrize("text, several", [
@@ -679,3 +678,76 @@ def test_requests_with_several_steps_are_told_apart(text, several):
     from robot.cognition.agent import _SEVERAL_PARTS
 
     assert bool(_SEVERAL_PARTS.search(text)) is several
+
+
+# ---- task list -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text, parts", [
+    ("go to that ball and come back", ["go to that ball", "come back"]),
+    ("go to the red ball and then to the blue cube", ["go to the red ball", "to the blue cube"]),
+    ("find the duck and park next to it", ["find the duck", "park next to it"]),
+    ("look behind you and tell me what you see", ["look behind you", "tell me what you see"]),
+    ("drive around the cube twice, then dance", ["drive around the cube twice", "dance"]),
+    ("go between the ball and the cube", []),
+    ("do a circle around the thing behind you", []),
+    ("hi!", []),
+])
+def test_requests_are_cut_into_parts_in_the_humans_words(text, parts):
+    from robot.cognition.planner import split_parts
+
+    assert split_parts(text) == parts
+
+
+async def test_a_part_ends_when_its_action_succeeds_and_the_next_part_follows():
+    from tests.robot_fakes import last_user_text, tool_messages
+
+    script = [{"call": "move", "args": {"direction": "forward"}}, {"call": "move", "args": {"direction": "backward"}},
+              "And I'm back."]
+    events = []
+    result, backend, probe = await run(script, messages=request("move forward and then come back"), events=events)
+    assert [args["direction"] for _, args in probe.ran] == ["forward", "backward"]
+    assert result.say == "And I'm back."
+    first = json.loads(tool_messages(backend.requests[1]["messages"])[0]["content"])
+    assert first["next"] == 'Part 1 ("move forward") is done.'
+    assert last_user_text(backend.requests[1]["messages"]).startswith('(Next part of "move forward and then come '
+                                                                      'back": "come back".')
+    last = json.loads(tool_messages(backend.requests[2]["messages"])[-1]["content"])
+    assert last["next"] == ('Request: "move forward and then come back". Now doing part 2 of 2: "come back". '
+                            "When that part is done, answer.")
+    assert ("cognition.plan", {"request": "move forward and then come back",
+                               "steps": ["move forward", "come back"]}) in events
+
+
+async def test_a_spoken_part_ends_with_its_answer():
+    script = ["Hi there! Shall we play?", {"call": "move", "args": {"direction": "forward"}}, "Done."]
+    result, _, probe = await run(script, messages=request("say hi and then move forward"))
+    assert [name for name, _ in probe.ran] == ["move"]
+    assert result.say == "Hi there! Done."  # the question in between is dropped: it did not wait for an answer
+
+
+async def test_a_failed_part_ends_the_list():
+    script = [{"call": "bump", "args": {"n": 1}}, "I bumped into something, sorry."]
+    result, backend, probe = await run(script, messages=request("bump once and then move forward"))
+    assert [name for name, _ in probe.ran] == ["bump"]
+    assert result.say == "I bumped into something, sorry." and len(backend.requests) == 2
+
+
+
+def test_calls_written_as_markup_are_recovered_and_never_spoken():
+    from robot.cognition.agent import recover_text_tool_calls, strip_written_calls
+
+    text = ("<tool_call>\n<function=circle_around>\n<parameter=target>\nbox_1\n</parameter>\n"
+            "<parameter=laps>\n1\n</parameter>\n</function>\n</tool_call>")
+    calls = recover_text_tool_calls(text, {"circle_around"})
+    assert [(c.name, c.arguments) for c in calls] == [("circle_around", {"target": "box_1", "laps": 1})]
+    assert strip_written_calls(text + " I'm back!") == "I'm back!"
+    assert recover_text_tool_calls(text + " I'm back!", {"circle_around"}) == []  # prose too: not recovered
+
+
+async def test_a_claim_without_action_is_caught_in_a_later_part_too():
+    script = [{"call": "move", "args": {"direction": "forward"}}, "Got it, now I'll head back.",
+              {"call": "move", "args": {"direction": "backward"}}, "I'm back."]
+    result, backend, probe = await run(script, messages=request("move forward and then come back"))
+    assert [args["direction"] for _, args in probe.ran] == ["forward", "backward"]
+    assert backend.requests[2]["tool_choice"] == "required" and result.say == "I'm back."

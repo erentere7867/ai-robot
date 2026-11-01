@@ -374,3 +374,29 @@ async def test_saying_stop_halts_motion_before_the_model_answers(sim):
     await run(sim, "follow", target="box_1")
     reply = await sim.submit_message("stop!", timeout_s=30.0)
     assert sim.fast.behavior is None and reply is not None
+
+
+async def test_come_back_goes_to_where_the_human_asked_even_if_the_call_names_an_object(sim):
+    from robot.world.spatial_map import ASKED_PLACE
+
+    sim.spatial_map.places[ASKED_PLACE] = (0.0, 0.0)
+    await run(sim, "observe")
+    result = await run(sim, "go_to", target="box_1")
+    assert result.ok and math.hypot(sim.body.pose().x_mm, sim.body.pose().y_mm) > 300
+    sim.skill_context.request = "come back"
+    result = await run(sim, "go_to", target="box_1")  # what the 2B model called for "come back"
+    assert result.ok and result.message == "I'm back where I was when you asked.", result.message
+    assert math.hypot(sim.body.pose().x_mm, sim.body.pose().y_mm) <= 120
+    sim.skill_context.request = "come back to the box"
+    result = await run(sim, "go_to", target="box_1")  # named in the request: the ball is the goal
+    assert result.message.startswith("Arrived near box_1"), result.message
+
+
+async def test_a_distance_the_human_did_not_say_is_ignored(sim):
+    sim.sandbox.move_object("cardboard_box", 900.0, 0.0)
+    await run(sim, "observe")
+    sim.skill_context.request = "park next to the box"
+    result = await run(sim, "go_to", target="box_1", distance_cm=100)
+    assert result.ok
+    gap = math.hypot(sim.body.pose().x_mm - 900.0, sim.body.pose().y_mm) - 120.0
+    assert gap < 600, gap  # not a metre away

@@ -21,6 +21,27 @@ from robot.perception.detector import Detection
 logger = logging.getLogger(__name__)
 
 
+CATCH_ALL = "object"
+
+
+def _overlap(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    """Intersection over the smaller box's area."""
+    iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    ih = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    smaller = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return iw * ih / smaller if smaller > 0 else 0.0
+
+
+def suppress_catch_all(dets: list[Detection], threshold: float = 0.6) -> list[Detection]:
+    """Drop an "object" box that mostly covers a named one: the same thing seen twice, not a second thing.
+
+    Class-wise NMS keeps both when the detector is unsure whether a duck is a "yellow duck" or just an
+    "object", and the map would then hold a phantom next to the real duck.
+    """
+    named = [d for d in dets if d.label != CATCH_ALL]
+    return [d for d in dets if d.label != CATCH_ALL or all(_overlap(d.bbox, n.bbox) < threshold for n in named)]
+
+
 class FastDetector:
     def __init__(self, weights: Path | str, *, imgsz: int = 320, conf: float = 0.4, device: str | None = None
                  ) -> None:
@@ -39,7 +60,7 @@ class FastDetector:
             except ImportError:
                 self.device = "cpu"
         self.labels = [str(self._model.names[i]) for i in sorted(self._model.names)]
-        self.vocabulary = [label for label in self.labels if label != "object"]  # what it can search for
+        self.vocabulary = [label for label in self.labels if label != CATCH_ALL]  # what it can search for
         self._lock = threading.Lock()  # one inference at a time; the model is not re-entrant
         self.last_ms = 0.0
         self.warm()
@@ -77,7 +98,7 @@ class FastDetector:
                                                  strict=True):
             out.append(Detection(self.labels[int(cls)], (max(0.0, x1 / w), max(0.0, y1 / h), min(1.0, x2 / w),
                                                           min(1.0, y2 / h)), float(score)))
-        return out
+        return suppress_catch_all(out)
 
     def detect_frame(self, frame: Frame) -> list[Detection]:
         if frame.rgb is None:
@@ -102,7 +123,7 @@ class NcnnDetector:
         meta = yaml.safe_load((self.model_dir / "metadata.yaml").read_text(encoding="utf-8"))
         names = meta["names"]
         self.labels = [str(names[i]) for i in sorted(names)]
-        self.vocabulary = [label for label in self.labels if label != "object"]
+        self.vocabulary = [label for label in self.labels if label != CATCH_ALL]
         imgsz = meta.get("imgsz", [320, 320])
         self.size = int(imgsz[0] if isinstance(imgsz, list) else imgsz)
         self.conf, self.iou = conf, iou
@@ -153,7 +174,7 @@ class NcnnDetector:
                 out_dets.append(Detection(self.labels[int(c)], (max(0.0, x / w), max(0.0, y / h),
                                                                  min(1.0, (x + bw_) / w), min(1.0, (y + bh_) / h)),
                                           float(conf[idx[k]])))
-        return sorted(out_dets, key=lambda d: -d.score)
+        return suppress_catch_all(sorted(out_dets, key=lambda d: -d.score))
 
     def detect_frame(self, frame: Frame) -> list[Detection]:
         if frame.rgb is None:
