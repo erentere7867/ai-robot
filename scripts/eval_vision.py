@@ -9,6 +9,10 @@ both the calls the robot makes:
 * "is there a <thing>?": the query prompt plus its yes/no crop check, once for an object in view and once
   for one that is not.
 
+The fast detector (the trained YOLO the robot drives with) runs on the same frames, and both are split by
+distance, so far-away objects get their own numbers. The simulator's duck is a yellow sphere and its mug a
+green cylinder, so those names count as right.
+
 Run against a llama-server that is already up (see scripts/start_llm.ps1):
     python scripts/eval_vision.py --frames 30
 """
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import random
 import sys
 import time
@@ -31,18 +36,23 @@ from robot.eval.scenarios import CameraModel  # noqa: E402
 from robot.perception.camera import Frame  # noqa: E402
 from robot.perception.datagen import OBJECT_CLASS, SceneRandomizer  # noqa: E402
 from robot.perception.detector import VLMDetector, _iou  # noqa: E402
+from robot.perception.fast_detector import FastDetector  # noqa: E402
 from robot.world.sandbox import SimulationSandbox  # noqa: E402
 from robot.world.spatial_map import head_noun  # noqa: E402
 
 NAMES = {"red_ball": "red ball", "blue_cube": "blue cube", "yellow_duck": "yellow duck", "green_mug": "green mug",
          "cardboard_box": "cardboard box", "charging_dock": "charging dock"}
 # Nouns a person would accept for each object, and the colour words that are right for it.
-NOUNS = {"red_ball": {"ball", "sphere"}, "blue_cube": {"cube", "block", "box"}, "yellow_duck": {"duck", "duckie"},
-         "green_mug": {"mug", "cup"}, "cardboard_box": {"box", "carton", "cardboard"},
+NOUNS = {"red_ball": {"ball", "sphere"}, "blue_cube": {"cube", "block", "box"},
+         "yellow_duck": {"duck", "duckie", "sphere", "ball"}, "green_mug": {"mug", "cup", "cylinder", "can"}, "cardboard_box": {"box", "carton", "cardboard"},
          "charging_dock": {"dock", "charger", "pad", "station", "base", "platform", "mat"}}
 COLOURS = {"red_ball": {"red"}, "blue_cube": {"blue"}, "yellow_duck": {"yellow"}, "green_mug": {"green"},
            "cardboard_box": {"brown", "tan", "beige", "cardboard", "orange"}, "charging_dock": set()}
-MIN_PIXELS = 300  # clearly visible; smaller slivers are not counted as missed
+BANDS = ((0.0, 1000.0, "under 1 m"), (1000.0, 2000.0, "1-2 m"), (2000.0, 1e9, "over 2 m"))
+
+
+def _band(dist_mm: float) -> str:
+    return next(name for lo, hi, name in BANDS if lo <= dist_mm < hi)
 
 
 def _box(lab: dict, w: int, h: int) -> tuple[float, float, float, float]:
@@ -55,6 +65,8 @@ async def main() -> int:
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--config", default="config/robot.yaml")
+    parser.add_argument("--min-pixels", type=int, default=300,
+                        help="smallest object that counts as visible (300 = clearly visible; 40 = a few pixels far away)")
     parser.add_argument("-v", "--verbose", action="store_true", help="print every frame")
     args = parser.parse_args()
 
@@ -67,6 +79,11 @@ async def main() -> int:
     randomizer = SceneRandomizer(sandbox, args.seed)
     camera = CameraModel.from_sandbox(sandbox)
     detector = VLMDetector(backend)
+    fast = None
+    for models_dir in (cfg.runtime_dir / "models", Path(__file__).resolve().parents[1] / "models"):
+        fast = fast or FastDetector.load_default(models_dir, prefer_ncnn=cfg.perception.prefer_ncnn,
+                                                 conf=cfg.perception.confidence)
+    bands = {name: [0, 0, 0] for _, _, name in BANDS}  # objects, VLM found, fast detector found
     rng = random.Random(args.seed)
 
     known = found = colour_ok = boxes = invented = 0
@@ -80,7 +97,7 @@ async def main() -> int:
             rgb, labels = sandbox.render_head_labels(pose)
             h, w, _ = rgb.shape
             frame = Frame(None, pose, camera, 0.0, None, rgb)
-            truth = {oid: _box(lab, w, h) for oid, lab in labels.items() if lab["pixels"] >= MIN_PIXELS}
+            truth = {oid: _box(lab, w, h) for oid, lab in labels.items() if lab["pixels"] >= args.min_pixels}
             every = {oid: _box(lab, w, h) for oid, lab in labels.items() if lab["pixels"] > 0}
 
             t0 = time.perf_counter()
@@ -88,15 +105,21 @@ async def main() -> int:
             detect_s.append(time.perf_counter() - t0)
             boxes += len(dets)
             invented += sum(1 for d in dets if not any(_iou(d.bbox, b) > 0.1 for b in every.values()))
+            fast_dets = fast.detect_rgb(rgb) if fast is not None else []
             line = []
             for oid, box in truth.items():
                 if oid not in OBJECT_CLASS:
                     continue
                 known += 1
+                obj = sandbox.get_object(oid)
+                band = bands[_band(math.hypot(obj.x_mm - pose.x_mm, obj.y_mm - pose.y_mm))]
+                band[0] += 1
+                band[2] += any(d.label == NAMES[oid] and _iou(d.bbox, box) >= 0.3 for d in fast_dets)
                 hit = max(((d, _iou(d.bbox, box)) for d in dets if head_noun(d.label) in NOUNS[oid]
                            or set(d.label.split()) & NOUNS[oid]), key=lambda t: t[1], default=(None, 0.0))
                 if hit[0] is not None and hit[1] >= 0.3:
                     found += 1
+                    band[1] += 1
                     ious.append(hit[1])
                     colour_ok += not COLOURS[oid] or bool(set(hit[0].label.split()) & COLOURS[oid])
                     line.append(f"{oid}=ok")
@@ -135,6 +158,8 @@ async def main() -> int:
           f"{sum(detect_s) / max(1, len(detect_s)):.2f} s")
     print(f"is there a ...: in view {pct(present_ok, present_n)}, not in view {pct(absent_ok, absent_n)}, "
           f"{sum(query_s) / max(1, len(query_s)):.2f} s")
+    print("by distance:    " + ", ".join(f"{name}: VLM {pct(v, n)} fast {pct(f, n)}"
+                                         for name, (n, v, f) in bands.items()))
     return 0
 
 

@@ -314,8 +314,8 @@ class RobotHarness:
         try:
             if self.recorder is not None:
                 self.recorder.open()
-            if self._llama_client is not None:
-                await self._llama_client.ensure_server_started()
+            if self._llama_client is not None and await self._llama_client.ensure_server_started():
+                await self.agent.warm_up(self.prompts.system_prompt)
             if self.config.body_backend != "serial":
                 self.sandbox.bind(self.body)  # simulated sensors; a real body has its own
             self.spatial_map.load(self.config.spatial_map_path)

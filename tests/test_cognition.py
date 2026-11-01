@@ -751,3 +751,16 @@ async def test_a_claim_without_action_is_caught_in_a_later_part_too():
     result, backend, probe = await run(script, messages=request("move forward and then come back"))
     assert [args["direction"] for _, args in probe.ran] == ["forward", "backward"]
     assert backend.requests[2]["tool_choice"] == "required" and result.say == "I'm back."
+
+
+async def test_warm_up_reads_the_system_prompt_and_tools_once():
+    backend = ScriptedBackend()
+    loop = AgentLoop(backend, Probe().registry(), AgentConfig())
+    await loop.warm_up("You are a robot.")
+    (sent,) = backend.requests
+    assert sent["messages"][0] == {"role": "system", "content": "You are a robot."}
+    assert {t["function"]["name"] for t in sent["tools"]} == set(Probe().registry().names)
+
+
+async def test_warm_up_without_a_model_does_not_raise():
+    await AgentLoop(UnavailableBackend(), Probe().registry(), AgentConfig()).warm_up("You are a robot.")

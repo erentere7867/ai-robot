@@ -219,9 +219,26 @@ use slot 0 and camera requests slot 1 (`id_slot`), so a VLM look never evicts th
   | Q8_0 + F16 | 32/49 | 19/23 / 28/30 | 18/21 | 2.6 | 2.98 GB |
   | QAD-Q4_0 + F16 | 32/49 | 19/23 / 28/30 | 15/21 | 2.2 | 2.22 GB |
 
-  All within one or two objects of each other: even the near-lossless Q8_0 sees no better, so the limit
-  is the 2B model (most misses: the mug called a "cylinder", the duck a "sphere"), not the quantization.
-  Q4_K_M stays the default; the Q8_0 projector matches F16 and answers faster.
+  All within one or two objects of each other: even the near-lossless Q8_0 sees no better, so
+  quantization is not what limits it. (Most "misses" in this first table were the mug named a "cylinder"
+  and the duck a "sphere", which is what the simulator draws; the grader now accepts those names.)
+- By distance (`eval_vision.py --frames 60 --min-pixels 40`, objects down to a few pixels), share of
+  objects found, VLM with F16 / Q8_0 projector, then the fast detector:
+
+  | distance | VLM + F16 | VLM + Q8_0 | fast detector (YOLO11n NCNN) |
+  |---|---|---|---|
+  | under 1 m | 20/24 | 20/24 | 23/24 |
+  | 1-2 m | 39/49 | 38/49 | 47/49 |
+  | over 2 m | 17/21 | 16/21 | 21/21 |
+
+  The robot drives on the fast detector, which finds nearly everything at every distance in the
+  simulator. Driving with each projector (`v29-proj-f16.json`, `v29-proj-q8.json`, all 37 scenarios x 2
+  layouts) gave the same stopping distances (ball 33-38 cm, dock 6-8 cm, between two objects 3-7 cm off)
+  and the same times; the projector only matters when the VLM itself looks.
+- First request after start: the server read the 2.5k-token system prompt and tools cold in 6.9 s, and
+  the next decisions took 0.5-1.6 s. The robot now reads them once at start (`AgentLoop.warm_up`), so
+  the first request answers in 0.5 s; this made follow-the-ball pass from a fresh start (real-time 8/8,
+  `v30-realtime-warmup.json`), which it had failed as the first scenario after a server start.
 - Fast detector: 16 ms per frame with NCNN on the laptop CPU (4 threads), 12 ms with PyTorch CUDA;
   validation mAP50 0.988; on fresh scenes 0.90 precision / 0.91 recall at IoU 0.5. Map fusion 0.5 ms.
 - Autonomy (`try_autonomy.py`): left alone, the curiosity drive woke it, it explored, found new

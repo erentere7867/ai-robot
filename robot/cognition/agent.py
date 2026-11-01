@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import math
 import re
 import time
@@ -16,6 +17,8 @@ from robot.cognition.planner import TaskList, split_parts
 from robot.cognition.prompts import estimate_tokens
 from robot.core.config import AgentConfig
 from robot.skills.base import SkillContext, SkillRegistry, SkillResult
+
+logger = logging.getLogger(__name__)
 
 _EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿️]")
 _ID = re.compile(r"\b([a-z]+)_\d+\b")
@@ -246,6 +249,19 @@ class AgentLoop:
         self.on_event = on_event
         self._tools = skills.tool_schemas()
         self._tool_names = set(skills.names)
+
+    async def warm_up(self, system_prompt: str) -> None:
+        """Have the model read the system prompt and tool list once, so the server caches them.
+
+        Measured: the first decision after the server starts took 6.9 s (2.5k prompt tokens read cold on the
+        laptop GPU), the next ones 0.5-1.6 s. Without this the human's first request pays that, and the
+        robot set off late enough to lose a rolling ball. On the Pi the cold read is longer still.
+        """
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": "Hello."}]
+        try:
+            await self.backend.chat(messages, tools=self._tools, max_tokens=1)
+        except Exception:  # an absent model is handled per request; warming is only an optimisation
+            logger.info("Model warm-up skipped", exc_info=True)
 
     async def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.on_event is not None:
