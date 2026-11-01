@@ -129,7 +129,7 @@
 
     <!-- 3D Interactive Sandbox Objects (Mocap bodies for instant 3D positioning & dragging) -->
     <body name="obj_red_ball" mocap="true" pos="0.68 0.16 0.048">
-      <geom name="geom_red_ball" type="sphere" size="0.048" material="mat_shiny_obj" rgba="0.96 0.25 0.37 1"/>
+      <geom name="geom_red_ball" type="sphere" size="0.048" material="mat_shiny_obj" rgba="0.75 0.04 0.04 1"/>
     </body>
 
     <body name="obj_blue_cube" mocap="true" pos="0.62 -0.21 0.055">

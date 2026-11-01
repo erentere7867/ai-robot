@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -101,6 +102,32 @@ def contradicts_success(say: str, tool_log: list[dict[str, Any]]) -> bool:
 
 
 FIX_REPLY = "(That tool succeeded: {result} Tell the human in one short sentence what you just did.)"
+# Calls whose second run from the same spot can only repeat the first: going where I already am, facing what
+# I already face. A small model often re-issues them after success instead of answering.
+IDEMPOTENT_TOOLS = {"go_to", "turn_to", "look_around", "observe", "set_eye_color", "tilt_head", "remember",
+                    "recall"}
+DUPLICATE = "Already done: {result} Nothing more to do for this; tell the human."
+
+
+def _pose(ctx: SkillContext) -> Any:
+    return ctx.pose() if ctx.body is not None else None
+
+
+def _same_spot(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return False  # pose unknown: never assume nothing changed
+    turn = abs((a.heading_deg - b.heading_deg + 180.0) % 360.0 - 180.0)
+    return math.hypot(a.x_mm - b.x_mm, a.y_mm - b.y_mm) < 100.0 and turn < 10.0
+
+
+# Appended to the last tool result of each step of a human request. With several steps ("go to the ball
+# and then to the cube") a small model tends to stop after the first; with one ("go to the ball") it
+# tends to keep acting unless told that this may be the end.
+_SEVERAL_PARTS = re.compile(r"\b(?:then|after|afterwards|before|also|next)\b|\band (?:go|come|turn|look|move|"
+                            r"find|drive|tell|show|say|do|make|bring|check|spin|back)\b", re.I)
+DONE_HINT = "If that finishes \"{request}\", answer the human now."
+PROGRESS = ("Request: \"{request}\". Answer the human now, unless the request asks for another step "
+            "that is not done yet.")
 
 
 _CALL_TOKENS = re.compile(r"<\|tool_call_(?:start|end)\|>|</?think>|```(?:python|json)?")
@@ -182,7 +209,11 @@ class AgentLoop:
         attempts: dict[str, int] = {}
         failures = 0
         nudged = False
-        force_tool = False
+        force_tool = force_reply = False
+        succeeded: dict[str, tuple[Any, str]] = {}  # idempotent call -> (pose after it, its result)
+        request = "" if background else request_text(messages)
+        hint = PROGRESS if _SEVERAL_PARTS.search(request) else DONE_HINT
+        ctx.request = request
         for step in range(self.config.max_steps):
             ctx.check()
             if time.monotonic() - started > self.config.timeout_s:
@@ -191,9 +222,10 @@ class AgentLoop:
                 break
             self._fit(messages)
             try:
-                reply: ChatResult = await self.backend.chat(
-                    messages, tools=self._tools, tool_choice="required" if force_tool else "auto")
-                force_tool = False
+                # The tools stay in the request either way, so the cached prompt prefix is reused.
+                choice = "required" if force_tool else "none" if force_reply else "auto"
+                reply: ChatResult = await self.backend.chat(messages, tools=self._tools, tool_choice=choice)
+                force_tool = force_reply = False
             except BackendUnavailable as exc:
                 result.status = "unavailable"
                 result.say = "" if background else "My thinking model is offline right now, so I can't do that."
@@ -251,6 +283,10 @@ class AgentLoop:
                     outcome = SkillResult(False, "Not executed because an earlier step failed.", status="skipped")
                 elif call.invalid_arguments:
                     outcome = SkillResult(False, "The arguments were not valid JSON.", status="rejected")
+                elif (key := json.dumps([call.name, call.arguments], sort_keys=True)) in succeeded and \
+                        _same_spot(succeeded[key][0], _pose(ctx)):
+                    outcome = SkillResult(True, DUPLICATE.format(result=succeeded[key][1]), status="duplicate")
+                    force_reply = True
                 else:
                     if background and not getattr(self.skills.get(call.name), "background_ok", True):
                         outcome = SkillResult(False, "Not available on your own.", status="rejected")
@@ -264,10 +300,16 @@ class AgentLoop:
                                             "message": outcome.message})
                     stop_batch = not outcome.ok
                     failures += 0 if outcome.ok else 1
-                    key = json.dumps([call.name, call.arguments], sort_keys=True)
                     attempts[key] = attempts.get(key, 0) + 1
+                    if outcome.ok and call.name in IDEMPOTENT_TOOLS:
+                        succeeded[key] = (_pose(ctx), outcome.message)
+                payload = outcome.to_model()
+                if request and call is reply.tool_calls[-1] and outcome.status != "duplicate":
+                    # A field of its own: merged into "result" it made the model act on it as an instruction
+                    # (measured: "two_stops" went to the wrong object).
+                    payload["next"] = hint.format(request=request)
                 messages.append({"role": "tool", "tool_call_id": call.id,
-                                 "content": json.dumps(outcome.to_model(), ensure_ascii=False)})
+                                 "content": json.dumps(payload, ensure_ascii=False)})
                 transcript.append(messages[-1])
             if ctx.attached_image is not None:
                 self._attach_image(messages, ctx.attached_image.data_url, reply.tool_calls[-1].name)

@@ -130,11 +130,21 @@ class TrackedObject:
     seen_count: int = 1
     confidence: float = 0.7
     stale: bool = False  # restored from a previous session; odometry frames may not match
+    var_mm2: float = 300.0 ** 2  # position uncertainty (variance, per axis)
 
     def relative(self, pose: BodyPose) -> tuple[float, float]:
         dx, dy = self.x_mm - pose.x_mm, self.y_mm - pose.y_mm
         bearing = math.degrees(math.atan2(dy, dx)) - pose.heading_deg
         return math.hypot(dx, dy), (bearing + 180.0) % 360.0 - 180.0
+
+
+def sighting_var_mm2(cam_dist_mm: float) -> float:
+    """Variance of a position placed from one camera box: depth from a monocular view degrades with range."""
+    return (50.0 + 0.15 * cam_dist_mm) ** 2
+
+
+STALE_VAR_MM2 = 400.0 ** 2  # restored from disk: the odometry frame may have shifted since
+MOVE_VAR_MM2 = 20.0 ** 2  # per sighting, so a track can follow an object that was moved
 
 
 @dataclass
@@ -203,24 +213,32 @@ class SpatialMap:
                 continue
             x, y, radius = located
             cam_dist = math.hypot(x - pose.x_mm, y - pose.y_mm)
+            meas_var = sighting_var_mm2(cam_dist)
             gate = max(350.0, 0.3 * cam_dist)
             best, best_d = None, math.inf
             for obj in self.objects.values():
                 if obj.id in matched or not labels_match(obj.label, det.label):
                     continue
                 d = math.hypot(obj.x_mm - x, obj.y_mm - y)
-                if d < gate and d < best_d:
+                # An uncertain track (first seen from far away) accepts a sighting further from its guess.
+                if d < max(gate, min(900.0, 2.0 * math.sqrt(obj.var_mm2 + meas_var))) and d < best_d:
                     best, best_d = obj, d
             if best is None:
                 if len(self.objects) >= self.max_objects:
                     self._evict()
-                best = TrackedObject(self._new_id(det.label), det.label, x, y, radius, now, now)
+                best = TrackedObject(self._new_id(det.label), det.label, x, y, radius, now, now,
+                                     var_mm2=meas_var)
                 self.objects[best.id] = best
                 is_new = True
             else:
+                # Kalman-style fusion: a close sighting outweighs a distant one, and a well-known track
+                # is not dragged away by one poor far-off box.
+                prior = max(best.var_mm2, STALE_VAR_MM2) if best.stale else best.var_mm2
+                gain = prior / (prior + meas_var)
+                best.x_mm += gain * (x - best.x_mm)
+                best.y_mm += gain * (y - best.y_mm)
+                best.var_mm2 = (1.0 - gain) * prior + MOVE_VAR_MM2
                 alpha = 0.6 if best.stale else max(0.3, 1.0 / (best.seen_count + 1))
-                best.x_mm += alpha * (x - best.x_mm)
-                best.y_mm += alpha * (y - best.y_mm)
                 best.radius_mm += alpha * (radius - best.radius_mm)
                 best.last_seen = now
                 best.seen_count += 1

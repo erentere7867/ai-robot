@@ -338,7 +338,7 @@ class SimulationSandbox:
                 width_mm=96.0,
                 depth_mm=96.0,
                 height_mm=96.0,
-                color="#f43f5e",
+                color="#d42020",  # matches geom_red_ball; the old rose tint read as pink to the camera model
             ),
             "blue_cube": SandboxObject(
                 id="blue_cube",

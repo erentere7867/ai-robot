@@ -16,6 +16,10 @@ from robot.world.spatial_map import TrackedObject
 ROBOT_CLEARANCE_MM = 300.0
 ARRIVE_TOLERANCE_MM = 120.0
 MAX_SEGMENT_MM = 600.0
+# A box seen from 2 m is placed with a few decimetres of error. Beyond this distance go_to stops part way,
+# looks again from closer and re-plans (look-move-look), instead of trusting the first sighting.
+REFINE_BEYOND_MM = 1000.0
+REFINE_AT_MM = 650.0
 START_WORDS = {"start", "start point", "starting point", "home", "where i started", "where you started", "origin"}
 RELATIONS = ["near", "behind", "in_front_of", "left_of", "right_of", "between", "on"]
 # Words a small model reaches for instead (often borrowed from the map's direction text).
@@ -27,6 +31,34 @@ RELATION_ALIASES = {
     "left": "left_of", "to_the_left_of": "left_of", "right": "right_of", "to_the_right_of": "right_of",
     **{w: "on" for w in ("onto", "on_top", "on_top_of", "into", "inside")},
 }
+
+
+# How people name each relation. Used to catch a call that drops the relation the human asked for, e.g.
+# go_to(ball_1, relation=near) for "go between the ball and the cube".
+RELATION_WORDS = {"between": re.compile(r"\bbetween\b"), "behind": re.compile(r"\bbehind\b|\bfar side\b"),
+                  "left_of": re.compile(r"\bleft (?:of|side)\b|\bto the left of\b"),
+                  "right_of": re.compile(r"\bright (?:of|side)\b|\bto the right of\b")}
+
+
+def _asked_relation(request: str) -> str | None:
+    """The one relation the request names, if it names exactly one."""
+    named = [rel for rel, pattern in RELATION_WORDS.items() if pattern.search(request.lower())]
+    return named[0] if len(named) == 1 else None
+
+
+_BETWEEN = re.compile(r"\bbetween (?:the )?(.+?) and (?:the )?(.+?)(?:[.,!?]|$)")
+
+
+def _other_named(ctx: SkillContext, request: str, target_id: str) -> str | None:
+    """For "between the ball and the cube": the known object named in the request that is not the target."""
+    match = _BETWEEN.search(request.lower())
+    if not match:
+        return None
+    for phrase in match.groups():
+        found = ctx.spatial_map.resolve(phrase.strip(), ctx.pose())
+        if found is not None and found.id != target_id:
+            return found.id
+    return None
 
 
 def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -125,10 +157,19 @@ async def _verify_target(ctx: SkillContext, obj_id: str) -> str:
     finally:
         if tilted:
             await ctx.primitive("tilt_head", angle_deg=0.0)
+    ctx.attached_image = None  # a check for the map, not a view for the model to describe
     obj = ctx.spatial_map.objects.get(obj_id)
     if obj_id in view["seen"] and obj is not None:
         return f" I can see {obj_id} {obj.relative(ctx.pose())[0] / 1000:.1f} m away."
     return f" I can't see {obj_id} from here."
+
+
+async def _refresh(ctx: SkillContext, obj: TrackedObject) -> None:
+    """Face the object and look at it again; the map then holds a nearer, more accurate sighting."""
+    current = ctx.spatial_map.objects.get(obj.id, obj)
+    turned = await ctx.face_point(current.x_mm, current.y_mm)
+    if turned is None or turned.ok:
+        await perceive(ctx, None)
 
 
 async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: str = "",
@@ -143,48 +184,91 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
         return SkillResult(ok, msg, {"distance_to_goal_m": round(_dist((ctx.pose().x_mm, ctx.pose().y_mm),
                                                                          goal) / 1000, 2)})
     obj = await _resolve(ctx, target)
-    ox, oy = obj.x_mm, obj.y_mm
-    dx, dy = ox - pose.x_mm, oy - pose.y_mm
+    asked = _asked_relation(ctx.request)
+    repaired = ""
+    if asked and relation in ("near", "in_front_of"):
+        # The call dropped the relation the human named. Measured: told to retry, the 2B model picks yet
+        # another wrong relation, so the call is repaired from the human's own words instead.
+        if asked == "between" and not other:
+            other = _other_named(ctx, ctx.request, obj.id) or ""
+        if asked == "between" and not other:
+            raise SkillError("The human asked for 'between': call go_to with relation 'between' and the "
+                             "second object's id in 'other'.")
+        relation, repaired = asked, f" (I went {asked.replace('_', ' ')}, as the human asked.)"
+    if relation not in RELATIONS:
+        raise SkillError(f"relation must be one of {RELATIONS}")
+    dx, dy = obj.x_mm - pose.x_mm, obj.y_mm - pose.y_mm
     norm = math.hypot(dx, dy)
     if norm < 1.0:
         ux, uy = math.cos(math.radians(pose.heading_deg)), math.sin(math.radians(pose.heading_deg))
     else:
-        ux, uy = dx / norm, dy / norm
+        ux, uy = dx / norm, dy / norm  # "behind" and "left of" are as seen from where the request was made
     gap = obj.radius_mm + (distance_cm * 10.0 if distance_cm is not None else ROBOT_CLEARANCE_MM)
     exclude: set[str] = set()
-    face: tuple[float, float] = (ox, oy)
+    second: TrackedObject | None = None
     if relation == "between":
         if not other:
             raise SkillError("relation 'between' needs the other object in 'other'.")
         second = await _resolve(ctx, other)
         if second.id == obj.id:
             raise SkillError("'between' needs two different objects.")
-        clear = _dist((ox, oy), (second.x_mm, second.y_mm)) - obj.radius_mm - second.radius_mm
+        clear = _dist((obj.x_mm, obj.y_mm), (second.x_mm, second.y_mm)) - obj.radius_mm - second.radius_mm
         if clear < 300.0:
             return SkillResult(False, f"The gap between {obj.id} and {second.id} is only {clear / 10:.0f} cm, "
                                       "too narrow for me.")
-        goal = (0.5 * (ox + second.x_mm), 0.5 * (oy + second.y_mm))
         exclude = {obj.id, second.id}  # the planner would otherwise refuse a goal touching both
     elif relation == "on":
-        goal = (ox, oy)  # something flat to drive onto (a dock, a mat): not an obstacle this time
-        exclude = {obj.id}
-    elif relation == "behind":
-        goal = (ox + ux * gap, oy + uy * gap)
-    elif relation in ("near", "in_front_of"):
-        goal = (ox - ux * gap, oy - uy * gap)
-    elif relation in ("left_of", "right_of"):
-        side = 1.0 if relation == "left_of" else -1.0
-        goal = (ox - uy * gap * side, oy + ux * gap * side)
-    else:
-        raise SkillError(f"relation must be one of {RELATIONS}")
+        exclude = {obj.id}  # something flat to drive onto (a dock, a mat): not an obstacle this time
 
+    def goal_now() -> tuple[float, float]:
+        """The goal from the latest estimate of where the object(s) are."""
+        o = ctx.spatial_map.objects.get(obj.id, obj)
+        if second is not None:
+            s = ctx.spatial_map.objects.get(second.id, second)
+            return 0.5 * (o.x_mm + s.x_mm), 0.5 * (o.y_mm + s.y_mm)
+        if relation == "on":
+            return o.x_mm, o.y_mm
+        if relation == "behind":
+            return o.x_mm + ux * gap, o.y_mm + uy * gap
+        if relation in ("left_of", "right_of"):
+            side = 1.0 if relation == "left_of" else -1.0
+            return o.x_mm - uy * gap * side, o.y_mm + ux * gap * side
+        return o.x_mm - ux * gap, o.y_mm - uy * gap
+
+    if norm > REFINE_BEYOND_MM:
+        # Drive toward the object, stop at a closer viewpoint and look again before the final approach.
+        here = (pose.x_mm, pose.y_mm)
+        view_point = (obj.x_mm - ux * REFINE_AT_MM, obj.y_mm - uy * REFINE_AT_MM)
+        if _dist(here, view_point) > 250.0:
+            await navigate_to(ctx, view_point, exclude=exclude)
+            await _refresh(ctx, obj)
+    goal = goal_now()
     ok, why = await navigate_to(ctx, goal, exclude=exclude)
     end = ctx.pose()
     off = _dist((end.x_mm, end.y_mm), goal)
     verified = ""
+    unconfirmed = False  # the target was not in view where I ended up, even after searching
     if relation != "on":
-        await ctx.face_point(*face)
+        current = ctx.spatial_map.objects.get(obj.id, obj)
+        await ctx.face_point(current.x_mm, current.y_mm)
         verified = await _verify_target(ctx, obj.id)
+        if "can't see" in verified and second is None:
+            # Not where I thought: the map entry was wrong (a far-off guess, or a misdetection). Search
+            # for it from here and go again, rather than reporting an arrival I cannot confirm.
+            found = (await look_around(ctx, obj.label)).data.get("found")
+            if found and found in ctx.spatial_map.objects:
+                obj = ctx.spatial_map.objects[found]
+                goal = goal_now()
+                ok, why = await navigate_to(ctx, goal, exclude=exclude)
+                end = ctx.pose()
+                off = _dist((end.x_mm, end.y_mm), goal)
+                await ctx.face_point(obj.x_mm, obj.y_mm)
+                second_look = await _verify_target(ctx, obj.id)
+                verified = f" It was not where I first thought, so I searched and found {obj.id}." + second_look
+                unconfirmed = "can't see" in second_look  # two checks failed: no arrival to claim
+            else:
+                verified += f" I searched around but could not find {obj.label} again."
+                unconfirmed = True
     obj = ctx.spatial_map.objects.get(obj.id, obj)
     end = ctx.pose()
     holds = _relation_holds(relation, (obj.x_mm, obj.y_mm), obj.radius_mm, start, (end.x_mm, end.y_mm), goal,
@@ -194,12 +278,19 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
         verified += (f" {obj.id} is now between me and where I was." if holds
                      else f" I'm beside {obj.id} rather than behind it.")
     target_txt = f"{obj.id}" + (f" and {other}" if relation == "between" else "")
-    if ok or holds:
-        msg = (f"Arrived {place} {target_txt}" + ("" if ok else " (as close as the space allows)")
-               + ". If that was the request, tell the human.")
+    solid = (relation == "on" and not ok and "obstacle" in why.lower()
+             and _dist((end.x_mm, end.y_mm), (obj.x_mm, obj.y_mm)) < obj.radius_mm + 450.0)
+    if unconfirmed:
+        msg = f"I went to where I thought {obj.id} was, but I can't confirm it is there."
+    elif solid:
+        # Asked to drive onto something the range sensor says is solid (a cube, not a mat): being right
+        # next to it is the best possible outcome, and saying so stops the model retrying.
+        msg = f"{obj.id} is solid, so I can't drive onto it; I'm right next to it now."
+    elif ok or holds:
+        msg = f"Arrived {place} {target_txt}" + ("" if ok else " (as close as the space allows)") + "."
     else:
         msg = f"I stopped {off / 1000:.1f} m short of the spot {place} {target_txt}: {why}."
-    return SkillResult(ok or holds, msg + verified, {"distance_to_goal_m": round(off / 1000, 2)})
+    return SkillResult((ok or holds or solid) and not unconfirmed, msg + verified + repaired, {"distance_to_goal_m": round(off / 1000, 2)})
 
 
 def _relation_holds(relation: str, obj: tuple[float, float], radius: float, start: tuple[float, float],
@@ -291,8 +382,7 @@ async def circle_around(ctx: SkillContext, target: str = "all", laps: float = 1.
     if reached == 0:
         return SkillResult(False, f"I couldn't drive around {name}: walls or obstacles block the way.")
     note = "" if reached == total else f" ({total - reached} of {total} points were blocked, so I went past them)"
-    return SkillResult(True, f"Drove a loop around {name} about {radius / 1000:.1f} m out{note}. "
-                             "If that was the request, tell the human.")
+    return SkillResult(True, f"Drove a loop around {name} about {radius / 1000:.1f} m out{note}.")
 
 
 async def move(ctx: SkillContext, direction: str, distance_cm: float = 30.0) -> SkillResult:

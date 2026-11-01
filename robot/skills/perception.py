@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from robot.skills.base import Skill, SkillContext, SkillResult
@@ -25,7 +26,11 @@ async def perceive(ctx: SkillContext, query: str | None = None) -> dict[str, Any
     """One camera view fused into the map. Returns ids seen, new ids, lost ids and unplaced labels."""
     ctx.check()
     frame = ctx.camera.capture()
-    detections = await ctx.detector.detect(frame, query)
+    return await _fuse(ctx, frame, await ctx.detector.detect(frame, query), query)
+
+
+async def _fuse(ctx: SkillContext, frame: Any, detections: list[Any], query: str | None) -> dict[str, Any]:
+    """Place a view's detections in the map from the pose at capture (the robot may have moved since)."""
     ctx.check()
     update = ctx.spatial_map.integrate_view(frame.pose, frame.model, detections, query=query)
     ctx.attached_image = frame
@@ -52,7 +57,7 @@ async def observe(ctx: SkillContext) -> SkillResult:
     cached = ctx.turn_cache.get("observe")
     if cached is not None and cached[0] == key:
         # Looking again from the same spot shows the same thing; a small model sometimes loops here.
-        return SkillResult(True, "You already looked from here and nothing moved. Answer the human now.",
+        return SkillResult(True, "You already looked from here and nothing moved; use what you saw.",
                            cached[1])
     view = await perceive(ctx, None)
     seen = _summary(ctx, view["seen"])
@@ -64,8 +69,7 @@ async def observe(ctx: SkillContext) -> SkillResult:
     ctx.turn_cache["observe"] = (key, data)
     if not seen and not view["unplaced"]:
         return SkillResult(True, "I see no distinct objects in front of me.", data)
-    return SkillResult(True, f"I can see {len(seen) + len(view['unplaced'])} thing(s). If that answers "
-                             "the request, reply now.", data)
+    return SkillResult(True, f"I can see {len(seen) + len(view['unplaced'])} thing(s).", data)
 
 
 async def _face_found(ctx: SkillContext, obj_id: str) -> SkillResult:
@@ -84,7 +88,17 @@ async def look_around(ctx: SkillContext, query: str = "") -> SkillResult:
     for step in range(steps):
         # Searching asks the VLM for exactly that thing: it recognises "charging dock" when asked,
         # but lists the same object as "box" in a general inventory.
-        view = await perceive(ctx, query or None)
+        ctx.check()
+        frame = ctx.camera.capture()
+        detecting = asyncio.ensure_future(ctx.detector.detect(frame, query or None))
+        spun = None
+        try:
+            if step < steps - 1:
+                # Turn to the next view while the model reads this one (the frame keeps its own pose).
+                spun = await ctx.spin(LOOK_AROUND_STEP_DEG)
+            view = await _fuse(ctx, frame, await detecting, query or None)
+        finally:
+            detecting.cancel()
         seen_ids.extend(view["seen"])
         if query:
             pose = ctx.pose()
@@ -95,11 +109,9 @@ async def look_around(ctx: SkillContext, query: str = "") -> SkillResult:
                 return await _face_found(ctx, scored[0][2])
             if scored and scored[0][0] == 1 and fallback is None:
                 fallback = scored[0][2]
-        if step < steps - 1:
-            result = await ctx.spin(LOOK_AROUND_STEP_DEG)
-            if result is not None and not result.ok:
-                return SkillResult(False, f"Stopped looking around: {result.message}",
-                                   {"objects": _summary(ctx, seen_ids)})
+        if spun is not None and not spun.ok:
+            return SkillResult(False, f"Stopped looking around: {spun.message}",
+                               {"objects": _summary(ctx, seen_ids)})
     # Finish where we started so the scan does not leave the robot facing an arbitrary way.
     await ctx.spin(LOOK_AROUND_STEP_DEG)
     ctx.attached_image = None  # the last frame is not what the robot faces now

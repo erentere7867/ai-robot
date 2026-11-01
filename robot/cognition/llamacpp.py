@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 MAX_RESPONSE_BYTES = 65536
 MAX_TOOL_CALLS = 3
+# The server keeps one cached prompt per slot. Decisions (system prompt + history, ~2-3k tokens) live in
+# slot 0 and camera requests in slot 1, so a detection never evicts the decision prefix.
+DECISION_SLOT, PERCEPTION_SLOT = 0, 1
 
 
 class LlamaCppBackend:
@@ -35,7 +38,7 @@ class LlamaCppBackend:
             trust_env=False,
         )
         self._proc: asyncio.subprocess.Process | None = None
-        # One request at a time: llama-server runs a single slot and queued requests only add latency.
+        # One request at a time: both slots share one GPU, and queued requests only add latency.
         self._lock = asyncio.Lock()
 
     async def ensure_server_started(self) -> bool:
@@ -111,6 +114,7 @@ class LlamaCppBackend:
             "stream": False,
             "cache_prompt": True,
             "chat_template_kwargs": {"enable_thinking": thinking},
+            "id_slot": DECISION_SLOT if messages and messages[0].get("role") == "system" else PERCEPTION_SLOT,
         }
         if tools:
             payload.update(tools=tools, tool_choice=tool_choice)

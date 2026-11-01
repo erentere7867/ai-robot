@@ -148,7 +148,8 @@ async def test_tool_call_result_is_fed_back_with_its_id_then_reply():
     tool = next(m for m in second if m["role"] == "tool")
     assert call["tool_calls"][0]["function"]["name"] == "move"
     assert tool["tool_call_id"] == call["tool_calls"][0]["id"]
-    assert json.loads(tool["content"]) == {"ok": True, "result": "Moved forward 20 cm."}
+    assert json.loads(tool["content"]) == {"ok": True, "result": "Moved forward 20 cm.",
+                                           "next": 'If that finishes "do it", answer the human now.'}
     kinds = [kind for kind, _ in events]
     assert kinds == ["cognition.model_call", "skill.started", "skill.completed", "cognition.model_call"]
 
@@ -248,7 +249,7 @@ async def test_failed_call_skips_the_rest_of_its_batch():
                                         "The bumper stopped me."])
     assert probe.ran == [("bump", {"n": 1.0})]
     results = [json.loads(m["content"]) for m in backend.requests[1]["messages"] if m["role"] == "tool"]
-    assert results[1] == {"ok": False, "result": "Not executed because an earlier step failed."}
+    assert results[1]["result"] == "Not executed because an earlier step failed."
     assert result.say == "The bumper stopped me."
 
 
@@ -619,3 +620,62 @@ async def test_reply_contradicting_a_successful_action_is_corrected():
                                     "Sorry, I can't move right now.", "I moved forward."])
     assert result.say == "I moved forward."
     assert "That tool succeeded" in backend.requests[2]["messages"][-1]["content"]
+
+
+async def test_decisions_and_camera_requests_use_separate_cache_slots():
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content)["id_slot"])
+        return completion("[]")
+
+    client = await mock_llama(handler)
+    try:
+        await client.chat([{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}], tools=[{}])
+        await client.chat([{"role": "user", "content": [{"type": "text", "text": "Detect"}]}])
+        await client.chat([{"role": "system", "content": "s"}, {"role": "user", "content": "say it"}])
+    finally:
+        await client.close()
+    assert seen == [0, 1, 0]
+
+
+async def test_a_repeated_successful_call_is_not_rerun_and_the_model_must_answer():
+    class StillBody:
+        def pose(self):
+            return BodyPose()
+
+    ctx = make_ctx()
+    ctx.body = StillBody()
+    script = [{"call": "observe"}, {"call": "observe"}, "I see nothing."]
+    result, backend, probe = await run(script, ctx=ctx)
+    assert [name for name, _ in probe.ran] == ["observe"]
+    assert backend.requests[2]["tool_choice"] == "none"
+    results = [json.loads(m["content"]) for m in backend.requests[2]["messages"] if m["role"] == "tool"]
+    assert results[1]["result"].startswith("Already done:") and "next" not in results[1]
+    assert result.say == "I see nothing." and result.status == "completed"
+
+
+async def test_a_repeated_motion_is_run_again():
+    script = [{"call": "move", "args": {"direction": "forward"}}, {"call": "move", "args": {"direction": "forward"}},
+              "Done."]
+    _, _, probe = await run(script)
+    assert [name for name, _ in probe.ran] == ["move", "move"]
+
+
+async def test_a_request_with_several_parts_is_restated_after_each_step():
+    script = [{"calls": [["observe", {}], ["move", {"direction": "forward"}]]}, "Done."]
+    _, backend, _ = await run(script, messages=request("look, then move forward"))
+    results = [json.loads(m["content"]) for m in backend.requests[1]["messages"] if m["role"] == "tool"]
+    assert "next" not in results[0]  # the reminder rides on the step's last result only
+    assert results[1]["next"] == ('Request: "look, then move forward". Answer the human now, unless the '
+                                  "request asks for another step that is not done yet.")
+
+
+@pytest.mark.parametrize("text, several", [
+    ("go to the red ball and then to the blue cube", True), ("find the duck and go to it", True),
+    ("go between the red ball and the blue cube", False), ("go to the red ball", False),
+])
+def test_requests_with_several_steps_are_told_apart(text, several):
+    from robot.cognition.agent import _SEVERAL_PARTS
+
+    assert bool(_SEVERAL_PARTS.search(text)) is several

@@ -47,6 +47,15 @@ composes from what it perceives.
    colour-aware synonyms), applies negative evidence to objects that should be visible but are not,
    and marks camera coverage. Forward ToF readings build an occupancy grid, so walls are discovered,
    not given.
+5. Each track keeps a position variance. A sighting's variance grows with range (depth from one
+   camera box degrades with distance), and sightings are fused Kalman-style: a close look outweighs a
+   distant one, and one poor far-off box cannot drag a well-known object away.
+6. `look_around` turns to the next view while the model is still reading the last frame; every frame
+   carries the pose it was taken at, so the map stays correct while the robot moves.
+7. `go_to` on a target more than a metre away stops at a closer viewpoint, looks again and re-plans
+   (look-move-look), instead of driving to where one distant sighting put it. If on arrival the target
+   is not in view, the map entry was wrong: it searches for it and goes there; if it still cannot see
+   it, the skill fails honestly instead of claiming an arrival.
 
 The simulator's ground-truth detections (`sandbox.detect_objects`) are only used by the dashboard
 debug view and the evaluation graders, never by the robot.
@@ -69,7 +78,21 @@ messages, never as text summaries of actions, or it starts *writing* actions ins
   written in words (code-like examples make it print calls as text).
 - `recover_text_tool_calls` accepts a reply that is *only* a call written as text.
 - Loop guards: the same call three times, or four failures, ends the turn with an honest message;
-  a second `observe` from the same pose returns the cached view with "answer now".
+  a second `observe` from the same pose returns the cached view.
+- A successful idempotent call (`go_to`, `turn_to`, `look_around`, ...) repeated from the same spot is
+  not run again: the model is told it is already done and its next answer must be a reply
+  (`tool_choice: none`). A small model otherwise re-issues the call after success until the loop guard
+  stops it with a misleading "I keep trying".
+- The last tool result of each step carries a `next` hint built from the human's words. A request with
+  several steps ("then", "after", "and go ...") is restated ("Answer the human now, unless the request
+  asks for another step that is not done yet"), so "go to the ball and then to the cube" is not dropped
+  after the first part; a one-step request gets "If that finishes ..., answer the human now". Merged
+  into the result text instead, the hint was obeyed as an instruction and made things worse (measured).
+- `go_to` checks its arguments against the request: if the human named exactly one relation
+  ("between", "behind", "left of", ...) and the call says `near`, it is rejected with the relation to use.
+- Only `observe` puts a camera image in the model's context. The views skills take for their own checks
+  (arriving somewhere) update the map but are not shown: an extra image made the model describe or
+  visit what it saw instead of answering (go to the ball: 25 s with detours -> 8 s).
 - Skills return outcomes the model can reason about ("box_1 is now between me and where I was").
 - `scripts/eval_decisions.py` measures the first decision for 21 situations in about a minute; use
   it after any prompt or tool change. `scripts/eval_scenarios.py` runs whole tasks in the simulator
@@ -84,7 +107,9 @@ python scripts/try_robot.py --physics "go to the red ball"   # MuJoCo dynamics: 
 python scripts/try_autonomy.py --seconds 180 --speed 20      # leave it alone and watch
 python scripts/eval_decisions.py                  # needs llama-server running
 python scripts/eval_scenarios.py --backend llamacpp --no-server-start --seeds 2
-python -m pytest -q                               # 350 tests, no model needed
+python scripts/eval_scenarios.py --scenarios hard --no-server-start   # the harder set only
+python scripts/probe_latency.py --pin             # where inference time goes (server timings)
+python -m pytest -q                               # 377 tests, no model needed
 ```
 
 The dashboard (http://127.0.0.1:8090) shows the robot's own spatial map (with an optional
@@ -97,23 +122,32 @@ objects, a contact bumper and noisy encoder/IMU odometry, so the robot's map dri
 one would. The camera always renders from the true pose; the robot only knows its estimate.
 
 `llama-server` must be started with the vision projector, `--jinja` and two slots
-(`-np 2 -c 16384`): one slot keeps the agent's prompt cache, the other serves detection requests.
+(`-np 2 -c 16384`). Every request names its slot (`id_slot`): decisions use slot 0 and camera
+requests slot 1, so a detection never evicts the ~2,100-token decision prefix from the cache.
 `LlamaCppBackend.ensure_server_started` does this automatically.
 
 ## Measured on the laptop (LFM3-VL-2B Q4, GTX 1650)
 
 - Decision benchmark (`eval_decisions.py`, first tool call in 21 situations): 67% at the start of the
-  rework, 93–98% now.
-- Simulator tasks (`eval_scenarios.py`, 14 tasks graded from ground truth): latest run 42/42 over three
-  room layouts; earlier runs of nearly the same code scored 89–93%, so expect occasional misses.
-  Tasks: greet, describe, turn around, look left, move a little, go to the ball, go behind the box,
-  go between two objects, find a hidden duck, go to the charging dock, come back to the start,
-  look around and report, and remembering a name/preference across restarts.
+  rework, 93-98% now, at 0.5 s per decision.
+- Simulator tasks (`eval_scenarios.py`, graded from ground truth, two room layouts each): the 14 core
+  tasks 28/28 in 224 s (was 28/28 in 254 s); the 12 harder tasks 22/24 (19/24 before the latest
+  changes). Core: greet, describe, turn around, look left, move a little, go to the ball, go behind the
+  box, go between two objects, find a hidden duck, go to the dock, come back to the start, look around
+  and report, remembering a name/preference across restarts. Harder (`--scenarios hard`): a repeated
+  command, turning left then right, turn 45 degrees, dance, sad face, the ball's colour, circling the
+  box, find the duck and go to it, two stops in one request, back up after arriving, "the one closest
+  to you" from the previous turn, the left side of the box. Runs vary: expect a miss or two.
+- Where time goes (`probe_latency.py`): a decision re-reads 35-40 new tokens and reuses ~2,100 cached
+  ones (0.3-0.4 s); a detection spends ~1 s encoding the image (~270 tokens) and 0.4-2 s writing the
+  box list (about 30 tokens per object), so the number of objects in view sets its cost.
 - Autonomy (`try_autonomy.py`): left alone, the curiosity drive woke it, it explored, found new
   objects and covered 99% of the area around it in 2.5 minutes (drives accelerated 30x).
 
 Known limitations:
 
+- The violet charging dock can pass a targeted search for a "blue cube" (crop check included); the
+  arrival check then fails and the robot says so, but it can keep retrying until the loop guard stops it.
 - The general "what is here" detection sometimes invents objects (a "laptop", a "banner") from walls
   or the dock's base. Searches for a specific thing are confirmed on a crop with a yes/no question;
   the general inventory is not, to keep it to one model call per view.
@@ -123,7 +157,7 @@ Known limitations:
 
 ## Raspberry Pi 5 (4 GB): what to expect
 
-Laptop measurements (GTX 1650): a decision takes 1.5–3 s, a detection 1–2.5 s, "go behind that
+Laptop measurements (GTX 1650): a decision takes 0.3-0.7 s, a detection 1.4-3 s, "go behind that
 box" about 25 s including driving. On the Pi's CPU the same model is several times slower (not yet
 measured — run `scripts/bench_llm.py` there). Expect each decision to take several seconds and
 `look_around` (six detections) to take a minute or more. Recommended path:

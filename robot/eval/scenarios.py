@@ -607,6 +607,124 @@ def _recall_grader(pattern: str, label: str) -> Callable[[ScenarioRun], Grade]:
     return grade
 
 
+# --------------------------------------------------------------------------- harder graders
+
+
+def _used(turn: TurnRecord, tool: str, **want: str) -> bool:
+    """A skill call that succeeded with these arguments (case-insensitive)."""
+    return any(
+        k.get("tool") == tool and k.get("ok")
+        and all(str((k.get("args") or {}).get(a, "")).lower() == v for a, v in want.items())
+        for k in turn.skills
+    )
+
+
+def grade_dance(run: ScenarioRun) -> Grade:
+    turn = run.turns[-1]
+    danced = any(a.get("tool") == "perform_trick" and a.get("ok") and (a.get("args") or {}).get("trick") == "dance"
+                 for a in turn.actions)
+    moved = distance_mm(turn.pose_before, turn.pose_after)
+    return _verdict([(danced, "danced" if danced else "no dance trick ran"), (moved < 200.0, f"moved {moved:.0f} mm")],
+                    {"moved_mm": round(moved, 1)})
+
+
+def grade_sad_face(run: ScenarioRun) -> Grade:
+    turn = run.turns[-1]
+    sad = _used(turn, "express", emotion="sad")
+    return _verdict([(sad, "showed sad" if sad else "no sad expression"),
+                     (bool(turn.say.strip()), "replied" if turn.say.strip() else "empty reply")], {})
+
+
+def grade_circle_box(run: ScenarioRun) -> Grade:
+    box = run.object("cardboard_box")
+    if box is None:
+        return _missing("cardboard_box")
+    bx, by = float(box["x_mm"]), float(box["y_mm"])
+    # Sweep of the robot's bearing as seen from the box, unwrapped along the path.
+    swept, last, lo, hi = 0.0, None, 0.0, 0.0
+    for p in run.turns[-1].poses():
+        a = math.degrees(math.atan2(float(p["y_mm"]) - by, float(p["x_mm"]) - bx))
+        if last is not None:
+            swept += wrap_deg(a - last)
+            lo, hi = min(lo, swept), max(hi, swept)
+        last = a
+    coverage = hi - lo
+    hits = _collisions(run, box)
+    return _verdict(
+        [(coverage >= 300.0, f"went {coverage:.0f} deg around the box"),
+         (not hits["contacts"], f"{hits['contacts']} contact poses")],
+        {"coverage_deg": round(coverage, 1), **hits},
+    )
+
+
+def _near_grader(obj_id: str, limit_mm: float) -> Callable[[ScenarioRun], Grade]:
+    def grade(run: ScenarioRun) -> Grade:
+        obj = run.object(obj_id)
+        if obj is None:
+            return _missing(obj_id)
+        dist = distance_mm(run.turns[-1].pose_after, obj)
+        return _verdict([(dist <= limit_mm, f"{dist:.0f} mm from {obj_id}")], {"distance_mm": round(dist, 1)})
+
+    return grade
+
+
+def grade_two_stops(run: ScenarioRun) -> Grade:
+    ball, cube = run.object("red_ball"), run.object("blue_cube")
+    if ball is None or cube is None:
+        return _missing("red_ball/blue_cube")
+    closest_ball = min(distance_mm(p, ball) for p in run.all_poses())
+    end = distance_mm(run.turns[-1].pose_after, cube)
+    return _verdict([(closest_ball <= 450.0, f"came within {closest_ball:.0f} mm of the ball"),
+                     (end <= 450.0, f"ended {end:.0f} mm from the cube")],
+                    {"ball_min_mm": round(closest_ball, 1), "cube_end_mm": round(end, 1)})
+
+
+def grade_back_up(run: ScenarioRun) -> Grade:
+    turn = run.turns[-1]
+    forward, _ = forward_lateral_mm(turn.pose_before, turn.pose_after)
+    turned = abs(heading_change_deg(turn.pose_before, turn.pose_after))
+    return _verdict([(-700.0 <= forward <= -60.0, f"moved {forward:+.0f} mm along its heading"),
+                     (turned < 20.0, f"turned {turned:.0f} deg")],
+                    {"forward_mm": round(forward, 1), "turned_deg": round(turned, 1)})
+
+
+def grade_closest(run: ScenarioRun) -> Grade:
+    start = run.turns[0].pose_before
+    visible = visible_object_ids(start, run.objects_start, run.camera)
+    candidates = [o for o in run.objects_start if o["id"] in visible] or list(run.objects_start)
+    nearest = min(candidates, key=lambda o: distance_mm(start, o))
+    obj = run.object(nearest["id"]) or nearest
+    end = run.turns[-1].pose_after
+    dist = distance_mm(end, obj)
+    now_nearest = min(run.objects, key=lambda o: distance_mm(end, o))["id"]
+    return _verdict([(dist <= 450.0 and now_nearest == nearest["id"],
+                      f"{dist:.0f} mm from {nearest['id']} (nearest now: {now_nearest})")],
+                    {"target": nearest["id"], "distance_mm": round(dist, 1)})
+
+
+def grade_ball_color(run: ScenarioRun) -> Grade:
+    say = run.turns[-1].say
+    red = bool(re.search(r"\bred\b", say, re.I))
+    return _verdict([(red, "said red" if red else f"did not say red: {say[:60]!r}")], {})
+
+
+def grade_left_of_box(run: ScenarioRun) -> Grade:
+    box = run.object("cardboard_box")
+    if box is None:
+        return _missing("cardboard_box")
+    start, end = run.turns[0].pose_before, run.turns[-1].pose_after
+    bx, by = float(box["x_mm"]), float(box["y_mm"])
+    ax, ay = bx - float(start["x_mm"]), by - float(start["y_mm"])
+    ex, ey = float(end["x_mm"]) - bx, float(end["y_mm"]) - by
+    lateral = (ax * ey - ay * ex) / (math.hypot(ax, ay) or 1.0)  # + = left of the line from start to box
+    dist = math.hypot(ex, ey)
+    hits = _collisions(run, box)
+    return _verdict([(lateral >= 150.0, f"{lateral:+.0f} mm to the left of the box"),
+                     (dist <= 750.0, f"{dist:.0f} mm from box"),
+                     (not hits["contacts"], f"{hits['contacts']} contact poses")],
+                    {"lateral_mm": round(lateral, 1), "distance_mm": round(dist, 1), **hits})
+
+
 # --------------------------------------------------------------------------- registry
 
 
@@ -620,6 +738,7 @@ class Scenario:
     grader: Callable[[ScenarioRun], Grade]
     setup: SceneSetup = field(default_factory=SceneSetup)
     restart_before: frozenset[int] = frozenset()
+    hard: bool = False  # the harder set: repeats, chained steps, references to earlier turns
 
     def grade(self, run: ScenarioRun) -> Grade:
         return self.grader(run)
@@ -686,14 +805,51 @@ SCENARIO_LIST: tuple[Scenario, ...] = (
         restart_before=frozenset({1}),
     ),
 )
+HARD_SCENARIOS: tuple[Scenario, ...] = (
+    Scenario("turn_around_twice", "A repeated command is done again", ("turn around", "turn around again"),
+             _turn_grader(180.0, 30.0), hard=True),
+    Scenario("look_left_then_right", "Second of two turns goes the other way", ("look to your left", "now look right"),
+             _turn_grader(-90.0, 35.0), hard=True),
+    Scenario("turn_right_45", "Turn by a stated angle", ("turn right 45 degrees",), _turn_grader(-45.0, 15.0),
+             hard=True),
+    Scenario("dance", "Do a dance in place", ("do a little dance",), grade_dance, hard=True),
+    Scenario("sad_face", "Show a sad face and say something", ("make a sad face",), grade_sad_face, hard=True),
+    Scenario("ball_color", "Answer a question about how something looks", ("what color is the ball?",),
+             grade_ball_color, hard=True),
+    Scenario("circle_box", "Drive all the way around the box without touching it",
+             ("drive in a circle around the cardboard box",), grade_circle_box,
+             SceneSetup(overrides={"cardboard_box": (700.0, 0.0), "red_ball": (300.0, 900.0),
+                                   "blue_cube": (300.0, -900.0), "green_mug": (1250.0, -900.0),
+                                   "yellow_duck": (1250.0, 900.0)}, jitter_mm=40.0), hard=True),
+    Scenario("find_and_go", "Find a duck behind the robot and drive to it", ("find the yellow duck and go to it",),
+             _near_grader("yellow_duck", 450.0), SceneSetup(overrides={"yellow_duck": (-800.0, 350.0)}), hard=True),
+    Scenario("two_stops", "Visit the ball, then the cube, in one request",
+             ("go to the red ball and then to the blue cube",), grade_two_stops,
+             SceneSetup(overrides={"red_ball": (650.0, 450.0), "blue_cube": (650.0, -450.0),
+                                   "yellow_duck": (-700.0, 700.0)}, jitter_mm=50.0),
+             hard=True),
+    Scenario("back_up", "Back up after arriving somewhere", ("go to the blue cube", "back up a little"),
+             grade_back_up, hard=True),
+    Scenario("closest", "Resolve 'the one closest to you' from what it just saw",
+             ("what do you see?", "go to the one closest to you"), grade_closest,
+             # One object clearly nearest (the default scene has the ball and cube at the same distance).
+             SceneSetup(overrides={"red_ball": (480.0, 120.0), "blue_cube": (900.0, -350.0),
+                                   "yellow_duck": (-700.0, 700.0)}, jitter_mm=40.0), hard=True),
+    Scenario("left_of_box", "Go to the left side of the box", ("go to the left side of the box",),
+             grade_left_of_box, SceneSetup(overrides={"cardboard_box": (900.0, 0.0), "green_mug": (1150.0, -700.0)}),
+             hard=True),
+)
+SCENARIO_LIST = SCENARIO_LIST + HARD_SCENARIOS
 SCENARIOS: dict[str, Scenario] = {s.name: s for s in SCENARIO_LIST}
 
 
 def select_scenarios(spec: str) -> list[Scenario]:
-    """Parse `all` or a comma-separated list of scenario names."""
+    """Parse `all`, `core` (the original set), `hard`, or a comma-separated list of scenario names."""
     names = [n.strip() for n in (spec or "all").split(",") if n.strip()]
     if not names or names == ["all"]:
         return list(SCENARIO_LIST)
+    if names in (["core"], ["hard"]):
+        return [s for s in SCENARIO_LIST if s.hard == (names[0] == "hard")]
     unknown = [n for n in names if n not in SCENARIOS]
     if unknown:
         raise ValueError(f"Unknown scenario(s): {', '.join(unknown)}; choose from {', '.join(SCENARIOS)}")

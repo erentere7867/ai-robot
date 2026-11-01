@@ -56,6 +56,7 @@ class SkillContext:
     wake_request_s: float | None = None
     expression: dict[str, Any] = field(default_factory=dict)
     turn_cache: dict[str, Any] = field(default_factory=dict)  # per-turn memo, cleared by the arbiter
+    request: str = ""  # what the human asked this turn (empty on background turns), set by the agent
 
     def pose(self) -> BodyPose:
         return self.body.pose()

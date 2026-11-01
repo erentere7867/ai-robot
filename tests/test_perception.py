@@ -370,3 +370,24 @@ def test_room_surfaces_are_not_objects() -> None:
     text = ('[{"label": "blue wall", "bbox": [0, 0, 400, 300]}, {"label": "blue floor", "bbox": [0, 600, 999, 999]},'
             ' {"label": "red ball", "bbox": [100, 600, 200, 700]}]')
     assert [d.label for d in parse_detections(text)] == ["red ball"]
+
+
+def test_a_close_sighting_outweighs_a_distant_one():
+    spatial, clock = fresh_map()
+    spatial.integrate_view(BodyPose(), MODEL, [det_at(2000, 0, "brown box")])  # placed 30 cm short from afar
+    clock.advance(1)
+    near = BodyPose(1300, 0, 0)
+    spatial.integrate_view(near, MODEL, [det_at(2300, 0, "brown box", near)])
+    box = spatial.objects["box_1"]
+    assert abs(box.x_mm - 2300) < 100  # not the 2150 midpoint an equal-weight average would give
+
+
+def test_a_well_known_object_is_not_dragged_by_one_far_sighting():
+    spatial, clock = fresh_map()
+    near = BodyPose(400, 0, 0)
+    for _ in range(3):
+        spatial.integrate_view(near, MODEL, [det_at(1200, 0, "red ball", near)])
+        clock.advance(1)
+    far = BodyPose(-1000, 0, 0)
+    spatial.integrate_view(far, MODEL, [det_at(1500, 0, "red ball", far)])
+    assert abs(spatial.objects["ball_1"].x_mm - 1200) < 100

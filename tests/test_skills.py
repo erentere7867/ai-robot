@@ -41,11 +41,11 @@ async def test_observe_places_objects_and_attaches_the_view(sim):
 async def test_observe_again_from_the_same_pose_returns_the_cached_nudge(sim):
     first = await run(sim, "observe")
     second = await run(sim, "observe")
-    assert "Answer the human now" in second.message and second.data == first.data
+    assert "You already looked from here" in second.message and second.data == first.data
     assert len(sim.detector.calls) == 1
     await run(sim, "turn", direction="left", degrees=20)
     third = await run(sim, "observe")
-    assert "Answer the human now" not in third.message and len(sim.detector.calls) == 2
+    assert "You already looked from here" not in third.message and len(sim.detector.calls) == 2
 
 
 @pytest.mark.parametrize("relation, check", [
@@ -289,3 +289,66 @@ async def test_circle_around_an_object_returns_facing_it(sim):
 async def test_turn_around_is_a_half_turn_even_with_360(sim):
     await run(sim, "turn", direction="around", degrees=360)
     assert abs(abs(sim.body.pose().heading_deg) - 180.0) < 1.0
+
+
+async def test_go_to_a_far_target_looks_again_on_the_way(sim):
+    from robot.world.spatial_map import TrackedObject
+
+    sim.sandbox.move_object("cardboard_box", 1300.0, 0.0)
+    # A poor first estimate, as from one distant camera box: 40 cm off.
+    sim.spatial_map.objects["box_1"] = TrackedObject("box_1", "cardboard box", 1000.0, 250.0, 140.0, 0.0, 0.0)
+    result = await run(sim, "go_to", target="box_1")
+    assert result.ok, result.message
+    box, est = sim.sandbox.get_object("cardboard_box"), sim.spatial_map.objects["box_1"]
+    assert math.hypot(est.x_mm - box.x_mm, est.y_mm - box.y_mm) < 120
+    d, _, _ = rel(sim.body.pose(), box)
+    assert d < 140 + 450
+
+
+async def test_look_around_places_what_it_saw_while_turning(sim):
+    # The scan turns to the next view while the last one is being read; positions must use the pose
+    # each frame was taken at.
+    sim.sandbox.move_object("cardboard_box", -1000.0, 300.0)
+    await run(sim, "look_around")
+    box, est = sim.sandbox.get_object("cardboard_box"), sim.spatial_map.objects["box_1"]
+    assert math.hypot(est.x_mm - box.x_mm, est.y_mm - box.y_mm) < 100
+
+
+async def test_go_to_on_a_solid_object_stops_beside_it_and_says_so(sim):
+    await run(sim, "observe")
+    result = await run(sim, "go_to", target="box_1", relation="on")
+    assert result.ok and "solid" in result.message
+    d, _, _ = rel(sim.body.pose(), sim.sandbox.get_object("cardboard_box"))
+    assert d < 140 + 450
+
+
+async def test_go_to_searches_again_when_the_target_is_not_where_the_map_said(sim):
+    from robot.world.spatial_map import TrackedObject
+
+    # A false entry, as from a misdetection: the real box is ahead, the map says it is behind.
+    sim.spatial_map.objects["box_1"] = TrackedObject("box_1", "cardboard box", -800.0, 0.0, 140.0, 0.0, 0.0)
+    result = await run(sim, "go_to", target="box_1")
+    assert result.ok and "searched and found" in result.message, result.message
+    d, _, _ = rel(sim.body.pose(), sim.sandbox.get_object("cardboard_box"))
+    assert d < 140 + 450
+
+
+async def test_go_to_uses_the_relation_the_human_asked_for(sim):
+    await run(sim, "observe")
+    sim.skill_context.request = "go behind the box"
+    result = await run(sim, "go_to", target="box_1", relation="near")
+    assert result.ok and result.message.startswith("Arrived behind box_1"), result.message
+    assert "as the human asked" in result.message
+    _, along, _ = rel(sim.body.pose(), sim.sandbox.get_object("cardboard_box"))
+    assert along > 0  # on the far side
+
+
+async def test_go_to_between_finds_the_other_object_in_the_request(sim):
+    sim.sandbox.move_object("cardboard_box", 1000.0, 400.0)
+    sim.sandbox.add_object(obj_id="ball", label="Red Ball", shape="sphere", x_mm=1000.0, y_mm=-400.0, size_mm=96)
+    await run(sim, "observe")
+    sim.skill_context.request = "go between the red ball and the box"
+    result = await run(sim, "go_to", target="ball_1", relation="near", distance_cm=10)
+    assert result.ok and result.message.startswith("Arrived between ball_1 and box_1"), result.message
+    pose = sim.body.pose()
+    assert math.hypot(pose.x_mm - 1000, pose.y_mm) < 250
