@@ -65,6 +65,8 @@ class LlamaCppBackend:
             # flags a decision re-reads ~5-150 tokens instead of ~400 (measured: 1.9 s -> 0.7 s per call).
             "--swa-full", "--checkpoint-min-step", "256",
         ]
+        if self.config.threads > 0:
+            cmd.extend(["--threads", str(self.config.threads), "--threads-batch", str(self.config.threads)])
         if self.config.mmproj_path and self.config.mmproj_path.exists():
             cmd.extend(["--mmproj", str(self.config.mmproj_path)])
         else:

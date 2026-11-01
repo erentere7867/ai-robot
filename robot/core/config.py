@@ -89,6 +89,7 @@ class LLMConfig:
         ).expanduser()
     )
     gpu_layers: int = 99
+    threads: int = 0  # CPU threads for llama-server (0 = its default); 4 on a Raspberry Pi 5
     ctx_size: int = 8192
     timeout_s: float = 90.0
     temperature: float = 0.0
@@ -153,6 +154,25 @@ class AutonomyConfig:
 
 
 @dataclass
+class PerceptionConfig:
+    """The fast layer: a small detector on every frame and a 20 Hz control loop."""
+
+    fast_detector: str = "auto"  # auto: use ~/robot-runtime/models/fast_detector* if trained; off: VLM only
+    # NCNN (no PyTorch) is the fastest CPU runtime for YOLO on ARM and is what the Pi runs; using it on the
+    # laptop too means every simulator run exercises the exact perception code of the robot.
+    prefer_ncnn: bool = True
+    imgsz: int = 320
+    confidence: float = 0.4
+    loop_hz: float = 20.0
+
+    def __post_init__(self) -> None:
+        if self.fast_detector not in ("auto", "off"):
+            raise ValueError("perception.fast_detector must be 'auto' or 'off'")
+        if not 64 <= self.imgsz <= 1280 or not 0.05 <= self.confidence <= 0.95 or not 2 <= self.loop_hz <= 100:
+            raise ValueError("perception settings are outside supported limits")
+
+
+@dataclass
 class RobotConfig:
     name: str = "Sprocket"
     wake_words: list[str] = field(default_factory=lambda: ["sprocket", "hey sprocket", "robot", "hey robot"])
@@ -165,7 +185,9 @@ class RobotConfig:
     soul_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "SOUL.md")
     body_config_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "body.yaml")
     sim_tick_hz: float = 20.0
-    body_backend: str = "kinematic"  # "kinematic" | "physics"
+    body_backend: str = "kinematic"  # "kinematic" | "physics" (simulated) | "serial" (the real robot)
+    serial_port: str = "/dev/ttyACM0"  # the motor microcontroller (firmware/base_controller)
+    camera: str = "sim"  # "sim" | "picamera" (Pi camera module) | "usb"
     spatial_map_path: Path = field(
         default_factory=lambda: Path("~/robot-runtime/data/spatial_map.json").expanduser()
     )
@@ -183,6 +205,7 @@ class RobotConfig:
     context_budget: ContextBudgetConfig = field(default_factory=ContextBudgetConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     autonomy: AutonomyConfig = field(default_factory=AutonomyConfig)
+    perception: PerceptionConfig = field(default_factory=PerceptionConfig)
 
     def __post_init__(self) -> None:
         for key in (
@@ -197,8 +220,10 @@ class RobotConfig:
                 raise ValueError(f"{key} must be finite and positive")
         if not 1 <= self.sim_tick_hz <= 200 or not 1 <= self.max_queue_size <= 4096:
             raise ValueError("Simulation rate or queue size is outside supported limits")
-        if self.body_backend not in ("kinematic", "physics"):
-            raise ValueError("runtime.body_backend must be 'kinematic' or 'physics'")
+        if self.body_backend not in ("kinematic", "physics", "serial"):
+            raise ValueError("runtime.body_backend must be 'kinematic', 'physics' or 'serial'")
+        if self.camera not in ("sim", "picamera", "usb"):
+            raise ValueError("runtime.camera must be 'sim', 'picamera' or 'usb'")
 
     @classmethod
     def from_yaml(
@@ -242,6 +267,7 @@ class RobotConfig:
                 str(llm_raw.get("llama_server_bin", str(LLMConfig().llama_server_bin)))
             ),
             gpu_layers=int(llm_raw.get("gpu_layers", 99)),
+            threads=int(llm_raw.get("threads", 0)),
             ctx_size=int(llm_raw.get("ctx_size", 8192)),
             timeout_s=float(llm_raw.get("timeout_s", 90.0)),
             temperature=float(llm_raw.get("temperature", 0.0)),
@@ -266,6 +292,8 @@ class RobotConfig:
             body_config_path=_resolve(str(rt.get("body_config_path", "config/body.yaml")), default_rel=True),
             sim_tick_hz=float(rt.get("sim_tick_hz", 20.0)),
             body_backend=str(rt.get("body_backend", "kinematic")),
+            serial_port=str(rt.get("serial_port", "/dev/ttyACM0")),
+            camera=str(rt.get("camera", "sim")),
             spatial_map_path=_resolve(str(rt.get("spatial_map_path", "~/robot-runtime/data/spatial_map.json"))),
             max_queue_size=int(bus.get("max_queue_size", 256)),
             record_events=_as_bool(bus.get("record_events", True), "bus.record_events"),
@@ -281,4 +309,5 @@ class RobotConfig:
             context_budget=cb,
             agent=AgentConfig(**_section(raw, "agent")),
             autonomy=AutonomyConfig(**_section(raw, "autonomy")),
+            perception=PerceptionConfig(**_section(raw, "perception")),
         )

@@ -25,6 +25,7 @@ from robot.cognition.agent import AgentLoop
 from robot.cognition.backend import InferenceBackend, NullBackend
 from robot.cognition.llamacpp import AutoBackend, LlamaCppBackend
 from robot.cognition.prompts import PromptBuilder, estimate_tokens
+from robot.control.fast_loop import FastLoop
 from robot.core.bus import EventBus
 from robot.core.clock import Clock, RealClock
 from robot.core.config import RobotConfig
@@ -89,8 +90,13 @@ class RobotHarness:
         self.world = WorldState(self.bus, clock=self.clock, sandbox=self.sandbox)
         self.spatial_map = SpatialMap(self.clock)
         self.planner = GridPlanner(room_half_extent_mm=self.spatial_map.half, resolution_mm=50.0)
-        self.camera = SimCamera(self.sandbox, self.body, self.clock,
-                                CameraModel(self.sandbox.cam_width, self.sandbox.cam_height))
+        camera_model = CameraModel(self.sandbox.cam_width, self.sandbox.cam_height)
+        if self.config.camera == "sim":
+            self.camera = SimCamera(self.sandbox, self.body, self.clock, camera_model)
+        else:
+            from robot.perception.camera import RealCamera
+
+            self.camera = RealCamera(self.body, self.clock, camera_model, source=self.config.camera)
         self.face_bridge = FaceProcessBridge(
             self.bus,
             spawn_window=spawn_face_window,
@@ -148,6 +154,16 @@ class RobotHarness:
             spatial_map=self.spatial_map, planner=self.planner, memory=self.memory, emotion=self.emotion,
             clock=self.clock, registry=self.registry, on_event=self._emit_skill_event,
         )
+        # Fast layer: the trained detector on every frame plus closed-loop behaviours. Without a trained
+        # detector the VLM serves single looks and the behaviours still run on the map.
+        self.fast_detector = self._load_fast_detector()
+        self.fast = FastLoop(
+            bus=self.bus, clock=self.clock, body=self.body, camera=self.camera, spatial_map=self.spatial_map,
+            planner=self.planner, detector=self.fast_detector or self.detector,
+            rate_hz=self.config.perception.loop_hz,
+            continuous=isinstance(self.clock, RealClock) and self.fast_detector is not None,
+        )
+        self.skill_context.fast = self.fast
         budget = self.config.context_budget
         self.agent = AgentLoop(self.backend, self.skills, self.config.agent,
                                prompt_limit_tokens=budget.total_tokens - budget.response_reserve_tokens,
@@ -173,6 +189,7 @@ class RobotHarness:
         self.supervisor = ServiceSupervisor(self.bus, health_interval_s=5.0)
         self.supervisor.register(self.body)
         self.supervisor.register(self.executor)
+        self.supervisor.register(self.fast)
         self.supervisor.register(self.face_bridge)
         self.supervisor.register(self.audio)
         if self.dashboard is not None:
@@ -184,8 +201,33 @@ class RobotHarness:
         self._requests: dict[str, asyncio.Future] = {}
         self._request_subs: list[str] = []
 
+    def _load_fast_detector(self):
+        cfg = self.config.perception
+        if cfg.fast_detector == "off":
+            return None
+        try:
+            from robot.perception.fast_detector import FastDetector
+        except ImportError:
+            logging.getLogger(__name__).info("ultralytics is not installed; perception uses the VLM only")
+            return None
+        # A freshly trained detector in the runtime folder wins; otherwise the one shipped in the repository.
+        detector = None
+        for models_dir in (self.config.runtime_dir / "models", Path(__file__).resolve().parents[1] / "models"):
+            detector = FastDetector.load_default(models_dir, prefer_ncnn=cfg.prefer_ncnn, imgsz=cfg.imgsz,
+                                                 conf=cfg.confidence)
+            if detector is not None:
+                break
+        if detector is None:
+            logging.getLogger(__name__).info("No trained fast detector (run scripts/train_detector.py); "
+                                             "perception uses the VLM only")
+        return detector
+
     def _make_body(self):
         tick = 1.0 / self.config.sim_tick_hz
+        if self.config.body_backend == "serial":
+            from robot.body.serial_body import SerialBody
+
+            return SerialBody(self.bus, self.capabilities, port=self.config.serial_port)
         if self.config.body_backend == "physics":
             from robot.body.physics_body import PhysicsBody
 
@@ -274,7 +316,8 @@ class RobotHarness:
                 self.recorder.open()
             if self._llama_client is not None:
                 await self._llama_client.ensure_server_started()
-            self.sandbox.bind(self.body)
+            if self.config.body_backend != "serial":
+                self.sandbox.bind(self.body)  # simulated sensors; a real body has its own
             self.spatial_map.load(self.config.spatial_map_path)
             start = self.body.pose()
             self.spatial_map.places["start"] = (start.x_mm, start.y_mm)

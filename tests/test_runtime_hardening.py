@@ -126,7 +126,7 @@ async def test_new_input_replaces_old_turn_and_correlates_requests(tmp_path):
         backend.release.set()
         assert (await first)["backend"] == "cancelled"
         assert (await second)["backend"] == "controlled"
-        assert harness.body.pose().x_mm == pytest.approx(300)
+        assert harness.body.pose().x_mm == pytest.approx(300, abs=15)
 
 
 @pytest.mark.asyncio

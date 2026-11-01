@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import deque
 from pathlib import Path
@@ -45,8 +46,11 @@ Examples of good plans (always use real tool calls, never write a tool name as t
 - "go behind that box": use go_to with target box_1 and relation behind, then answer.
 - "find my keys": use look_around with query keys, then answer.
 - "go to your charging dock": use go_to with target "charging dock" and relation on (it searches if needed).
+- "follow the ball" or "follow me": use follow with that target; it keeps going while you talk. "stop": use stop.
 - "come back to where you started": use go_to with target start, then answer.
-- "my name is Ana": use remember with the fact "The user's name is Ana.", then answer."""
+- "my name is Ana": use remember with the fact "The user's name is Ana.", then answer.
+- "what's my name?" or "what do I like?": "my" and "I" mean the human, not you. Answer from what you know
+  about them, speaking to them: "Your name is Ana!\""""
 
 
 class PromptBuilder:
@@ -109,7 +113,12 @@ class PromptBuilder:
                                                           else "") + "."]
         lines.append(truncate_to_tokens(world, self.budget.world_state_tokens))
         if core_facts:
-            lines.append("About the human: " + " ".join(core_facts))
+            # Spelled out: with a bare "About the human: User's name is Ana", the 2B model answered
+            # "what's my name?" with its own name.
+            facts = " ".join(f if f.rstrip().endswith((".", "!", "?")) else f.rstrip() + "." for f in core_facts)
+            facts = re.sub(r"\b[Tt]he user's\b|\bUser's\b", "The human's", facts)
+            facts = re.sub(r"\b[Tt]he user\b|\bUser\b", "The human", facts)
+            lines.append("About the human (not you): " + facts)
         if memories:
             lines.append(truncate_to_tokens("Related memories: " + " | ".join(memories), self.budget.memories_tokens))
         if recent:

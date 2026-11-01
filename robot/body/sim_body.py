@@ -27,6 +27,9 @@ class SimBody:
     """Kinematic simulation of 4-wheel skid-steer drive, head tilt, encoders, IMU, and safety reflexes."""
 
     name = "sim_body"
+    VELOCITY_TIMEOUT_S = 0.35  # motor watchdog: no fresh speed command -> stop
+    LINEAR_ACCEL_MM_S2 = 900.0
+    ANGULAR_ACCEL_DEG_S2 = 600.0
 
     def __init__(
         self,
@@ -62,6 +65,10 @@ class SimBody:
         self._battery_per_mm = battery_pct_per_m / 1000.0
         self._charge_rate = charge_pct_per_min
         self._battery_t = bus.clock.monotonic()
+        self._vel_target: tuple[float, float] = (0.0, 0.0)
+        self._vel_until = 0.0
+        self._vel_t = bus.clock.monotonic()
+        self._vel_reflex: str | None = None
 
     def attach_sensor_model(self, model) -> None:
         """Sample simulated sensors in the motor loop, independent of event delivery."""
@@ -163,7 +170,82 @@ class SimBody:
         if cliff is not None and not self._manual_cliff_override:
             self._sensors.cliff_triggered = bool(cliff)
 
+    # -- velocity control (the fast layer steers by speed, refreshed every control tick) ----------------
+
+    async def set_velocity(self, linear_mm_s: float, angular_deg_s: float, *, timeout_s: float | None = None
+                           ) -> str | None:
+        """Drive at a speed until the next command; stops by itself `timeout_s` after the last one.
+
+        Reflexes still apply: forward motion stops at the range-sensor limit (turning stays allowed), and
+        cliffs, the bumper and the emergency stop halt everything. Returns the active reflex, if any.
+        """
+        reason = await self.update_motion()
+        if self._active_cmd_id is not None:
+            await self.cancel()  # speed control takes the motors over from a discrete command
+        v_max, w_max = self._caps.max_linear_speed_mm_s, self._caps.max_angular_speed_deg_s
+        v = max(-v_max, min(v_max, float(linear_mm_s))) if math.isfinite(linear_mm_s) else 0.0
+        w = max(-w_max, min(w_max, float(angular_deg_s))) if math.isfinite(angular_deg_s) else 0.0
+        if self._sensors.estop_active:
+            v = w = 0.0
+        self._vel_target = (v, w)
+        self._vel_until = self.bus.clock.monotonic() + (timeout_s or self.VELOCITY_TIMEOUT_S)
+        return reason
+
+    async def update_motion(self) -> str | None:
+        """Integrate speed control up to now. Returns the reflex currently limiting motion, if any."""
+        now = self.bus.clock.monotonic()
+        t, self._vel_t = self._vel_t, now
+        if self._active_cmd_id is not None:
+            return None
+        reason: tuple[str, str] | None = None
+        moved = False
+        v, w = self._pose.linear_vel_mm_s, self._pose.angular_vel_deg_s
+        while t < now - 1e-9:
+            dt = min(self.step_dt_s, now - t)
+            target_v, target_w = self._vel_target if t < self._vel_until else (0.0, 0.0)
+            v += max(-self.LINEAR_ACCEL_MM_S2 * dt, min(self.LINEAR_ACCEL_MM_S2 * dt, target_v - v))
+            w += max(-self.ANGULAR_ACCEL_DEG_S2 * dt, min(self.ANGULAR_ACCEL_DEG_S2 * dt, target_w - w))
+            t += dt
+            if abs(v) < 1e-6 and abs(w) < 1e-6:
+                v = w = 0.0
+                if t >= self._vel_until:
+                    break  # stopped and no fresh command: nothing more to integrate
+                continue
+            self._refresh_sensors()
+            if self._sensors.estop_active:
+                reason, v, w = ("estop_active", "Emergency stop is active"), 0.0, 0.0
+            elif self._sensors.cliff_triggered or self._sensors.picked_up:
+                reason, v, w = ("cliff_detected", "Cliff sensor triggered"), 0.0, 0.0
+            elif v > 0 and (not math.isfinite(self._sensors.front_tof_mm)
+                            or self._sensors.front_tof_mm <= self._caps.min_front_tof_stop_mm):
+                reason, v = ("obstacle_stop", "Front obstacle or invalid range reading"), 0.0
+            if w:
+                self._apply_rotation(w * dt)
+            if v:
+                rad = math.radians(self._pose.heading_deg)
+                nx = self._pose.x_mm + v * dt * math.cos(rad)
+                ny = self._pose.y_mm + v * dt * math.sin(rad)
+                if self._would_collide(nx, ny) and not self._would_collide(self._pose.x_mm, self._pose.y_mm):
+                    reason, v, w = ("bumper", "Bumped into something"), 0.0, 0.0
+                else:
+                    self._pose.x_mm, self._pose.y_mm = nx, ny
+                    self._add_wheel_ticks(v * dt, v * dt)
+                    self._update_battery(abs(v) * dt)
+            moved = True
+        self._pose.linear_vel_mm_s, self._pose.angular_vel_deg_s = v, w
+        if reason is not None and reason[0] != self._vel_reflex:
+            await self._emit_reflex(*reason)
+            self._pose.linear_vel_mm_s, self._pose.angular_vel_deg_s = v, w
+        self._vel_reflex = reason[0] if reason else None
+        if reason and reason[0] in ("estop_active", "cliff_detected", "bumper"):
+            self._vel_target, self._vel_until = (0.0, 0.0), now  # these stop the drive until a new command
+        if moved:
+            await self._emit_pose()
+        return reason[0] if reason else None
+
     async def cancel(self, command_id: str | None = None) -> None:
+        if command_id is None:
+            self._vel_target, self._vel_until = (0.0, 0.0), self.bus.clock.monotonic()
         if command_id is None or command_id == self._active_cmd_id:
             self._cancel_generation += 1
             self._cancel_requested = True
@@ -195,6 +277,7 @@ class SimBody:
                 return self._cancelled_result(cmd)
             self._active_cmd_id = cmd.id
             self._cancel_requested = False
+            self._vel_target, self._vel_until = (0.0, 0.0), self.bus.clock.monotonic()
             try:
                 await self._emit_pose()
                 if self._sensors.estop_active and cmd.tool != "stop":

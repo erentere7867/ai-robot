@@ -972,6 +972,53 @@ class SimulationSandbox:
             renderer.update_scene(st["data"], camera="head_cam")
             return renderer.render().copy()
 
+    def render_head_labels(self, pose: BodyPose | None = None) -> tuple[np.ndarray, dict[str, dict[str, Any]]]:
+        """RGB head view plus exact per-object boxes from a segmentation render (occlusion included).
+
+        Returns (rgb, {object_id: {"bbox_px": (x1, y1, x2, y2), "pixels": n, "label": str}}). This is
+        simulator ground truth for training and grading a detector; the robot never sees it.
+        """
+        p = pose or self._last_pose
+        with _MJ_SHARED_LOCK:
+            st = self._sync_mujoco_state_on_gl_thread(p)
+            model: mujoco.MjModel = st["model"]
+            renderer: mujoco.Renderer = st["head_renderer"]
+            renderer.update_scene(st["data"], camera="head_cam")
+            rgb = renderer.render().copy()
+            seg = st.get("seg_renderer")
+            if seg is None:
+                seg = mujoco.Renderer(model, height=self.cam_height, width=self.cam_width)
+                seg.enable_segmentation_rendering()
+                st["seg_renderer"] = seg
+            seg.update_scene(st["data"], camera="head_cam")
+            ids = seg.render()[:, :, 0].copy()  # geom id per pixel, -1 for background
+            body_of_geom = model.geom_bodyid
+        # Which sandbox object each MuJoCo body shows (defaults by name, extras by spawn slot order).
+        body_to_obj: dict[int, str] = {}
+        extras = iter([o.id for o in self._objects.values()
+                       if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"obj_{o.id}") < 0])
+        for obj in self._objects.values():
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"obj_{obj.id}")
+            if bid >= 0:
+                body_to_obj[bid] = obj.id
+        for idx in range(1, 5):
+            obj_id = next(extras, None)
+            if obj_id is None:
+                break
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"obj_spawn_{idx}")
+            if bid >= 0:
+                body_to_obj[bid] = obj_id
+        labels: dict[str, dict[str, Any]] = {}
+        valid = ids >= 0
+        bodies = np.full(ids.shape, -1, dtype=np.int64)
+        bodies[valid] = body_of_geom[ids[valid]]
+        for bid, obj_id in body_to_obj.items():
+            ys, xs = np.nonzero(bodies == bid)
+            if len(xs):
+                labels[obj_id] = {"bbox_px": (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1),
+                                  "pixels": len(xs), "label": self._objects[obj_id].label}
+        return rgb, labels
+
     def capture_camera_view(self, pose: BodyPose | None = None) -> CameraFrame:
         """Head-camera frame for the dashboard; `visible_objects` is simulator ground truth for debugging."""
         p = pose or self._last_pose

@@ -34,13 +34,15 @@ class GridPlanner:
     `robot_radius_mm + clearance_mm`, so the planner can treat the robot as a point.
     """
 
+    ESCAPE_MM = 350.0  # how far a path may run through blocked cells to leave a blocked start
+
     def __init__(
         self,
         *,
         room_half_extent_mm: float = 1500.0,
         resolution_mm: float = 40.0,
-        robot_radius_mm: float = 165.0,
-        clearance_mm: float = 20.0,
+        robot_radius_mm: float = 181.0,  # circumscribed radius of the 282 x 228 mm footprint
+        clearance_mm: float = 60.0,  # room to turn in place and to curve between waypoints
     ) -> None:
         self.half = float(room_half_extent_mm)
         self.res = float(resolution_mm)
@@ -72,14 +74,19 @@ class GridPlanner:
         centers = -self.half + (np.arange(self.n) + 0.5) * self.res
         xs = centers[:, None]
         ys = centers[None, :]
-        wall = self.half - infl
+        # Walls are known exactly, unlike objects placed from camera boxes, so they need less margin.
+        wall = self.half - (self.robot_radius_mm + 30.0 + extra_inflation_mm)
         grid = (np.abs(xs) > wall) | (np.abs(ys) > wall)
         grid = np.broadcast_to(grid, (self.n, self.n)).copy()
         for ob in obstacles:
             r = ob.radius_mm + infl
             grid |= (xs - ob.x_mm) ** 2 + (ys - ob.y_mm) ** 2 <= r * r
         if points is not None and len(points):
-            r2 = (point_radius_mm + infl) ** 2
+            # Range hits are measured surfaces, located as well as the walls are: they get the wall margin,
+            # not the extra margin for objects placed from camera boxes. Hits on the walls themselves are
+            # already covered by the wall band.
+            points = points[(np.abs(points[:, 0]) < self.half - 80.0) & (np.abs(points[:, 1]) < self.half - 80.0)]
+            r2 = (point_radius_mm + self.robot_radius_mm + 30.0 + extra_inflation_mm) ** 2
             for px, py in points:
                 grid |= (xs - px) ** 2 + (ys - py) ** 2 <= r2
         return grid
@@ -89,6 +96,12 @@ class GridPlanner:
             return False
         i, j = self.to_cell(x_mm, y_mm)
         return not bool(grid[i, j])
+
+    def first_free(self, candidates: list[tuple[float, float]], obstacles: list[CircleObstacle], *,
+                   points: np.ndarray | None = None) -> tuple[float, float] | None:
+        """The first candidate the robot can stand on (used to keep "behind" behind when space is tight)."""
+        grid = self.build_grid(obstacles, points=points)
+        return next((c for c in candidates if self.is_free(grid, *c)), None)
 
     def nearest_free(self, grid: np.ndarray, x_mm: float, y_mm: float, max_r_mm: float = 600.0) -> tuple[float, float] | None:
         ci, cj = self.to_cell(x_mm, y_mm)
@@ -133,7 +146,7 @@ class GridPlanner:
             t = k / steps
             x, y = start[0] + (goal[0] - start[0]) * t, start[1] + (goal[1] - start[1]) * t
             if not self.is_free(grid, x, y):
-                if not escaping:
+                if not escaping or math.hypot(x - start[0], y - start[1]) > self.ESCAPE_MM:
                     return False
             else:
                 escaping = False
@@ -218,7 +231,10 @@ class GridPlanner:
                 ni, nj = cur[0] + di, cur[1] + dj
                 if not (0 <= ni < n and 0 <= nj < n):
                     continue
-                if grid[ni, nj] and not (allow_start_escape and cur_blocked):
+                # Leaving a blocked start is allowed only near the start: the blocked area around the robot
+                # can be connected to an obstacle's, and escaping through all of it would cross the obstacle.
+                if grid[ni, nj] and not (allow_start_escape and cur_blocked
+                                         and math.hypot(ni - s[0], nj - s[1]) * self.res <= self.ESCAPE_MM):
                     continue
                 if di and dj and (grid[cur[0] + di, cur[1]] or grid[cur[0], cur[1] + dj]):
                     continue

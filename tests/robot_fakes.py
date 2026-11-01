@@ -30,6 +30,7 @@ def make_config(tmp_path: Path, **overrides: Any) -> RobotConfig:
     cfg.record_events = False
     cfg.llm.backend = "null"
     cfg.llm.auto_start_server = False
+    cfg.perception.fast_detector = "off"  # hermetic: tests inject the ground-truth detector when they need one
     for key, value in overrides.items():
         setattr(cfg, key, value)
     return cfg
@@ -63,6 +64,9 @@ def use_ground_truth_perception(harness: RobotHarness) -> GroundTruthDetector:
     harness.skill_context.detector = detector
     harness.detector = detector
     harness.autonomy.camera = harness.camera
+    harness.fast.detector = detector
+    harness.fast.camera = harness.camera
+    harness.fast.streaming = True
     return detector
 
 
@@ -146,10 +150,12 @@ class GatedBackend(ScriptedBackend):
         return await super().chat(messages, tools=tools, max_tokens=max_tokens)
 
 
-def clear_scene(sandbox: Any, keep: tuple[str, ...] = ()) -> None:
+def clear_scene(sandbox: Any, keep: tuple[str, ...] = (), spatial_map: Any = None) -> None:
     for obj in list(sandbox.list_objects()):
         if obj["id"] not in keep:
             sandbox.remove_object(obj["id"])
+    if spatial_map is not None:
+        spatial_map.forget_range_hits()  # range hits on the removed objects would be ghost obstacles
 
 
 def last_user_text(messages: list[dict[str, Any]]) -> str:

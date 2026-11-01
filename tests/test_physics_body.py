@@ -394,3 +394,39 @@ async def test_real_clock_lifecycle_runs_idle_physics():
         await body.stop()
         await bus.stop()
     assert body._idle_task is None
+
+
+async def drive_by_speed(body, v, w, seconds, hz=20.0):
+    reasons = []
+    for _ in range(int(seconds * hz)):
+        reasons.append(await body.set_velocity(v, w))
+        body.bus.clock.advance(1.0 / hz)
+    reasons.append(await body.update_motion())
+    return reasons
+
+
+async def test_speed_control_drives_turns_and_stops_on_the_watchdog(bus):
+    body = PhysicsBody(bus, noise=SensorNoise.off())
+    body.reset_pose(BodyPose(x_mm=-600, y_mm=-700))
+    await drive_by_speed(body, 200.0, 0.0, 2.0)
+    assert 300 < body.true_pose().x_mm + 600 < 430
+    start = body.true_pose().heading_deg
+    await drive_by_speed(body, 0.0, 90.0, 1.0)
+    assert 60 < body.true_pose().heading_deg - start < 100
+    settle(body, 2.0)  # no more commands: the watchdog stops the wheels
+    assert abs(body.true_pose().linear_vel_mm_s) < 5 and abs(body.true_pose().angular_vel_deg_s) < 3
+
+
+async def test_speed_control_obeys_the_range_reflex_and_the_bumper(bus):
+    body = PhysicsBody(bus, noise=SensorNoise.off())
+    reflexes: list[str] = []
+    bus.subscribe("reflex.triggered", lambda e: reflexes.append(e.payload["reflex"]))
+    body.reset_pose(BodyPose(x_mm=1000, y_mm=-900))
+    reasons = await drive_by_speed(body, 300.0, 0.0, 3.0)
+    await bus.drain()
+    assert "obstacle_stop" in reasons and reflexes.count("obstacle_stop") == 1
+    assert 1500 - (body.true_pose().x_mm + 150) > 40
+    body.set_simulated_obstacle(front_tof_mm=2000)  # blinded range sensor: the bumper must catch it
+    reasons = await drive_by_speed(body, 300.0, 0.0, 3.0)
+    await bus.drain()
+    assert "bumper" in reasons and body.true_pose().x_mm <= 1500 - 150 + 5

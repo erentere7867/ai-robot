@@ -41,13 +41,21 @@ def crop_png(rgb: np.ndarray, bbox: tuple[float, float, float, float], margin: f
 
 @dataclass
 class Frame:
-    png_bytes: bytes
+    # PNG is encoded lazily from `rgb` when first needed: the fast detector reads raw pixels every frame,
+    # and only the occasional VLM request needs a PNG (encoding costs ~10-20 ms of a Pi core per frame).
+    _png: bytes | None
     pose: BodyPose
     model: CameraModel
     captured_at: float
     thumbnail: np.ndarray | None = None  # small grayscale image for cheap change detection
     rgb: np.ndarray | None = field(default=None, repr=False)  # raw pixels, for cropping detections
     _data_url: str | None = field(default=None, init=False, repr=False)
+
+    @property
+    def png_bytes(self) -> bytes:
+        if self._png is None:
+            self._png = encode_png(self.rgb) if self.rgb is not None else b""
+        return self._png
 
     @property
     def data_url(self) -> str:
@@ -92,7 +100,87 @@ class SimCamera:
 
     def capture(self) -> Frame:
         rgb = self.sandbox.render_head_rgb(self._true_pose())
-        return Frame(encode_png(rgb), self.body.pose(), self.model, self.clock.monotonic(), _thumbnail(rgb), rgb)
+        return Frame(None, self.body.pose(), self.model, self.clock.monotonic(), _thumbnail(rgb), rgb)
 
     def thumbnail(self) -> np.ndarray:
         return _thumbnail(self.sandbox.render_head_rgb(self._true_pose()))
+
+
+class RealCamera:
+    """A physical camera: Raspberry Pi camera module (Picamera2) or any USB camera (OpenCV).
+
+    Frames carry the body's pose at capture, so detections are placed where the robot was when it saw them.
+    Capture runs in a background thread that keeps only the newest image, so a read never waits for the
+    sensor and never returns a stale frame from a buffer queue.
+    """
+
+    def __init__(self, body: Any, clock: Any, model: CameraModel, *, source: str = "picamera",
+                 device: int = 0) -> None:
+        import threading
+
+        self.body = body
+        self.clock = clock
+        self.model = model
+        self._latest: np.ndarray | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        w, h = model.width, model.height
+        if source == "picamera":
+            from picamera2 import Picamera2  # Raspberry Pi OS: sudo apt install python3-picamera2
+
+            self._cam = Picamera2()
+            self._cam.configure(self._cam.create_video_configuration(main={"size": (w, h), "format": "RGB888"},
+                                                                     buffer_count=2))
+            self._cam.start()
+            self._read = lambda: self._cam.capture_array()[:, :, ::-1]  # RGB888 arrives as BGR in memory
+        else:
+            import cv2
+
+            self._cam = cv2.VideoCapture(device)
+            self._cam.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+            self._cam.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+            self._cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+            def read() -> np.ndarray | None:
+                ok, bgr = self._cam.read()
+                if not ok:
+                    return None
+                if bgr.shape[1] != w or bgr.shape[0] != h:
+                    bgr = cv2.resize(bgr, (w, h), interpolation=cv2.INTER_AREA)
+                return bgr[:, :, ::-1]
+
+            self._read = read
+        self._thread = threading.Thread(target=self._pump, name="camera", daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        while not self._stop.is_set():
+            try:
+                rgb = self._read()
+            except Exception:
+                rgb = None
+            if rgb is not None:
+                with self._lock:
+                    self._latest = np.ascontiguousarray(rgb)
+
+    def _newest(self) -> np.ndarray:
+        for _ in range(200):
+            with self._lock:
+                if self._latest is not None:
+                    return self._latest
+            self._stop.wait(0.01)
+        raise RuntimeError("The camera is not delivering frames")
+
+    def capture(self) -> Frame:
+        rgb = self._newest()
+        return Frame(None, self.body.pose(), self.model, self.clock.monotonic(), _thumbnail(rgb), rgb)
+
+    def thumbnail(self) -> np.ndarray:
+        return _thumbnail(self._newest())
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._cam.stop() if hasattr(self._cam, "stop") else self._cam.release()
+        except Exception:
+            pass

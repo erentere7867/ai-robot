@@ -1,0 +1,1104 @@
+{
+  "schema": 1,
+  "started_at": "2026-11-01T04:11:31+00:00",
+  "finished_at": "2026-11-01T04:11:46+00:00",
+  "git_commit": "cb1ef11",
+  "backend": "auto",
+  "options": {
+    "config": "config/robot.yaml",
+    "timeout_s": 300.0,
+    "allow_server_start": false,
+    "scenarios": [
+      "interrupt_go",
+      "rolling_ball"
+    ],
+    "seeds": [
+      1
+    ]
+  },
+  "summary": {
+    "total": 2,
+    "passed": 2,
+    "pass_rate": 1.0,
+    "errors": 0,
+    "model_calls": 3,
+    "seconds": 15.0,
+    "by_scenario": {
+      "interrupt_go": {
+        "passed": 1,
+        "total": 1
+      },
+      "rolling_ball": {
+        "passed": 1,
+        "total": 1
+      }
+    }
+  },
+  "results": [
+    {
+      "scenario": "interrupt_go",
+      "description": "Stop part-way to the dock when told to, while still driving",
+      "seed": 1,
+      "passed": true,
+      "reason": "stopped short of the dock; moved 0 mm after stopping; had set off (0 mm, 178 deg)",
+      "details": {
+        "dock_mm": 747.0,
+        "drift_mm": 0.0
+      },
+      "error": null,
+      "seconds": 8.38,
+      "model_calls": 0,
+      "actions": {
+        "completed": 1,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 680.4,
+          "y_mm": 155.1,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 681.2,
+          "y_mm": -141.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 390.0,
+          "y_mm": 368.6,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 855.1,
+          "y_mm": -19.9,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 954.4,
+          "y_mm": 369.7,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -747.0,
+          "y_mm": 1.9,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 680.4,
+          "y_mm": 155.1,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 681.2,
+          "y_mm": -141.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 390.0,
+          "y_mm": 368.6,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 855.1,
+          "y_mm": -19.9,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 954.4,
+          "y_mm": 369.7,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -747.0,
+          "y_mm": 1.9,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "go to your charging dock",
+          "say": "",
+          "final_status": "",
+          "backend": "",
+          "responses": 0,
+          "model_calls": 0,
+          "seconds": 0.0,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": null,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 177.9,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": []
+        },
+        {
+          "utterance": "stop",
+          "say": "Stopping right now!",
+          "final_status": "",
+          "backend": "reflex_stop",
+          "responses": 1,
+          "model_calls": 0,
+          "seconds": 3.09,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": null,
+          "snapshots": [
+            {
+              "t": 0.0,
+              "pose": {
+                "x_mm": 0.0,
+                "y_mm": 0.0,
+                "heading_deg": 177.9,
+                "head_tilt_deg": 0.0
+              },
+              "objects": [
+                {
+                  "id": "red_ball",
+                  "label": "Red Ball",
+                  "shape": "sphere",
+                  "x_mm": 680.4,
+                  "y_mm": 155.1,
+                  "z_mm": 0.0,
+                  "width_mm": 96.0,
+                  "depth_mm": 96.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "blue_cube",
+                  "label": "Blue Cube",
+                  "shape": "box",
+                  "x_mm": 681.2,
+                  "y_mm": -141.2,
+                  "z_mm": 0.0,
+                  "width_mm": 110.0,
+                  "depth_mm": 110.0,
+                  "height_mm": 110.0
+                },
+                {
+                  "id": "yellow_duck",
+                  "label": "Yellow Toy Duck",
+                  "shape": "sphere",
+                  "x_mm": 390.0,
+                  "y_mm": 368.6,
+                  "z_mm": 0.0,
+                  "width_mm": 90.0,
+                  "depth_mm": 90.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "green_mug",
+                  "label": "Green Mug",
+                  "shape": "cylinder",
+                  "x_mm": 855.1,
+                  "y_mm": -19.9,
+                  "z_mm": 0.0,
+                  "width_mm": 86.0,
+                  "depth_mm": 86.0,
+                  "height_mm": 116.0
+                },
+                {
+                  "id": "cardboard_box",
+                  "label": "Cardboard Box",
+                  "shape": "box",
+                  "x_mm": 954.4,
+                  "y_mm": 369.7,
+                  "z_mm": 0.0,
+                  "width_mm": 220.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 190.0
+                },
+                {
+                  "id": "charging_dock",
+                  "label": "Charging Dock",
+                  "shape": "box",
+                  "x_mm": -747.0,
+                  "y_mm": 1.9,
+                  "z_mm": 0.0,
+                  "width_mm": 180.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 130.0
+                }
+              ]
+            },
+            {
+              "t": 0.5,
+              "pose": {
+                "x_mm": 0.0,
+                "y_mm": 0.0,
+                "heading_deg": 177.9,
+                "head_tilt_deg": 0.0
+              },
+              "objects": [
+                {
+                  "id": "red_ball",
+                  "label": "Red Ball",
+                  "shape": "sphere",
+                  "x_mm": 680.4,
+                  "y_mm": 155.1,
+                  "z_mm": 0.0,
+                  "width_mm": 96.0,
+                  "depth_mm": 96.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "blue_cube",
+                  "label": "Blue Cube",
+                  "shape": "box",
+                  "x_mm": 681.2,
+                  "y_mm": -141.2,
+                  "z_mm": 0.0,
+                  "width_mm": 110.0,
+                  "depth_mm": 110.0,
+                  "height_mm": 110.0
+                },
+                {
+                  "id": "yellow_duck",
+                  "label": "Yellow Toy Duck",
+                  "shape": "sphere",
+                  "x_mm": 390.0,
+                  "y_mm": 368.6,
+                  "z_mm": 0.0,
+                  "width_mm": 90.0,
+                  "depth_mm": 90.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "green_mug",
+                  "label": "Green Mug",
+                  "shape": "cylinder",
+                  "x_mm": 855.1,
+                  "y_mm": -19.9,
+                  "z_mm": 0.0,
+                  "width_mm": 86.0,
+                  "depth_mm": 86.0,
+                  "height_mm": 116.0
+                },
+                {
+                  "id": "cardboard_box",
+                  "label": "Cardboard Box",
+                  "shape": "box",
+                  "x_mm": 954.4,
+                  "y_mm": 369.7,
+                  "z_mm": 0.0,
+                  "width_mm": 220.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 190.0
+                },
+                {
+                  "id": "charging_dock",
+                  "label": "Charging Dock",
+                  "shape": "box",
+                  "x_mm": -747.0,
+                  "y_mm": 1.9,
+                  "z_mm": 0.0,
+                  "width_mm": 180.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 130.0
+                }
+              ]
+            },
+            {
+              "t": 1.02,
+              "pose": {
+                "x_mm": 0.0,
+                "y_mm": 0.0,
+                "heading_deg": 177.9,
+                "head_tilt_deg": 0.0
+              },
+              "objects": [
+                {
+                  "id": "red_ball",
+                  "label": "Red Ball",
+                  "shape": "sphere",
+                  "x_mm": 680.4,
+                  "y_mm": 155.1,
+                  "z_mm": 0.0,
+                  "width_mm": 96.0,
+                  "depth_mm": 96.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "blue_cube",
+                  "label": "Blue Cube",
+                  "shape": "box",
+                  "x_mm": 681.2,
+                  "y_mm": -141.2,
+                  "z_mm": 0.0,
+                  "width_mm": 110.0,
+                  "depth_mm": 110.0,
+                  "height_mm": 110.0
+                },
+                {
+                  "id": "yellow_duck",
+                  "label": "Yellow Toy Duck",
+                  "shape": "sphere",
+                  "x_mm": 390.0,
+                  "y_mm": 368.6,
+                  "z_mm": 0.0,
+                  "width_mm": 90.0,
+                  "depth_mm": 90.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "green_mug",
+                  "label": "Green Mug",
+                  "shape": "cylinder",
+                  "x_mm": 855.1,
+                  "y_mm": -19.9,
+                  "z_mm": 0.0,
+                  "width_mm": 86.0,
+                  "depth_mm": 86.0,
+                  "height_mm": 116.0
+                },
+                {
+                  "id": "cardboard_box",
+                  "label": "Cardboard Box",
+                  "shape": "box",
+                  "x_mm": 954.4,
+                  "y_mm": 369.7,
+                  "z_mm": 0.0,
+                  "width_mm": 220.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 190.0
+                },
+                {
+                  "id": "charging_dock",
+                  "label": "Charging Dock",
+                  "shape": "box",
+                  "x_mm": -747.0,
+                  "y_mm": 1.9,
+                  "z_mm": 0.0,
+                  "width_mm": 180.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 130.0
+                }
+              ]
+            },
+            {
+              "t": 1.52,
+              "pose": {
+                "x_mm": 0.0,
+                "y_mm": 0.0,
+                "heading_deg": 177.9,
+                "head_tilt_deg": 0.0
+              },
+              "objects": [
+                {
+                  "id": "red_ball",
+                  "label": "Red Ball",
+                  "shape": "sphere",
+                  "x_mm": 680.4,
+                  "y_mm": 155.1,
+                  "z_mm": 0.0,
+                  "width_mm": 96.0,
+                  "depth_mm": 96.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "blue_cube",
+                  "label": "Blue Cube",
+                  "shape": "box",
+                  "x_mm": 681.2,
+                  "y_mm": -141.2,
+                  "z_mm": 0.0,
+                  "width_mm": 110.0,
+                  "depth_mm": 110.0,
+                  "height_mm": 110.0
+                },
+                {
+                  "id": "yellow_duck",
+                  "label": "Yellow Toy Duck",
+                  "shape": "sphere",
+                  "x_mm": 390.0,
+                  "y_mm": 368.6,
+                  "z_mm": 0.0,
+                  "width_mm": 90.0,
+                  "depth_mm": 90.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "green_mug",
+                  "label": "Green Mug",
+                  "shape": "cylinder",
+                  "x_mm": 855.1,
+                  "y_mm": -19.9,
+                  "z_mm": 0.0,
+                  "width_mm": 86.0,
+                  "depth_mm": 86.0,
+                  "height_mm": 116.0
+                },
+                {
+                  "id": "cardboard_box",
+                  "label": "Cardboard Box",
+                  "shape": "box",
+                  "x_mm": 954.4,
+                  "y_mm": 369.7,
+                  "z_mm": 0.0,
+                  "width_mm": 220.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 190.0
+                },
+                {
+                  "id": "charging_dock",
+                  "label": "Charging Dock",
+                  "shape": "box",
+                  "x_mm": -747.0,
+                  "y_mm": 1.9,
+                  "z_mm": 0.0,
+                  "width_mm": 180.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 130.0
+                }
+              ]
+            },
+            {
+              "t": 2.05,
+              "pose": {
+                "x_mm": 0.0,
+                "y_mm": 0.0,
+                "heading_deg": 177.9,
+                "head_tilt_deg": 0.0
+              },
+              "objects": [
+                {
+                  "id": "red_ball",
+                  "label": "Red Ball",
+                  "shape": "sphere",
+                  "x_mm": 680.4,
+                  "y_mm": 155.1,
+                  "z_mm": 0.0,
+                  "width_mm": 96.0,
+                  "depth_mm": 96.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "blue_cube",
+                  "label": "Blue Cube",
+                  "shape": "box",
+                  "x_mm": 681.2,
+                  "y_mm": -141.2,
+                  "z_mm": 0.0,
+                  "width_mm": 110.0,
+                  "depth_mm": 110.0,
+                  "height_mm": 110.0
+                },
+                {
+                  "id": "yellow_duck",
+                  "label": "Yellow Toy Duck",
+                  "shape": "sphere",
+                  "x_mm": 390.0,
+                  "y_mm": 368.6,
+                  "z_mm": 0.0,
+                  "width_mm": 90.0,
+                  "depth_mm": 90.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "green_mug",
+                  "label": "Green Mug",
+                  "shape": "cylinder",
+                  "x_mm": 855.1,
+                  "y_mm": -19.9,
+                  "z_mm": 0.0,
+                  "width_mm": 86.0,
+                  "depth_mm": 86.0,
+                  "height_mm": 116.0
+                },
+                {
+                  "id": "cardboard_box",
+                  "label": "Cardboard Box",
+                  "shape": "box",
+                  "x_mm": 954.4,
+                  "y_mm": 369.7,
+                  "z_mm": 0.0,
+                  "width_mm": 220.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 190.0
+                },
+                {
+                  "id": "charging_dock",
+                  "label": "Charging Dock",
+                  "shape": "box",
+                  "x_mm": -747.0,
+                  "y_mm": 1.9,
+                  "z_mm": 0.0,
+                  "width_mm": 180.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 130.0
+                }
+              ]
+            },
+            {
+              "t": 2.57,
+              "pose": {
+                "x_mm": 0.0,
+                "y_mm": 0.0,
+                "heading_deg": 177.9,
+                "head_tilt_deg": 0.0
+              },
+              "objects": [
+                {
+                  "id": "red_ball",
+                  "label": "Red Ball",
+                  "shape": "sphere",
+                  "x_mm": 680.4,
+                  "y_mm": 155.1,
+                  "z_mm": 0.0,
+                  "width_mm": 96.0,
+                  "depth_mm": 96.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "blue_cube",
+                  "label": "Blue Cube",
+                  "shape": "box",
+                  "x_mm": 681.2,
+                  "y_mm": -141.2,
+                  "z_mm": 0.0,
+                  "width_mm": 110.0,
+                  "depth_mm": 110.0,
+                  "height_mm": 110.0
+                },
+                {
+                  "id": "yellow_duck",
+                  "label": "Yellow Toy Duck",
+                  "shape": "sphere",
+                  "x_mm": 390.0,
+                  "y_mm": 368.6,
+                  "z_mm": 0.0,
+                  "width_mm": 90.0,
+                  "depth_mm": 90.0,
+                  "height_mm": 96.0
+                },
+                {
+                  "id": "green_mug",
+                  "label": "Green Mug",
+                  "shape": "cylinder",
+                  "x_mm": 855.1,
+                  "y_mm": -19.9,
+                  "z_mm": 0.0,
+                  "width_mm": 86.0,
+                  "depth_mm": 86.0,
+                  "height_mm": 116.0
+                },
+                {
+                  "id": "cardboard_box",
+                  "label": "Cardboard Box",
+                  "shape": "box",
+                  "x_mm": 954.4,
+                  "y_mm": 369.7,
+                  "z_mm": 0.0,
+                  "width_mm": 220.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 190.0
+                },
+                {
+                  "id": "charging_dock",
+                  "label": "Charging Dock",
+                  "shape": "box",
+                  "x_mm": -747.0,
+                  "y_mm": 1.9,
+                  "z_mm": 0.0,
+                  "width_mm": 180.0,
+                  "depth_mm": 220.0,
+                  "height_mm": 130.0
+                }
+              ]
+            }
+          ],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 177.9,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 177.9,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [],
+          "actions": [
+            {
+              "tool": "stop",
+              "args": {},
+              "ok": true,
+              "status": "completed",
+              "message": "All motion stopped."
+            }
+          ],
+          "reflexes": [],
+          "trajectory": []
+        }
+      ]
+    },
+    {
+      "scenario": "rolling_ball",
+      "description": "Go to a ball that is rolling away",
+      "seed": 1,
+      "passed": true,
+      "reason": "352 mm from ball; ball at -8 deg",
+      "details": {
+        "distance_mm": 351.5,
+        "bearing_deg": -8.5
+      },
+      "error": null,
+      "seconds": 6.62,
+      "model_calls": 3,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 805.6,
+          "y_mm": 3.7,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": -675.5,
+          "y_mm": 927.5,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -386.5,
+          "y_mm": 1077.4,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": -920.6,
+          "y_mm": -928.9,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 1001.7,
+          "y_mm": 979.9,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -706.8,
+          "y_mm": 0.8,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 805.6,
+          "y_mm": -276.3,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": -675.5,
+          "y_mm": 927.5,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -386.5,
+          "y_mm": 1077.4,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": -920.6,
+          "y_mm": -928.9,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 1001.7,
+          "y_mm": 979.9,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -706.8,
+          "y_mm": 0.8,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "go to the red ball",
+          "say": "I'm right next to the red ball! What would you like to do?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 3,
+          "seconds": 6.54,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 0.91,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 484.1,
+            "y_mm": -134.1,
+            "heading_deg": -15.4,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "look_around",
+              "args": {
+                "query": "red ball"
+              },
+              "ok": true,
+              "message": "Found it and turned to face it: ball_1 (red ball): 0.8 m straight ahead, seen just now."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "ball_1",
+                "relation": "on"
+              },
+              "ok": true,
+              "message": "Arrived near ball_1 (as close as the space allows). I can see ball_1 0.4 m away."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              22.2,
+              -0.4,
+              -1.5,
+              0.0
+            ],
+            [
+              49.9,
+              -1.4,
+              -2.1,
+              0.0
+            ],
+            [
+              87.6,
+              -2.9,
+              -2.5,
+              0.0
+            ],
+            [
+              123.8,
+              -4.6,
+              -2.8,
+              0.0
+            ],
+            [
+              157.5,
+              -6.3,
+              -3.0,
+              0.0
+            ],
+            [
+              189.1,
+              -8.0,
+              -3.1,
+              0.0
+            ],
+            [
+              217.8,
+              -9.6,
+              -3.2,
+              0.0
+            ],
+            [
+              243.7,
+              -12.0,
+              -6.5,
+              0.0
+            ],
+            [
+              267.7,
+              -15.7,
+              -9.5,
+              0.0
+            ],
+            [
+              288.8,
+              -19.8,
+              -11.7,
+              0.0
+            ],
+            [
+              309.4,
+              -24.5,
+              -13.5,
+              0.0
+            ],
+            [
+              329.9,
+              -29.8,
+              -14.9,
+              0.0
+            ],
+            [
+              358.5,
+              -37.9,
+              -16.4,
+              0.0
+            ],
+            [
+              370.5,
+              -42.2,
+              -21.4,
+              0.0
+            ],
+            [
+              381.4,
+              -47.3,
+              -27.1,
+              0.0
+            ],
+            [
+              391.9,
+              -53.4,
+              -31.6,
+              0.0
+            ],
+            [
+              410.4,
+              -66.5,
+              -37.5,
+              0.0
+            ],
+            [
+              432.3,
+              -85.0,
+              -41.4,
+              0.0
+            ],
+            [
+              452.1,
+              -103.1,
+              -43.2,
+              0.0
+            ],
+            [
+              467.0,
+              -117.3,
+              -44.1,
+              0.0
+            ],
+            [
+              482.9,
+              -132.9,
+              -44.7,
+              0.0
+            ],
+            [
+              484.1,
+              -134.1,
+              -34.6,
+              0.0
+            ],
+            [
+              484.1,
+              -134.1,
+              -26.5,
+              0.0
+            ],
+            [
+              484.1,
+              -134.1,
+              -21.3,
+              0.0
+            ],
+            [
+              484.1,
+              -134.1,
+              -15.8,
+              0.0
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,4 +1,9 @@
-# Raspberry Pi 5 (4 GB) profile: smaller queues and history, slower autonomy cadence, CPU inference.
+# Raspberry Pi 5 (4 GB) on the real robot. See docs/raspberry_pi.md for setup.
+#
+# Fast layer: the trained detector (NCNN export) on every camera frame, 20 Hz control loop, motor
+# reflexes on the microcontroller. Slow layer: LFM3-VL-2B Q4_K_M on the CPU. LFM3-VL-2B-QAD-Q4_0 runs
+# faster on the Pi (Q4_0 is repacked for the Cortex-A76's dot-product instructions) but measured 83% vs 95%
+# on the decision benchmark, so it is opt-in: swap the two model lines below.
 robot:
   name: "Sprocket"
   wake_words: ["sprocket", "hey sprocket", "robot", "hey robot"]
@@ -14,7 +19,9 @@ runtime:
   body_config_path: "config/body.yaml"
   sim_tick_hz: 20.0
   face_fps: 30.0
-  body_backend: "kinematic"
+  body_backend: "serial"          # firmware/base_controller on USB; "kinematic" to try it without hardware
+  serial_port: "/dev/ttyACM0"
+  camera: "picamera"              # or "usb"
 bus:
   max_queue_size: 64
   record_events: false
@@ -28,14 +35,23 @@ autonomy:
   observation_interval_s: 2.0
   think_interval_s: 120.0
   drive_rate_scale: 1.0
+perception:
+  fast_detector: "auto"
+  prefer_ncnn: true
+  imgsz: 320
+  confidence: 0.4
+  loop_hz: 20.0
 llm:
   backend: "auto"
   base_url: "http://127.0.0.1:8080"
   model_name: "LFM3-VL-2B-Q4_K_M"
-  model_path: "~/models/LFM3-VL-2B-Q4_K_M.gguf"
-  mmproj_path: "~/models/mmproj-LFM3-VL-2B-Q8_0.gguf"
+  model_path: "~/robot-runtime/models/llm/LFM3-VL-2B-Q4_K_M.gguf"
+  # model_name: "LFM3-VL-2B-QAD-Q4_0"     # faster, less accurate (see above)
+  # model_path: "~/robot-runtime/models/llm/LFM3-VL-2B-QAD-Q4_0.gguf"
+  mmproj_path: "~/robot-runtime/models/llm/mmproj-LFM3-VL-2B-Q8_0.gguf"
   llama_server_bin: "~/robot-runtime/llama.cpp/build/bin/llama-server"
   gpu_layers: 0
+  threads: 4
   ctx_size: 8192
   timeout_s: 240.0
   startup_timeout_s: 240.0

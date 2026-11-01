@@ -160,6 +160,7 @@ class _Probe:
 
     def begin(self, turn: TurnRecord) -> None:
         self.turn, self.last_response = turn, None
+        self._t0 = time.perf_counter()
 
     def end(self) -> dict[str, Any] | None:
         self.turn = None
@@ -219,8 +220,13 @@ class _Probe:
                 }
             )
 
-    def _on_pose(self, _event: Event) -> None:
+    def _on_pose(self, event: Event) -> None:
         turn = self.turn
+        if turn is not None and turn.first_motion_s is None:
+            reported = event.payload.get("pose") or {}
+            if abs(float(reported.get("linear_vel_mm_s", 0.0))) > 1.0 or \
+                    abs(float(reported.get("angular_vel_deg_s", 0.0))) > 1.0:
+                turn.first_motion_s = time.perf_counter() - self._t0
         if turn is None or len(turn.trajectory) >= MAX_TRAJECTORY_POINTS:
             return
         pose = truth_pose(self.harness.body)
@@ -240,6 +246,43 @@ class _Session:
         self.harness = harness
         self.probe = _Probe(harness)
         self.camera = CameraModel.from_sandbox(harness.sandbox)
+        self.turn_index = 0
+        self._motion_task: asyncio.Task | None = None
+
+    def start_motions(self, scenario: Scenario) -> None:
+        if scenario.motions:
+            self._motion_task = asyncio.create_task(self._run_motions(scenario), name="eval:motions")
+
+    async def _run_motions(self, scenario: Scenario) -> None:
+        """Move objects along their scripted straight lines in real time (a ball rolling, a person walking)."""
+        sandbox = self.harness.sandbox
+        started: dict[int, tuple[float, float, float]] = {}
+        while True:
+            now = time.perf_counter()
+            for k, (obj_id, from_index, (vx, vy), duration) in enumerate(scenario.motions):
+                obj = sandbox.get_object(obj_id)
+                if obj is None or self.turn_index < from_index:
+                    continue
+                if k not in started:
+                    started[k] = (now, obj.x_mm, obj.y_mm)
+                t0, x0, y0 = started[k]
+                elapsed = min(now - t0, duration)
+                sandbox.move_object(obj_id, x0 + vx * elapsed, y0 + vy * elapsed)
+            await asyncio.sleep(0.05)
+
+    async def hold(self, turn: TurnRecord, seconds: float) -> None:
+        """Keep the robot running and sample ground truth twice a second."""
+        end = time.perf_counter() + seconds
+        while time.perf_counter() < end:
+            turn.snapshots.append({"t": round(seconds - (end - time.perf_counter()), 2),
+                                   "pose": truth_pose(self.harness.body), "objects": self.objects()})
+            await asyncio.sleep(0.5)
+
+    def send_background(self, text: str) -> tuple[TurnRecord, asyncio.Task]:
+        """Send an utterance without waiting for its reply (the next one will interrupt it)."""
+        turn = TurnRecord(utterance=text, pose_before=truth_pose(self.harness.body))
+        task = asyncio.create_task(self.harness.submit_message(text, timeout_s=120.0))
+        return turn, task
 
     @classmethod
     async def open(cls, cfg: RobotConfig, scenario: Scenario, seed: int, start_timeout_s: float) -> _Session:
@@ -250,7 +293,9 @@ class _Session:
         try:
             await asyncio.wait_for(harness.start(), timeout=start_timeout_s)
             apply_scene(harness.sandbox, scenario, seed)
+            harness.spatial_map.forget_range_hits()  # hits recorded before the scene was arranged
             session.probe.attach()
+            session.start_motions(scenario)
         except BaseException:
             await session.close()
             raise
@@ -259,7 +304,7 @@ class _Session:
     def objects(self) -> list[dict[str, Any]]:
         return snapshot_objects(self.harness.sandbox)
 
-    async def say(self, text: str, options: RunOptions, *, restarted: bool) -> TurnRecord:
+    async def say(self, text: str, options: RunOptions, *, restarted: bool, hold_s: float = 0.0) -> TurnRecord:
         harness = self.harness
         turn = TurnRecord(utterance=text, pose_before=truth_pose(harness.body), restarted_before=restarted)
         self.probe.begin(turn)
@@ -269,7 +314,9 @@ class _Session:
             async with asyncio.timeout(options.timeout_s):
                 reply = await harness.submit_message(text, timeout_s=options.timeout_s) or {}
                 await harness.arbiter.wait_until_done()
-            if options.settle_s > 0:
+            if hold_s > 0:
+                await self.hold(turn, hold_s)
+            elif options.settle_s > 0:
                 await asyncio.sleep(options.settle_s)
         except TimeoutError:
             turn.error = f"timeout after {options.timeout_s:.0f}s"
@@ -285,6 +332,9 @@ class _Session:
         return turn
 
     async def close(self) -> None:
+        if self._motion_task is not None:
+            self._motion_task.cancel()
+            await asyncio.gather(self._motion_task, return_exceptions=True)
         self.probe.detach()
         try:
             await asyncio.wait_for(self.harness.stop(), timeout=30.0)
@@ -304,6 +354,7 @@ async def run_scenario(scenario: Scenario, seed: int, options: RunOptions) -> Sc
     with tempfile.TemporaryDirectory(prefix="robot-eval-", ignore_cleanup_errors=True) as tmp:
         db_path = Path(tmp) / "memory.db"
         try:
+            background: tuple[TurnRecord, asyncio.Task] | None = None
             for index, text in enumerate(scenario.utterances):
                 restarted = session is not None and index in scenario.restart_before
                 if session is None or restarted:
@@ -315,7 +366,23 @@ async def run_scenario(scenario: Scenario, seed: int, options: RunOptions) -> Sc
                     )
                     if not objects_start:
                         objects_start, camera = session.objects(), session.camera
-                turn = await session.say(text, options, restarted=restarted)
+                session.turn_index = index
+                interrupts = scenario.interrupt_after_s
+                if index + 1 < len(scenario.utterances) and index + 1 < len(interrupts) \
+                        and interrupts[index + 1] is not None:
+                    # The next utterance arrives while this one is still being carried out.
+                    background = session.send_background(text)
+                    await asyncio.sleep(float(interrupts[index + 1]))
+                    turns.append(background[0])
+                    continue
+                hold = scenario.hold_s[index] if index < len(scenario.hold_s) else 0.0
+                turn = await session.say(text, options, restarted=restarted, hold_s=hold)
+                if background is not None:
+                    first, task = background
+                    done, _ = await asyncio.wait({task}, timeout=10.0)
+                    first.say = str((task.result() or {}).get("say", "")) if done and not task.exception() else ""
+                    first.pose_after = turn.pose_before
+                    background = None
                 turns.append(turn)
                 if turn.error:
                     error = f"utterance {index + 1}: {turn.error}"
@@ -375,7 +442,14 @@ def write_report(path: Path, report: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:  # Windows: a reader (or OneDrive sync) briefly holds the file open
+            if attempt == 19:
+                raise
+            time.sleep(0.25)
 
 
 async def run_suite(

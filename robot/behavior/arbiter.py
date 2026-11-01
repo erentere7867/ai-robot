@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from collections import deque
 from typing import Any
@@ -25,6 +26,11 @@ from robot.world.state import WorldState
 logger = logging.getLogger(__name__)
 
 _EMPTY_REPLIES = {"", ".", "...", "(empty)", "(no reply)", "empty", "none", "(silence)", "\"\""}
+
+
+# Said on its own, these halt all motion at once, before the language model has even read the message.
+STOP_WORDS = re.compile(r"^\W*(?:(?:please|hey|ok|okay|no)\W+)?(?:stop|halt|freeze|stay|wait|don'?t move)"
+                        r"(?:\W+(?:it|now|there|moving|right now|please))*\W*$", re.I)
 
 
 class BehaviorArbiter:
@@ -74,6 +80,7 @@ class BehaviorArbiter:
             ("audio.barge_in", self._on_barge_in, True),
             ("action.cancel", self._on_cancel, True),
             ("audio.speech_completed", self._on_speech_completed, False),
+            ("behavior.finished", self._on_behavior_finished, False),
         ]
         for event_type, handler, immediate in subs:
             self._sub_ids.append(self.bus.subscribe(event_type, handler, name=f"arbiter:{event_type}",
@@ -304,6 +311,10 @@ class BehaviorArbiter:
         text = str(event.payload.get("text", "")).strip()
         if not text:
             return
+        if STOP_WORDS.match(text):
+            # Reflex: halt now. The model still gets the message, to acknowledge it.
+            await self.bus.emit("action.cancel", "arbiter", {"reason": "user_stop"},
+                                priority=EventPriority.CRITICAL)
         if self._input_task and not self._input_task.done():
             self._input_task.cancel()
             await self.bus.emit("turn.cancelled", "arbiter", {}, correlation_id=self._input_correlation_id)
@@ -320,6 +331,15 @@ class BehaviorArbiter:
         except Exception:
             logger.exception("Input dispatch failed")
             await self.bus.emit("turn.cancelled", "arbiter", {}, correlation_id=correlation_id)
+
+    async def _on_behavior_finished(self, event: Event) -> None:
+        """A behaviour that outlives its turn (following) ended on its own: let the robot react to it."""
+        p = event.payload
+        if not p.get("persistent") or p.get("ok") or "Stopped" in str(p.get("message", "")) or self.busy:
+            return
+        task = asyncio.create_task(self.handle_user_turn(str(p.get("message", ""))[:200] + ".", autonomous=True),
+                                   name="arbiter:behavior_event")
+        self.bus.track_task(task)
 
     async def _on_manual_expression(self, event: Event) -> None:
         gaze = event.payload.get("gaze_target")

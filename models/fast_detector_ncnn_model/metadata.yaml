@@ -1,0 +1,26 @@
+description: Ultralytics YOLO11n model trained on C:\Users\FixAccount\robot-runtime\datasets\sim_v1\data.yaml
+author: Ultralytics
+date: '2026-11-01T05:46:15.918917+03:00'
+version: 8.4.196
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 320
+- 320
+names:
+  0: red ball
+  1: blue cube
+  2: yellow duck
+  3: green mug
+  4: cardboard box
+  5: charging dock
+  6: object
+args:
+  batch: 1
+  quantize: null
+channels: 3
+end2end: false

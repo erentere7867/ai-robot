@@ -429,7 +429,7 @@ def test_background_header_situation_and_clear(tmp_path):
     situation = prompts.situation(world="Known objects:\n- box_1", core_facts=["The user's name is Ana."],
                                   memories=["likes tea"], recent=["turned left (just now)"], battery_pct=42.4,
                                   extra="Be brief.")
-    assert "Battery: 42%" in situation and "About the human: The user's name is Ana." in situation
+    assert "Battery: 42%" in situation and "About the human (not you): The human's name is Ana." in situation
     assert "Related memories: likes tea" in situation and "Recent activity: turned left" in situation
     messages = prompts.build("You feel curious.", situation, background=True)
     assert "[Background event - no human is talking to you]" in messages[-1]["content"]

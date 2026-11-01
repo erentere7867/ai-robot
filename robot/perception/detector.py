@@ -35,6 +35,7 @@ _PAIR = re.compile(r'"(?:label|name)"\s*:\s*"([^"]*)"[^\[{}]*?"(?:bbox|box|bbox_
 class Detection:
     label: str
     bbox: tuple[float, float, float, float]  # normalized x1, y1, x2, y2
+    score: float = 1.0
 
     @property
     def center_u(self) -> float:

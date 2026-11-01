@@ -1,0 +1,18 @@
+[Unit]
+Description=Sprocket companion robot
+After=network-online.target cpu-performance.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@REPO@
+ExecStart=@RT@/venv/bin/python -m robot --config config/robot.pi5.yaml
+Restart=on-failure
+RestartSec=3
+# The control loop and camera thread need prompt CPU time; the language model runs at normal priority.
+Nice=-5
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=4
+
+[Install]
+WantedBy=multi-user.target

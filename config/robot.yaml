@@ -54,3 +54,10 @@ context_budget:
   tools_tokens: 1100
   recent_turns_tokens: 700
   max_recent_turns: 6
+
+perception:
+  fast_detector: "auto"        # the trained YOLO11n (scripts/train_detector.py); "off" = VLM only
+  prefer_ncnn: true            # same runtime as the Raspberry Pi (no PyTorch)
+  imgsz: 320
+  confidence: 0.4
+  loop_hz: 20.0

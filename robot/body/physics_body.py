@@ -177,6 +177,10 @@ class PhysicsBody(SimBody):
         self._ray_geom = np.zeros(1, dtype=np.int32)
 
         self._motion: _BaseMotion | None = None
+        self._fw_v = 0.0  # speed-control set point ramped by the firmware (mm/s, deg/s)
+        self._fw_w = 0.0
+        self._fw_w_i = 0.0
+        self._fw_blocked = False
         self._fw_reflex: tuple[str, str] | None = None
         self._halt_serial = 0
         self._head_setpoint = 0.0
@@ -479,6 +483,30 @@ class PhysicsBody(SimBody):
                 self._data.ctrl[self._motor_ids] = 0.0
             self._wake()
 
+    async def update_motion(self) -> str | None:
+        """Run the physics and firmware up to now and report the reflex limiting speed control, if any."""
+        if self._active_cmd_id is not None:
+            return None
+        self.advance_to_now()
+        self._refresh_sensors()
+        reason: tuple[str, str] | None = None
+        if self._fw_reflex is not None:
+            reason, self._fw_reflex = self._fw_reflex, None
+        elif self._sensors.estop_active:
+            reason = ("estop_active", "Emergency stop is active")
+        elif self._sensors.cliff_triggered or self._sensors.picked_up:
+            reason = ("cliff_detected", "Cliff sensor triggered")
+        elif self._fw_blocked:
+            reason = ("obstacle_stop", "Front obstacle or invalid range reading")
+        if reason is not None and reason[0] != "obstacle_stop":
+            self._halt_actuators()
+        if reason is not None and reason[0] != self._vel_reflex:
+            await self._emit_reflex(*reason)
+        self._vel_reflex = reason[0] if reason else None
+        if self._velocity_active() or reason is not None:
+            await self._emit_pose()
+        return reason[0] if reason else None
+
     async def _firmware_reflex_result(self, cmd: BodyCommand) -> CommandResult | None:
         if self._fw_reflex is None:
             return None
@@ -500,6 +528,8 @@ class PhysicsBody(SimBody):
     def _halt_actuators(self) -> None:
         self._halt_serial += 1
         self._motion = None
+        self._vel_target, self._vel_until = (0.0, 0.0), self.bus.clock.monotonic()
+        self._fw_v = self._fw_w = self._fw_w_i = 0.0
         self._head_target = self._head_setpoint
         if self._data is not None:
             self._data.ctrl[self._motor_ids] = 0.0
@@ -550,6 +580,7 @@ class PhysicsBody(SimBody):
     def _at_rest(self) -> bool:
         return (
             self._motion is None
+            and not self._velocity_active()
             and self._head_setpoint == self._head_target
             and self._sim_time >= self._awake_until
             and float(np.max(np.abs(self._data.qvel))) < 1e-3
@@ -612,11 +643,34 @@ class PhysicsBody(SimBody):
         self._servo_tick(dt)
         self._monitor_bumper(dt, v_left, v_right)
 
+    def _velocity_active(self) -> bool:
+        return self.bus.clock.monotonic() < self._vel_until or abs(self._fw_v) > 1e-3 or abs(self._fw_w) > 1e-3
+
+    def _velocity_control(self, dt: float, gyro_deg_s: float) -> tuple[float, float]:
+        """Speed control: ramp to the commanded speeds, hold the turn rate on the gyro (watchdog included)."""
+        fresh = self.bus.clock.monotonic() < self._vel_until
+        target_v, target_w = self._vel_target if fresh else (0.0, 0.0)
+        tof = self._sensors.front_tof_mm
+        self._fw_blocked = target_v > 0 and (not math.isfinite(tof) or tof <= self._caps.min_front_tof_stop_mm)
+        if self._fw_blocked:
+            target_v = 0.0
+        step_v, step_w = self.LINEAR_ACCEL_MM_S2 * dt, self.ANGULAR_ACCEL_DEG_S2 * dt
+        self._fw_v += max(-step_v, min(step_v, target_v - self._fw_v))
+        self._fw_w += max(-step_w, min(step_w, target_w - self._fw_w))
+        if abs(self._fw_v) < 1e-3 and abs(self._fw_w) < 1e-3 and not fresh:
+            self._fw_v = self._fw_w = self._fw_w_i = 0.0
+            return 0.0, 0.0
+        error = self._fw_w - gyro_deg_s
+        self._fw_w_i = max(-30.0, min(30.0, self._fw_w_i + error * dt))
+        omega = self._fw_w + self.RATE_P * error + self.RATE_I * self._fw_w_i
+        turn = math.radians(omega) * self._half_track_m
+        return self._fw_v / 1000.0 - turn, self._fw_v / 1000.0 + turn
+
     def _motion_control(self, dt: float, gyro_deg_s: float) -> tuple[float, float]:
         """Trapezoidal distance/heading tracking on the odometry estimate -> wheel surface speeds (m/s)."""
         mo = self._motion
         if mo is None:
-            return 0.0, 0.0
+            return self._velocity_control(dt, gyro_deg_s)
         odom = self._odom
         linear, omega = 0.0, 0.0
         if mo.kind == "drive":
@@ -674,7 +728,7 @@ class PhysicsBody(SimBody):
 
     def _monitor_bumper(self, dt: float, v_left: float, v_right: float) -> None:
         """Latch a bumper reflex on sustained chassis contact force or on stalled drive wheels."""
-        if self._motion is None:
+        if self._motion is None and not self._velocity_active():
             self._bump_s = self._stall_s = 0.0
             return
         force = self._external_contact_force_n()

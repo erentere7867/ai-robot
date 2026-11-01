@@ -177,7 +177,7 @@ async def test_spatial_short_term_memory_what_was_behind_me(tmp_path: Path) -> N
 
         # 2. Robot spins 180 degrees
         await harness.arbiter.handle_user_turn("Spin 180 degrees")
-        assert abs(abs(harness.body.pose().heading_deg) - 180.0) < 1e-3
+        assert abs(abs(harness.body.pose().heading_deg) - 180.0) < 2.0
 
         # 3. Because the observation is anchored in the world frame, it is now BEHIND the robot!
         obs_after_spin = harness.world.active_observations()

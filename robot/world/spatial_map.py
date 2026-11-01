@@ -143,6 +143,7 @@ def sighting_var_mm2(cam_dist_mm: float) -> float:
     return (50.0 + 0.15 * cam_dist_mm) ** 2
 
 
+CLIPPED_VAR_MM2 = 450.0 ** 2  # an object cut off by the image's side
 STALE_VAR_MM2 = 400.0 ** 2  # restored from disk: the odometry frame may have shifted since
 MOVE_VAR_MM2 = 20.0 ** 2  # per sighting, so a track can follow an object that was moved
 
@@ -189,12 +190,16 @@ class SpatialMap:
         return best
 
     def integrate_view(self, pose: BodyPose, model: CameraModel, detections: list[Detection],
-                       *, query: str | None = None) -> ViewUpdate:
+                       *, query: str | None = None, weight: float = 1.0) -> ViewUpdate:
         """Fuse one camera view: associate detections with tracks and apply negative evidence.
 
         With `query` the detector only looked for that kind of object, so missing detections
-        only count against tracks matching the query.
+        only count against tracks matching the query. `weight` (0..1] is how much evidence one view
+        carries: 1 for an occasional look, small for a continuous stream (frames a few hundredths of a
+        second apart are nearly the same observation), so a detector that flickers for a frame or two
+        neither creates nor deletes an object.
         """
+        w = max(0.05, min(1.0, float(weight)))
         now = self.clock.monotonic()
         update = ViewUpdate()
         matched: set[str] = set()
@@ -203,18 +208,23 @@ class SpatialMap:
                 near = self._match_by_bearing(pose, model, det, matched)
                 if near is not None:
                     near.last_seen, near.seen_count = now, near.seen_count + 1
-                    near.confidence = min(1.0, near.confidence + 0.2)
+                    near.confidence = min(1.0, near.confidence + 0.2 * w)
                     matched.add(near.id)
                     update.seen.append((near, det, False))
                     continue
+            # Cut off by the image's side: the box is truncated, so the position it gives is poor. It counts as
+            # weak evidence (large uncertainty), so a later full view corrects it.
+            clipped = det.bbox[0] <= 0.01 or det.bbox[2] >= 0.99
             located = model.locate_box(pose, det.bbox)
             if located is None:
                 update.unplaced.append(det)
                 continue
             x, y, radius = located
             cam_dist = math.hypot(x - pose.x_mm, y - pose.y_mm)
-            meas_var = sighting_var_mm2(cam_dist)
-            gate = max(350.0, 0.3 * cam_dist)
+            meas_var = sighting_var_mm2(cam_dist) / w  # correlated frames: each counts for less
+            if clipped:
+                meas_var = max(meas_var * 9.0, CLIPPED_VAR_MM2)
+            gate = max(350.0, 0.3 * cam_dist, 600.0 if clipped else 0.0)
             best, best_d = None, math.inf
             for obj in self.objects.values():
                 if obj.id in matched or not labels_match(obj.label, det.label):
@@ -227,7 +237,8 @@ class SpatialMap:
                 if len(self.objects) >= self.max_objects:
                     self._evict()
                 best = TrackedObject(self._new_id(det.label), det.label, x, y, radius, now, now,
-                                     var_mm2=meas_var)
+                                     confidence=(0.25 if clipped else 0.35) + 0.35 * w,
+                                     var_mm2=meas_var if clipped else meas_var * w)
                 self.objects[best.id] = best
                 is_new = True
             else:
@@ -239,10 +250,11 @@ class SpatialMap:
                 best.y_mm += gain * (y - best.y_mm)
                 best.var_mm2 = (1.0 - gain) * prior + MOVE_VAR_MM2
                 alpha = 0.6 if best.stale else max(0.3, 1.0 / (best.seen_count + 1))
-                best.radius_mm += alpha * (radius - best.radius_mm)
+                if not clipped:  # a truncated box says little about size
+                    best.radius_mm += alpha * (radius - best.radius_mm)
                 best.last_seen = now
                 best.seen_count += 1
-                best.confidence = min(1.0, best.confidence + 0.3)
+                best.confidence = min(1.0, best.confidence + 0.3 * w)
                 best.stale = False
                 is_new = False
             matched.add(best.id)
@@ -265,7 +277,7 @@ class SpatialMap:
             )
             if hidden:
                 continue
-            obj.confidence -= 0.6 if obj.stale else 0.4
+            obj.confidence -= (0.6 if obj.stale else 0.4) * w
             if obj.confidence < 0.15:
                 del self.objects[obj.id]
                 update.lost.append(obj)
@@ -328,8 +340,8 @@ class SpatialMap:
     # ---- geometry for the planner ----------------------------------------------------------------
     def obstacles(self, *, exclude: set[str] | None = None) -> list[CircleObstacle]:
         exclude = exclude or set()
-        # Radii come from the visible width; a box's corners reach further than that.
-        return [CircleObstacle(o.x_mm, o.y_mm, 1.2 * o.radius_mm + 10.0, o.id) for o in self.objects.values()
+        # Radii come from the visible width; a square box's corners reach sqrt(2) times further.
+        return [CircleObstacle(o.x_mm, o.y_mm, 1.42 * o.radius_mm + 10.0, o.id) for o in self.objects.values()
                 if o.id not in exclude and o.confidence >= 0.3]
 
     def occupied_mask(self) -> np.ndarray:
@@ -338,6 +350,10 @@ class SpatialMap:
     def to_cell(self, x_mm: float, y_mm: float) -> tuple[int, int] | None:
         i, j = int((x_mm + self.half) // CELL_MM), int((y_mm + self.half) // CELL_MM)
         return (i, j) if 0 <= i < self.n and 0 <= j < self.n else None
+
+    def forget_range_hits(self) -> None:
+        """Clear range-sensor occupancy (after the room is rearranged, old hits would be ghost obstacles)."""
+        self.occupancy[:] = 0.0
 
     def update_range(self, pose: BodyPose, range_mm: float, *, offset_mm: float = 141.0,
                      max_range_mm: float = 2400.0) -> None:
@@ -399,7 +415,7 @@ class SpatialMap:
             {**asdict(o), "age_s": now_mono - o.last_seen} for o in self.objects.values() if o.confidence >= 0.3]}
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.write_text(json.dumps(data, default=float), encoding="utf-8")  # numpy scalars from detectors
         tmp.replace(path)
 
     def load(self, path: Path) -> int:

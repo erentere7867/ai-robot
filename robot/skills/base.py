@@ -57,6 +57,8 @@ class SkillContext:
     expression: dict[str, Any] = field(default_factory=dict)
     turn_cache: dict[str, Any] = field(default_factory=dict)  # per-turn memo, cleared by the arbiter
     request: str = ""  # what the human asked this turn (empty on background turns), set by the agent
+    fast: Any = None  # the FastLoop: continuous perception + behaviours (robot.control.fast_loop)
+    last_look: Any = None  # pose key of the last observe, kept across turns
 
     def pose(self) -> BodyPose:
         return self.body.pose()
@@ -70,6 +72,13 @@ class SkillContext:
         result = await self.executor.execute_call(ToolCallRequest(tool, args), correlation_id=self.correlation_id)
         self.check()
         return result
+
+    async def behave(self, behavior: Any) -> Any:
+        """Run a fast-layer behaviour to completion (cancellable like any other step of the turn)."""
+        self.check()
+        done = await self.fast.run(behavior)
+        self.check()
+        return done
 
     async def spin(self, angle_deg: float) -> CommandResult | None:
         angle = (angle_deg + 180.0) % 360.0 - 180.0 if abs(angle_deg) < 359.0 else angle_deg

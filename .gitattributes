@@ -1,0 +1,7 @@
+# Files that run or are parsed on the Raspberry Pi must keep LF line endings on every checkout.
+*.sh text eol=lf
+*.service text eol=lf
+*.ino text eol=lf
+*.param text eol=lf
+*.bin binary
+*.pt binary

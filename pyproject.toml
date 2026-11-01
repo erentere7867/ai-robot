@@ -12,6 +12,9 @@ dependencies = [
 
 [project.optional-dependencies]
 audio = ["sounddevice>=0.5"]
+# The fast layer's detector. On a Raspberry Pi add `ncnn` (the NCNN runtime) for the exported model.
+perception = ["ultralytics>=8.3", "opencv-python-headless>=4.9"]
+robot = ["pyserial>=3.5"]  # the real robot's motor microcontroller
 face = ["pygame-ce>=2.5"]
 dev = [
     "pytest>=8.0",

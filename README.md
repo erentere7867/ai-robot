@@ -2,19 +2,23 @@
 
 Local-first embodied AI robot harness for `companion_r1` (4-wheel skid-steer base, tiltable head, 5" 800×480 face display, LFM3-VL-2B).
 
-A small vision-language model decides what to do; generic closed-loop skills do it. The robot sees
-with open-vocabulary detection (the VLM's own grounding), places what it sees on a map with camera
-geometry, plans paths around obstacles it has sensed, and remembers facts, places and events.
-"What do you see?" → "go behind that box" works without any task-specific code: the model calls
-`observe`, then `go_to(target=box_1, relation=behind)`, and the skill plans, drives, replans and
-checks the result.
+Two layers, like robots that react in real time. A **fast layer** (20 Hz) sees and steers: a small
+detector (YOLO11n, trained on this robot's objects from simulator renders) runs on every camera frame,
+keeps a live map, and closed-loop behaviours (go somewhere, follow, search, circle, turn) drive the
+wheels from it, re-planning as things move. A **slow layer**, LFM3-VL-2B, understands what you say,
+picks the goal and talks; it never steers. "What do you see?" → "go behind that box" needs no
+task-specific code: the model calls `observe`, then `go_to(target=box_1, relation=behind)`, and the
+behaviour works out where "behind" is, plans around obstacles and keeps correcting while it drives.
+"Follow the ball" keeps going while you chat; saying "stop" halts it at once, before the model even reads
+the message.
 
 When nobody is talking to it, drives (curiosity, social, play, battery) and camera changes give the
 pet its own reasons to act; the model decides whether and how. Use `stop` to interrupt and pause
 autonomy, and **Autonomy on** / `resume autonomy` to resume.
 
-See [architecture](docs/architecture.md) for how it works, how to measure it, and the Raspberry Pi
-plan, and [evaluation](docs/evaluation.md) for the simulator test suite.
+See [architecture](docs/architecture.md) for how it works and how to measure it,
+[Raspberry Pi](docs/raspberry_pi.md) for running it on the real robot (setup script, motor-controller
+firmware, wiring), and [evaluation](docs/evaluation.md) for the simulator test suite.
 
 Try it from a terminal (needs the model files below):
 
@@ -34,14 +38,15 @@ For the Raspberry Pi 5 (4 GB), use the harness resource profile:
 python -m robot --config config/robot.pi5.yaml --headless --no-dashboard
 ```
 
-This profile uses CPU inference, smaller history, and a slower autonomy cadence. Add `--mic` when
+This profile drives the real robot (`SerialBody` + `firmware/base_controller` on a Pi Pico, Pi camera,
+NCNN detector, CPU inference); `bash scripts/pi/setup_pi5.sh` installs everything. Add `--mic` when
 microphone input is wanted; microphone input requires a wake word by default. Console/dashboard
 messages are direct input.
 
 Use `--backend null --mute` for a wiring smoke test without the model (the robot talks but never
-moves). The repository provides simulated bodies (`SimBody`, and a MuJoCo-dynamics body selected
-with `runtime.body_backend: physics`); a physical motor/sensor driver is still required for real
-hardware.
+moves). Bodies: `SimBody` (kinematic), `PhysicsBody` (`runtime.body_backend: physics`, MuJoCo
+dynamics) and `SerialBody` (`serial`, the real robot). Train the detector once with
+`python scripts/train_detector.py` (renders a labelled dataset in the simulator, trains, exports NCNN).
 
 ### 1. Run Automated Tests
 ```powershell

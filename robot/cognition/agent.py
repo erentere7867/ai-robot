@@ -180,6 +180,8 @@ def speakable(text: str, spatial_ids: dict[str, str], robot_name: str = "") -> s
     text = re.sub(r"\bthe the\b", "the", _ID.sub(repl, text), flags=re.I)
     if robot_name:
         text = re.sub(rf",\s*{re.escape(robot_name)}\s*(?=[!?.,])", "", text, flags=re.I)
+    # The prompt calls the person "the human"; the robot speaks *to* them.
+    text = re.sub(r"\b[Tt]he human's\b", lambda m: "Your" if m.group(0)[0] == "T" else "your", text)
     return re.sub(r"\s{2,}", " ", text).strip()
 
 

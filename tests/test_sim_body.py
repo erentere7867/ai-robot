@@ -103,3 +103,56 @@ async def test_battery_charges_on_the_dock(rig):
     assert body.sensors().battery_pct == 100.0
     await body.execute(drive(400, cid="off"))  # facing away from the dock now: drive off it
     assert body.sensors().charging is False
+
+
+async def control(clock, body, v, w, seconds, hz=20.0):
+    """Send a speed command every tick, like the fast control loop."""
+    reasons = []
+    for _ in range(int(seconds * hz)):
+        reasons.append(await body.set_velocity(v, w))
+        clock.advance(1.0 / hz)
+    reasons.append(await body.update_motion())
+    return reasons
+
+
+async def test_velocity_control_tracks_speed_and_turn_rate(rig):
+    clock, body, sandbox, _ = rig
+    clear_scene(sandbox)
+    await control(clock, body, 200.0, 0.0, 2.0)
+    assert 330 < body.pose().x_mm < 410  # 2 s at 200 mm/s, less the acceleration ramp
+    start = body.pose().heading_deg
+    await control(clock, body, 0.0, 90.0, 1.0)
+    assert 70 < body.pose().heading_deg - start < 95
+
+
+async def test_velocity_watchdog_stops_the_robot_when_commands_stop(rig):
+    clock, body, sandbox, _ = rig
+    clear_scene(sandbox)
+    await control(clock, body, 300.0, 0.0, 1.0)
+    clock.advance(5.0)  # the control loop died
+    x = body.pose().x_mm
+    await body.update_motion()
+    assert body.pose().x_mm - x < 0.35 * 300 + 60 and body.pose().linear_vel_mm_s == 0.0
+
+
+async def test_range_reflex_blocks_driving_forward_but_not_turning_away(rig):
+    clock, body, sandbox, reflexes = rig
+    sandbox.move_object("cardboard_box", 600.0, 0.0)
+    reasons = await control(clock, body, 300.0, 0.0, 4.0)
+    assert "obstacle_stop" in reasons and reflexes.count("obstacle_stop") == 1  # reported once, not per tick
+    assert body.pose().x_mm < 600 - 110 - 140
+    before = body.pose().heading_deg
+    await control(clock, body, 0.0, 90.0, 1.0)
+    assert body.pose().heading_deg - before > 60
+
+
+async def test_a_discrete_command_after_speed_control_does_not_replay_old_speed(rig):
+    clock, body, sandbox, _ = rig
+    clear_scene(sandbox)
+    await control(clock, body, 200.0, 0.0, 0.5)
+    clock.advance(1.0)
+    await body.update_motion()
+    x = body.pose().x_mm
+    await body.execute(BodyCommand("s", "spin", {"angle_deg": 30}))
+    await body.update_motion()
+    assert abs(body.pose().x_mm - x) < 1.0

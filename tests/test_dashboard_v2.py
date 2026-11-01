@@ -23,6 +23,7 @@ def _config(tmp_path: Path) -> RobotConfig:
     cfg.record_events = False
     cfg.llm.backend = "null"
     cfg.autonomy.enabled = False
+    cfg.perception.fast_detector = "off"  # this test covers the VLM detection path
     return cfg
 
 

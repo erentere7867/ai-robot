@@ -336,6 +336,8 @@ class TurnRecord:
     seconds: float = 0.0
     restarted_before: bool = False
     error: str | None = None
+    first_motion_s: float | None = None  # reaction time: utterance sent -> wheels moving
+    snapshots: list[dict[str, Any]] = field(default_factory=list)  # truth sampled during a hold (moving scenes)
 
     def poses(self) -> list[dict[str, float]]:
         return [p for p in (self.pose_before, *self.trajectory, self.pose_after) if p]
@@ -351,6 +353,8 @@ class TurnRecord:
             "seconds": round(self.seconds, 2),
             "restarted_before": self.restarted_before,
             "error": self.error,
+            "first_motion_s": None if self.first_motion_s is None else round(self.first_motion_s, 2),
+            "snapshots": self.snapshots,
             "pose_before": self.pose_before,
             "pose_after": self.pose_after,
             "skills": self.skills,
@@ -739,6 +743,13 @@ class Scenario:
     setup: SceneSetup = field(default_factory=SceneSetup)
     restart_before: frozenset[int] = frozenset()
     hard: bool = False  # the harder set: repeats, chained steps, references to earlier turns
+    realtime: bool = False  # moving objects, following, interruptions
+    # Per utterance index: seconds to keep watching after the reply (persistent behaviours, moving scenes).
+    hold_s: tuple[float, ...] = ()
+    # Per utterance index: send it this many seconds after the previous one, without waiting for its reply.
+    interrupt_after_s: tuple[float | None, ...] = ()
+    # Scripted motion: (object id, from utterance index, (vx, vy) mm/s, duration s).
+    motions: tuple[tuple[str, int, tuple[float, float], float], ...] = ()
 
     def grade(self, run: ScenarioRun) -> Grade:
         return self.grader(run)
@@ -805,6 +816,74 @@ SCENARIO_LIST: tuple[Scenario, ...] = (
         restart_before=frozenset({1}),
     ),
 )
+def _robot_gap(snapshot: dict[str, Any], obj_id: str) -> float | None:
+    obj = next((o for o in snapshot["objects"] if o["id"] == obj_id), None)
+    return None if obj is None else distance_mm(snapshot["pose"], obj)
+
+
+def grade_follow(run: ScenarioRun) -> Grade:
+    """While the ball rolls away, the robot keeps within reach of it, without touching it."""
+    turn = run.turns[-1]
+    gaps = [g for g in (_robot_gap(s, "red_ball") for s in turn.snapshots[len(turn.snapshots) // 3:]) if g]
+    ball = run.object("red_ball")
+    if not gaps or ball is None:
+        return Grade(False, "no snapshots of the ball", {})
+    travelled = distance_mm(turn.pose_before, turn.pose_after)
+    within = sum(250.0 <= g <= 1000.0 for g in gaps) / len(gaps)
+    hits = _collisions(run, ball)
+    return _verdict([(within >= 0.8, f"{100 * within:.0f}% of the time 25-100 cm from the ball"),
+                     (travelled >= 400.0, f"moved {travelled:.0f} mm with it"),
+                     (not hits["contacts"], f"{hits['contacts']} contact poses")],
+                    {"within": round(within, 2), "travelled_mm": round(travelled, 1), "gaps": [round(g) for g in gaps]})
+
+
+def grade_stop_following(run: ScenarioRun) -> Grade:
+    turn = run.turns[-1]
+    poses = [s["pose"] for s in turn.snapshots]
+    drift = max((distance_mm(poses[0], p) for p in poses), default=0.0) if poses else 0.0
+    return _verdict([(bool(poses) and drift < 60.0, f"moved {drift:.0f} mm after being told to stop")],
+                    {"drift_mm": round(drift, 1)})
+
+
+def grade_interrupted(run: ScenarioRun) -> Grade:
+    """Told to stop on the way to the dock: it stopped well short and stays put."""
+    dock = run.object("charging_dock")
+    if dock is None:
+        return _missing("charging_dock")
+    turn = run.turns[-1]
+    poses = [s["pose"] for s in turn.snapshots] or [turn.pose_after]
+    drift = max(distance_mm(poses[0], p) for p in poses)
+    left = distance_mm(run.turns[0].pose_before, turn.pose_after)
+    turned = abs(heading_change_deg(run.turns[0].pose_before, turn.pose_after))
+    return _verdict([(distance_mm(turn.pose_after, dock) > 500.0, "stopped short of the dock"),
+                     (drift < 60.0, f"moved {drift:.0f} mm after stopping"),
+                     (left > 30.0 or turned > 20.0, f"had set off ({left:.0f} mm, {turned:.0f} deg)")],
+                    {"dock_mm": round(distance_mm(turn.pose_after, dock), 1), "drift_mm": round(drift, 1)})
+
+
+REALTIME_SCENARIOS: tuple[Scenario, ...] = (
+    Scenario("follow_ball", "Follow a ball that rolls across the room", ("follow the red ball",), grade_follow,
+             SceneSetup(overrides={"red_ball": (700.0, -600.0), "blue_cube": (-700.0, 900.0),
+                                   "green_mug": (-900.0, -900.0), "cardboard_box": (1000.0, 1000.0),
+                                   "yellow_duck": (-400.0, 1100.0)}, jitter_mm=60.0),
+             realtime=True, hold_s=(14.0,), motions=(("red_ball", 0, (0.0, 85.0), 14.0),)),
+    Scenario("stop_following", "Stop when told to, even while following", ("follow the red ball", "stop"),
+             grade_stop_following,
+             SceneSetup(overrides={"red_ball": (700.0, -600.0), "blue_cube": (-700.0, 900.0),
+                                   "green_mug": (-900.0, -900.0), "cardboard_box": (1000.0, 1000.0),
+                                   "yellow_duck": (-400.0, 1100.0)}, jitter_mm=60.0),
+             realtime=True, hold_s=(4.0, 4.0), motions=(("red_ball", 0, (0.0, 85.0), 12.0),)),
+    Scenario("interrupt_go", "Stop part-way to the dock when told to, while still driving",
+             ("go to your charging dock", "stop"), grade_interrupted, realtime=True, hold_s=(0.0, 3.0),
+             interrupt_after_s=(None, 5.0)),
+    Scenario("rolling_ball", "Go to a ball that is rolling away", ("go to the red ball",), grade_go_to_ball,
+             SceneSetup(overrides={"red_ball": (800.0, 0.0), "blue_cube": (-700.0, 900.0),
+                                   "green_mug": (-900.0, -900.0), "cardboard_box": (1000.0, 1000.0),
+                                   "yellow_duck": (-400.0, 1100.0)}, jitter_mm=40.0),
+             realtime=True, motions=(("red_ball", 0, (0.0, -70.0), 4.0),)),  # rolls during the approach
+)
+
+
 HARD_SCENARIOS: tuple[Scenario, ...] = (
     Scenario("turn_around_twice", "A repeated command is done again", ("turn around", "turn around again"),
              _turn_grader(180.0, 30.0), hard=True),
@@ -839,7 +918,7 @@ HARD_SCENARIOS: tuple[Scenario, ...] = (
              grade_left_of_box, SceneSetup(overrides={"cardboard_box": (900.0, 0.0), "green_mug": (1150.0, -700.0)}),
              hard=True),
 )
-SCENARIO_LIST = SCENARIO_LIST + HARD_SCENARIOS
+SCENARIO_LIST = SCENARIO_LIST + HARD_SCENARIOS + REALTIME_SCENARIOS
 SCENARIOS: dict[str, Scenario] = {s.name: s for s in SCENARIO_LIST}
 
 
@@ -848,8 +927,12 @@ def select_scenarios(spec: str) -> list[Scenario]:
     names = [n.strip() for n in (spec or "all").split(",") if n.strip()]
     if not names or names == ["all"]:
         return list(SCENARIO_LIST)
-    if names in (["core"], ["hard"]):
-        return [s for s in SCENARIO_LIST if s.hard == (names[0] == "hard")]
+    if names == ["core"]:
+        return [s for s in SCENARIO_LIST if not s.hard and not s.realtime]
+    if names == ["hard"]:
+        return [s for s in SCENARIO_LIST if s.hard]
+    if names == ["realtime"]:
+        return [s for s in SCENARIO_LIST if s.realtime]
     unknown = [n for n in names if n not in SCENARIOS]
     if unknown:
         raise ValueError(f"Unknown scenario(s): {', '.join(unknown)}; choose from {', '.join(SCENARIOS)}")
