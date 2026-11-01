@@ -207,6 +207,21 @@ use slot 0 and camera requests slot 1 (`id_slot`), so a VLM look never evicts th
 - Decision benchmark (`eval_decisions.py`, first tool call in 21 situations): 90% at 0.8 s per decision
   with the F16 vision projector (re-measured 2026-11-01; 95% at 0.5 s in an earlier run). With
   LFM3-VL-2B-QAD-Q4_0 (the November download): 71%, and no faster on this GPU.
+- Quantization sweep (2026-11-01, `eval_vision.py` 30 random rooms + `eval_decisions.py`, GTX 1650):
+
+  | model + vision projector | objects found | "is there a ...?" in view / not | decisions | query s | VRAM |
+  |---|---|---|---|---|---|
+  | Q4_K_M + F16 | 31/49 | 21/23 / 27/30 | 19/21 | 2.5 | 2.27 GB |
+  | Q4_K_M + Q8_0 | 30/49 | 21/23 / 27/30 | 19/21 | 1.8 | 2.10 GB |
+  | Q5_K_M + F16 | 30/49 | 20/23 / 28/30 | 19/21 | 2.5 | 2.42 GB |
+  | Q6_K + F16 | 32/49 | 19/23 / 28/30 | 19/21 | 2.4 | 2.58 GB |
+  | Q6_K + Q8_0 | 32/49 | 18/23 / 28/30 | 18/21 | 1.8 | 2.41 GB |
+  | Q8_0 + F16 | 32/49 | 19/23 / 28/30 | 18/21 | 2.6 | 2.98 GB |
+  | QAD-Q4_0 + F16 | 32/49 | 19/23 / 28/30 | 15/21 | 2.2 | 2.22 GB |
+
+  All within one or two objects of each other: even the near-lossless Q8_0 sees no better, so the limit
+  is the 2B model (most misses: the mug called a "cylinder", the duck a "sphere"), not the quantization.
+  Q4_K_M stays the default; the Q8_0 projector matches F16 and answers faster.
 - Fast detector: 16 ms per frame with NCNN on the laptop CPU (4 threads), 12 ms with PyTorch CUDA;
   validation mAP50 0.988; on fresh scenes 0.90 precision / 0.91 recall at IoU 0.5. Map fusion 0.5 ms.
 - Autonomy (`try_autonomy.py`): left alone, the curiosity drive woke it, it explored, found new
