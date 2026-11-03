@@ -1,0 +1,47 @@
+[
+ {
+  "mode": "in the main event loop",
+  "hz": 50.0,
+  "ticks_per_s": 27.6,
+  "stall_ms": 0.01,
+  "stalls": 61,
+  "detect_hz": 9.1,
+  "ticks": 276,
+  "overruns": 94,
+  "late_p50_ms": 11.49,
+  "late_p99_ms": 43.35,
+  "late_max_ms": 50.69,
+  "work_p50_ms": 1.31,
+  "work_p99_ms": 51.25
+ },
+ {
+  "mode": "own thread, normal",
+  "hz": 50.0,
+  "ticks_per_s": 50.7,
+  "stall_ms": 0.01,
+  "stalls": 65,
+  "detect_hz": 36.9,
+  "ticks": 507,
+  "overruns": 0,
+  "late_p50_ms": 0.46,
+  "late_p99_ms": 6.91,
+  "late_max_ms": 7.44,
+  "work_p50_ms": 0.37,
+  "work_p99_ms": 12.38
+ },
+ {
+  "mode": "own thread, normal, tuned",
+  "hz": 50.0,
+  "ticks_per_s": 50.7,
+  "stall_ms": 0.01,
+  "stalls": 65,
+  "detect_hz": 38.9,
+  "ticks": 507,
+  "overruns": 2,
+  "late_p50_ms": 0.51,
+  "late_p99_ms": 6.68,
+  "late_max_ms": 7.61,
+  "work_p50_ms": 0.38,
+  "work_p99_ms": 11.63
+ }
+]

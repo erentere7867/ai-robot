@@ -1,0 +1,609 @@
+{
+ "config": "config/models/lfm3-split.yaml",
+ "model": "LFM3-1.7B-Q4_K_M",
+ "rows": [
+  {
+   "case": "see/empty-map",
+   "ok": true,
+   "s": 0.342,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2766,
+   "completion_tokens": 11
+  },
+  {
+   "case": "see/known",
+   "ok": true,
+   "s": 0.6,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2851,
+   "completion_tokens": 11
+  },
+  {
+   "case": "see/after-observe",
+   "ok": true,
+   "s": 1.607,
+   "calls": [],
+   "text": "I see four things in front of me: a blue cube (cube_1) about 0.7\u202fm to the right, a red ball (ball_1) also 0.7\u202fm left, a green cylinder (cylinder_1) straight ahead at 0.8\u202fm, and a brown cardboard box (",
+   "prompt_tokens": 2995,
+   "completion_tokens": 95
+  },
+  {
+   "case": "behind/box",
+   "ok": false,
+   "s": 0.594,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2850,
+   "completion_tokens": 11
+  },
+  {
+   "case": "go/ball",
+   "ok": true,
+   "s": 0.702,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "ball_1"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2851,
+   "completion_tokens": 19
+  },
+  {
+   "case": "between",
+   "ok": true,
+   "s": 0.898,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "ball_1",
+      "relation": "between",
+      "other": "cube_1"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2853,
+   "completion_tokens": 35
+  },
+  {
+   "case": "start/return",
+   "ok": true,
+   "s": 0.759,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "start",
+      "relation": "on"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2857,
+   "completion_tokens": 24
+  },
+  {
+   "case": "turn/around",
+   "ok": true,
+   "s": 0.657,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "around"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2848,
+   "completion_tokens": 16
+  },
+  {
+   "case": "turn/left",
+   "ok": true,
+   "s": 0.655,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "left"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2850,
+   "completion_tokens": 16
+  },
+  {
+   "case": "behind-you",
+   "ok": false,
+   "s": 0.629,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2851,
+   "completion_tokens": 11
+  },
+  {
+   "case": "look-back",
+   "ok": false,
+   "s": 0.597,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2848,
+   "completion_tokens": 11
+  },
+  {
+   "case": "circle-behind",
+   "ok": false,
+   "s": 0.605,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2854,
+   "completion_tokens": 11
+  },
+  {
+   "case": "closest",
+   "ok": true,
+   "s": 0.705,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "box_1"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2853,
+   "completion_tokens": 19
+  },
+  {
+   "case": "find/unknown",
+   "ok": true,
+   "s": 0.698,
+   "calls": [
+    [
+     "look_around",
+     {
+      "query": "yellow duck"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2850,
+   "completion_tokens": 19
+  },
+  {
+   "case": "find/known-behind",
+   "ok": true,
+   "s": 0.761,
+   "calls": [
+    [
+     "look_around",
+     {
+      "query": "duck_1"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2871,
+   "completion_tokens": 21
+  },
+  {
+   "case": "look-at",
+   "ok": true,
+   "s": 0.678,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "right"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2847,
+   "completion_tokens": 16
+  },
+  {
+   "case": "move/little",
+   "ok": true,
+   "s": 0.764,
+   "calls": [
+    [
+     "move",
+     {
+      "direction": "forward",
+      "distance_cm": 20
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2850,
+   "completion_tokens": 25
+  },
+  {
+   "case": "greet",
+   "ok": true,
+   "s": 1.066,
+   "calls": [],
+   "text": "Hi there! \ud83d\udc4b I'm Sprocket, your little pet robot with the camera in my head. What can I do for you? Let's take a look around!</think>Hello! I'm ready to explore. Where would you like me to go first \u2014 l",
+   "prompt_tokens": 2763,
+   "completion_tokens": 69
+  },
+  {
+   "case": "chat/feel",
+   "ok": false,
+   "s": 1.192,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "front"
+     }
+    ]
+   ],
+   "text": "I'm feeling curious and a little excited, little robot! My battery's at 86%, so I can explore for a while. What's on your mind? Let me show you around! \ud83d\udc4b\n\nFirst, let me turn to face the camera so I ca",
+   "prompt_tokens": 2766,
+   "completion_tokens": 79
+  },
+  {
+   "case": "remember/name",
+   "ok": true,
+   "s": 0.497,
+   "calls": [
+    [
+     "remember",
+     {
+      "fact": "The human's name is Deniz."
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2766,
+   "completion_tokens": 23
+  },
+  {
+   "case": "recall/name",
+   "ok": true,
+   "s": 0.673,
+   "calls": [],
+   "text": "My name is Deniz! \ud83d\ude0a\n\n(And I'm Sprocket, your little pet robot with the camera on my head. Ready for an adventure?)",
+   "prompt_tokens": 2781,
+   "completion_tokens": 34
+  },
+  {
+   "case": "dance",
+   "ok": true,
+   "s": 0.534,
+   "calls": [
+    [
+     "express",
+     {
+      "emotion": "excited",
+      "gesture": "dance"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2765,
+   "completion_tokens": 27
+  },
+  {
+   "case": "eyes",
+   "ok": true,
+   "s": 0.44,
+   "calls": [
+    [
+     "set_eye_color",
+     {
+      "color": "green"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2765,
+   "completion_tokens": 19
+  },
+  {
+   "case": "bg/curious",
+   "ok": true,
+   "s": 0.683,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2878,
+   "completion_tokens": 11
+  },
+  {
+   "case": "p/face-away",
+   "ok": false,
+   "s": 0.674,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "left"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2850,
+   "completion_tokens": 16
+  },
+  {
+   "case": "p/reverse",
+   "ok": false,
+   "s": 0.66,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "left"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2849,
+   "completion_tokens": 16
+  },
+  {
+   "case": "p/scoot",
+   "ok": true,
+   "s": 0.792,
+   "calls": [
+    [
+     "move",
+     {
+      "direction": "forward",
+      "distance_cm": 5
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2851,
+   "completion_tokens": 25
+  },
+  {
+   "case": "p/check-left",
+   "ok": false,
+   "s": 0.619,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2853,
+   "completion_tokens": 11
+  },
+  {
+   "case": "p/rotate-45",
+   "ok": false,
+   "s": 0.667,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "right"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2853,
+   "completion_tokens": 16
+  },
+  {
+   "case": "p/head-ball",
+   "ok": true,
+   "s": 0.705,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "ball_1"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2853,
+   "completion_tokens": 19
+  },
+  {
+   "case": "p/get-behind",
+   "ok": true,
+   "s": 0.797,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "box_1",
+      "relation": "behind"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2854,
+   "completion_tokens": 27
+  },
+  {
+   "case": "p/park-between",
+   "ok": false,
+   "s": 0.785,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "cube_1",
+      "relation": "near"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2856,
+   "completion_tokens": 26
+  },
+  {
+   "case": "p/charge",
+   "ok": false,
+   "s": 0.764,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "start",
+      "relation": "on"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2854,
+   "completion_tokens": 24
+  },
+  {
+   "case": "p/nearest",
+   "ok": true,
+   "s": 0.784,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "cube_1",
+      "relation": "near"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2853,
+   "completion_tokens": 26
+  },
+  {
+   "case": "p/lap",
+   "ok": true,
+   "s": 0.711,
+   "calls": [
+    [
+     "circle_around",
+     {
+      "target": "box_1"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2852,
+   "completion_tokens": 20
+  },
+  {
+   "case": "p/where-duck",
+   "ok": false,
+   "s": 0.604,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2853,
+   "completion_tokens": 11
+  },
+  {
+   "case": "p/name",
+   "ok": true,
+   "s": 0.487,
+   "calls": [
+    [
+     "remember",
+     {
+      "fact": "The human's name is Deniz."
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2770,
+   "completion_tokens": 23
+  },
+  {
+   "case": "p/dance",
+   "ok": true,
+   "s": 0.537,
+   "calls": [
+    [
+     "express",
+     {
+      "emotion": "excited",
+      "gesture": "dance"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2767,
+   "completion_tokens": 27
+  },
+  {
+   "case": "p/sad",
+   "ok": false,
+   "s": 0.342,
+   "calls": [
+    [
+     "observe",
+     {}
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2766,
+   "completion_tokens": 11
+  }
+ ],
+ "dev": [
+  19,
+  24
+ ],
+ "heldout": [
+  7,
+  15
+ ],
+ "s_per_decision": 0.699
+}

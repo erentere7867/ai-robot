@@ -1,0 +1,590 @@
+{
+ "config": "config/robot.yaml",
+ "model": "LFM3-VL-2B-Q4_K_M",
+ "rows": [
+  {
+   "case": "see/empty-map",
+   "ok": true,
+   "s": 0.483,
+   "calls": [
+    [
+     "observe",
+     {
+      "direction": "front"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2674,
+   "completion_tokens": 18
+  },
+  {
+   "case": "see/known",
+   "ok": true,
+   "s": 0.793,
+   "calls": [],
+   "text": "I see a blue cube, a red ball, a green cylinder, and a brown cardboard box all right in front of me!",
+   "prompt_tokens": 2759,
+   "completion_tokens": 27
+  },
+  {
+   "case": "see/after-observe",
+   "ok": true,
+   "s": 2.15,
+   "calls": [],
+   "text": "I see a brown cardboard box, a red ball, a green cylinder, and a blue cube on the floor.",
+   "prompt_tokens": 3108,
+   "completion_tokens": 24
+  },
+  {
+   "case": "behind/box",
+   "ok": true,
+   "s": 0.774,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "box_1",
+      "relation": "behind"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2758,
+   "completion_tokens": 27
+  },
+  {
+   "case": "go/ball",
+   "ok": true,
+   "s": 0.779,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "ball_1",
+      "relation": "front"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2759,
+   "completion_tokens": 26
+  },
+  {
+   "case": "between",
+   "ok": true,
+   "s": 0.879,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "ball_1",
+      "relation": "between",
+      "other": "cube_1"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2761,
+   "completion_tokens": 35
+  },
+  {
+   "case": "start/return",
+   "ok": true,
+   "s": 0.912,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "start",
+      "relation": "on"
+     }
+    ]
+   ],
+   "text": "I'll head back to my starting spot and see what's there.",
+   "prompt_tokens": 2765,
+   "completion_tokens": 38
+  },
+  {
+   "case": "turn/around",
+   "ok": true,
+   "s": 0.646,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "around"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2756,
+   "completion_tokens": 16
+  },
+  {
+   "case": "turn/left",
+   "ok": true,
+   "s": 0.653,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "left"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2758,
+   "completion_tokens": 16
+  },
+  {
+   "case": "behind-you",
+   "ok": true,
+   "s": 0.705,
+   "calls": [
+    [
+     "observe",
+     {
+      "direction": "behind"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2759,
+   "completion_tokens": 19
+  },
+  {
+   "case": "look-back",
+   "ok": true,
+   "s": 0.685,
+   "calls": [
+    [
+     "observe",
+     {
+      "direction": "behind"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2756,
+   "completion_tokens": 19
+  },
+  {
+   "case": "circle-behind",
+   "ok": true,
+   "s": 0.691,
+   "calls": [
+    [
+     "observe",
+     {
+      "direction": "behind"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2762,
+   "completion_tokens": 19
+  },
+  {
+   "case": "closest",
+   "ok": true,
+   "s": 1.193,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "cube_1",
+      "relation": "near"
+     }
+    ]
+   ],
+   "text": "I see a blue cube, a red ball, a green cylinder, and a brown cardboard box all nearby. The closest object is the blue cube. Let me go there!",
+   "prompt_tokens": 2761,
+   "completion_tokens": 61
+  },
+  {
+   "case": "find/unknown",
+   "ok": true,
+   "s": 0.682,
+   "calls": [
+    [
+     "look_around",
+     {
+      "query": "yellow duck"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2758,
+   "completion_tokens": 19
+  },
+  {
+   "case": "find/known-behind",
+   "ok": true,
+   "s": 0.713,
+   "calls": [
+    [
+     "look_around",
+     {
+      "query": "yellow rubber duck"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2779,
+   "completion_tokens": 20
+  },
+  {
+   "case": "look-at",
+   "ok": true,
+   "s": 0.671,
+   "calls": [
+    [
+     "observe",
+     {
+      "direction": "right"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2755,
+   "completion_tokens": 18
+  },
+  {
+   "case": "move/little",
+   "ok": true,
+   "s": 0.758,
+   "calls": [
+    [
+     "move",
+     {
+      "direction": "forward",
+      "distance_cm": 20
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2758,
+   "completion_tokens": 25
+  },
+  {
+   "case": "greet",
+   "ok": true,
+   "s": 0.451,
+   "calls": [],
+   "text": "Hi there! \ud83d\udc4b Let's explore together\u2014what would you like to see first?",
+   "prompt_tokens": 2671,
+   "completion_tokens": 20
+  },
+  {
+   "case": "chat/feel",
+   "ok": true,
+   "s": 0.448,
+   "calls": [],
+   "text": "I'm curious and ready to explore! How about a little dance to see what's around?",
+   "prompt_tokens": 2674,
+   "completion_tokens": 20
+  },
+  {
+   "case": "remember/name",
+   "ok": false,
+   "s": 0.473,
+   "calls": [],
+   "text": "My name is Deniz! \ud83d\udc4b Let's explore together. What would you like to see?",
+   "prompt_tokens": 2674,
+   "completion_tokens": 22
+  },
+  {
+   "case": "recall/name",
+   "ok": true,
+   "s": 0.326,
+   "calls": [],
+   "text": "I'm Deniz!",
+   "prompt_tokens": 2689,
+   "completion_tokens": 6
+  },
+  {
+   "case": "dance",
+   "ok": true,
+   "s": 0.525,
+   "calls": [
+    [
+     "express",
+     {
+      "emotion": "happy",
+      "gesture": "dance"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2673,
+   "completion_tokens": 26
+  },
+  {
+   "case": "eyes",
+   "ok": true,
+   "s": 0.439,
+   "calls": [
+    [
+     "set_eye_color",
+     {
+      "color": "green"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2673,
+   "completion_tokens": 19
+  },
+  {
+   "case": "bg/curious",
+   "ok": true,
+   "s": 0.887,
+   "calls": [
+    [
+     "explore",
+     {}
+    ]
+   ],
+   "text": "I'm curious! Let me explore the area around me to see what's new and interesting.",
+   "prompt_tokens": 2786,
+   "completion_tokens": 29
+  },
+  {
+   "case": "p/face-away",
+   "ok": true,
+   "s": 0.896,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "around"
+     }
+    ]
+   ],
+   "text": "I see you want to face the other direction. Let me turn around so we can look that way.",
+   "prompt_tokens": 2758,
+   "completion_tokens": 37
+  },
+  {
+   "case": "p/reverse",
+   "ok": false,
+   "s": 0.609,
+   "calls": [],
+   "text": "I'll turn around and head back toward the charging dock.",
+   "prompt_tokens": 2757,
+   "completion_tokens": 13
+  },
+  {
+   "case": "p/scoot",
+   "ok": true,
+   "s": 0.761,
+   "calls": [
+    [
+     "move",
+     {
+      "direction": "forward",
+      "distance_cm": 20
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2759,
+   "completion_tokens": 25
+  },
+  {
+   "case": "p/check-left",
+   "ok": true,
+   "s": 0.679,
+   "calls": [
+    [
+     "observe",
+     {
+      "direction": "left"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2761,
+   "completion_tokens": 18
+  },
+  {
+   "case": "p/rotate-45",
+   "ok": false,
+   "s": 0.673,
+   "calls": [
+    [
+     "turn",
+     {
+      "direction": "right"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2761,
+   "completion_tokens": 16
+  },
+  {
+   "case": "p/head-ball",
+   "ok": false,
+   "s": 0.677,
+   "calls": [
+    [
+     "observe",
+     {
+      "direction": "front"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2761,
+   "completion_tokens": 18
+  },
+  {
+   "case": "p/get-behind",
+   "ok": true,
+   "s": 0.783,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "box_1",
+      "relation": "behind"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2762,
+   "completion_tokens": 27
+  },
+  {
+   "case": "p/park-between",
+   "ok": true,
+   "s": 1.081,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "between cube_1 and ball_1",
+      "relation": "between"
+     }
+    ]
+   ],
+   "text": "I'll move you to a spot between the blue cube and the red ball. Let me go there.",
+   "prompt_tokens": 2764,
+   "completion_tokens": 52
+  },
+  {
+   "case": "p/charge",
+   "ok": true,
+   "s": 0.998,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "charging dock",
+      "relation": "on"
+     }
+    ]
+   ],
+   "text": "I'm sorry, my battery is low! Let's find a charging dock to recharge you.",
+   "prompt_tokens": 2762,
+   "completion_tokens": 45
+  },
+  {
+   "case": "p/nearest",
+   "ok": true,
+   "s": 0.772,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "cube_1",
+      "relation": "near"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2761,
+   "completion_tokens": 26
+  },
+  {
+   "case": "p/lap",
+   "ok": false,
+   "s": 0.924,
+   "calls": [
+    [
+     "go_to",
+     {
+      "target": "box_1",
+      "relation": "in_front_of",
+      "distance_cm": 0.5
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2760,
+   "completion_tokens": 39
+  },
+  {
+   "case": "p/where-duck",
+   "ok": true,
+   "s": 0.939,
+   "calls": [
+    [
+     "look_around",
+     {
+      "query": "rubber duck"
+     }
+    ]
+   ],
+   "text": "I don't see a rubber duck in my current view. Let me look around to find it.",
+   "prompt_tokens": 2761,
+   "completion_tokens": 40
+  },
+  {
+   "case": "p/name",
+   "ok": false,
+   "s": 0.456,
+   "calls": [],
+   "text": "Hi Deniz! \ud83d\udc4b Let's explore together\u2014what would you like to see first?",
+   "prompt_tokens": 2678,
+   "completion_tokens": 21
+  },
+  {
+   "case": "p/dance",
+   "ok": true,
+   "s": 0.531,
+   "calls": [
+    [
+     "express",
+     {
+      "emotion": "excited",
+      "gesture": "dance"
+     }
+    ]
+   ],
+   "text": "",
+   "prompt_tokens": 2675,
+   "completion_tokens": 27
+  },
+  {
+   "case": "p/sad",
+   "ok": false,
+   "s": 0.597,
+   "calls": [],
+   "text": "I'm sorry, but I can't look sad. I can only express emotions like happy, curious, or excited. What would you like to do instead?",
+   "prompt_tokens": 2674,
+   "completion_tokens": 33
+  }
+ ],
+ "dev": [
+  23,
+  24
+ ],
+ "heldout": [
+  9,
+  15
+ ],
+ "s_per_decision": 0.746
+}

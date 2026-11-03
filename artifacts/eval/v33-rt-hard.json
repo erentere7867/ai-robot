@@ -1,0 +1,8486 @@
+{
+  "schema": 1,
+  "started_at": "2026-11-03T17:17:09+00:00",
+  "finished_at": null,
+  "git_commit": "271c359",
+  "backend": "auto",
+  "options": {
+    "config": "config/robot.yaml",
+    "timeout_s": 300.0,
+    "allow_server_start": false,
+    "scenarios": [
+      "turn_around_twice",
+      "look_left_then_right",
+      "turn_right_45",
+      "dance",
+      "sad_face",
+      "ball_color",
+      "circle_box",
+      "find_and_go",
+      "two_stops",
+      "back_up",
+      "closest",
+      "left_of_box"
+    ],
+    "seeds": [
+      0,
+      1
+    ]
+  },
+  "summary": {
+    "total": 13,
+    "passed": 10,
+    "pass_rate": 0.769,
+    "errors": 0,
+    "model_calls": 42,
+    "seconds": 131.7,
+    "by_scenario": {
+      "turn_around_twice": {
+        "passed": 2,
+        "total": 2
+      },
+      "look_left_then_right": {
+        "passed": 1,
+        "total": 1
+      },
+      "turn_right_45": {
+        "passed": 1,
+        "total": 1
+      },
+      "dance": {
+        "passed": 1,
+        "total": 1
+      },
+      "sad_face": {
+        "passed": 1,
+        "total": 1
+      },
+      "ball_color": {
+        "passed": 1,
+        "total": 1
+      },
+      "circle_box": {
+        "passed": 1,
+        "total": 1
+      },
+      "find_and_go": {
+        "passed": 0,
+        "total": 1
+      },
+      "two_stops": {
+        "passed": 1,
+        "total": 1
+      },
+      "back_up": {
+        "passed": 0,
+        "total": 1
+      },
+      "closest": {
+        "passed": 1,
+        "total": 1
+      },
+      "left_of_box": {
+        "passed": 0,
+        "total": 1
+      }
+    }
+  },
+  "results": [
+    {
+      "scenario": "turn_around_twice",
+      "description": "A repeated command is done again",
+      "seed": 0,
+      "passed": true,
+      "reason": "turned +179 deg (want +180)",
+      "details": {
+        "heading_change_deg": 179.2,
+        "error_deg": 0.8
+      },
+      "error": null,
+      "seconds": 8.58,
+      "model_calls": 4,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "turn around",
+          "say": "I turned around! What do you see now?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 3.72,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 0.49,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 179.1,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "turn",
+              "args": {
+                "direction": "around"
+              },
+              "ok": true,
+              "message": "I turned around 180 degrees."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              5.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              10.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              15.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              20.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              25.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              29.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              34.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              39.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              44.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              49.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              54.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              58.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              63.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              68.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              73.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              78.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              85.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              90.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              94.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              99.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              104.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              109.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              113.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              118.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              123.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              128.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              133.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              137.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              142.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              147.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              152.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              156.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              161.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              165.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              170.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              174.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              178.2,
+              0.0
+            ]
+          ]
+        },
+        {
+          "utterance": "turn around again",
+          "say": "I turned around again! What do you see now?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 4.34,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 1.13,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 179.1,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": -1.7,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "turn",
+              "args": {
+                "direction": "around"
+              },
+              "ok": true,
+              "message": "I turned around 180 degrees."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              -175.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -169.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -165.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -160.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -155.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -150.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -145.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -138.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -134.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -128.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -124.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -119.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -114.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -110.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -105.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -100.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -95.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -90.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -86.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -81.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -76.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -71.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -66.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -62.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -57.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -52.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -47.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -43.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -37.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -33.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -28.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -24.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -19.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -15.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -11.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -7.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -3.1,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "look_left_then_right",
+      "description": "Second of two turns goes the other way",
+      "seed": 0,
+      "passed": true,
+      "reason": "turned -89 deg (want -90)",
+      "details": {
+        "heading_change_deg": -89.4,
+        "error_deg": 0.6
+      },
+      "error": null,
+      "seconds": 8.84,
+      "model_calls": 4,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "look to your left",
+          "say": "I see a yellow duck, a red ball, a blue cube, a green mug, and a cardboard box in front of me. What would you like to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 3.27,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 0.52,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 89.5,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "turn",
+              "args": {
+                "direction": "left"
+              },
+              "ok": true,
+              "message": "I turned left 90 degrees."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              5.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              11.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              18.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              22.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              27.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              32.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              38.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              44.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              49.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              53.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              58.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              63.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              67.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              71.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              76.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              80.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              84.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              88.8,
+              0.0
+            ]
+          ]
+        },
+        {
+          "utterance": "now look right",
+          "say": "I see a red ball, a green cylinder, and a blue cube on a checkered floor. What would you like to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 5.33,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 1.17,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 89.5,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.1,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {
+                "direction": "right"
+              },
+              "ok": true,
+              "message": "I turned right 90 degrees. I can see 4 thing(s)."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              85.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              80.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              76.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              71.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              66.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              61.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              57.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              52.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              47.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              42.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              38.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              34.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              29.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              24.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              19.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              15.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              11.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              7.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              3.1,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "turn_right_45",
+      "description": "Turn by a stated angle",
+      "seed": 0,
+      "passed": true,
+      "reason": "turned -44 deg (want -45)",
+      "details": {
+        "heading_change_deg": -44.4,
+        "error_deg": 0.6
+      },
+      "error": null,
+      "seconds": 3.06,
+      "model_calls": 2,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "turn right 45 degrees",
+          "say": "I turned right 45 degrees. What do you see now?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 2.85,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 0.82,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": -44.4,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "turn",
+              "args": {
+                "direction": "right",
+                "degrees": 45
+              },
+              "ok": true,
+              "message": "I turned right 45 degrees."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              -5.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -10.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -15.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -20.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -25.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -29.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -34.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -38.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -42.3,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "dance",
+      "description": "Do a dance in place",
+      "seed": 0,
+      "passed": true,
+      "reason": "danced; moved 0 mm",
+      "details": {
+        "moved_mm": 0.0
+      },
+      "error": null,
+      "seconds": 4.13,
+      "model_calls": 2,
+      "actions": {
+        "completed": 1,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "do a little dance",
+          "say": "I'm dancing happily!",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 3.92,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 0.8,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 5.0
+          },
+          "skills": [
+            {
+              "tool": "express",
+              "args": {
+                "emotion": "happy",
+                "gesture": "dance"
+              },
+              "ok": true,
+              "message": "Showing happy with a dance."
+            }
+          ],
+          "actions": [
+            {
+              "tool": "perform_trick",
+              "args": {
+                "trick": "dance"
+              },
+              "ok": true,
+              "status": "completed",
+              "message": "Performed trick 'dance'."
+            }
+          ],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              4.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              11.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              16.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              21.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              27.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              32.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              38.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              43.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              49.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              54.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              60.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              66.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              71.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              76.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              81.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              87.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              90.0,
+              5.6
+            ],
+            [
+              0.0,
+              0.0,
+              90.0,
+              11.3
+            ],
+            [
+              0.0,
+              0.0,
+              90.0,
+              17.0
+            ],
+            [
+              0.0,
+              0.0,
+              84.4,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              78.9,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              73.4,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              67.7,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              62.1,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              56.6,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              50.9,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              45.0,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              39.9,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              34.3,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              28.7,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              23.2,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              17.5,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              12.0,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              6.3,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.9,
+              18.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              12.4
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              6.8
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "sad_face",
+      "description": "Show a sad face and say something",
+      "seed": 0,
+      "passed": true,
+      "reason": "showed sad; replied",
+      "details": {},
+      "error": null,
+      "seconds": 1.95,
+      "model_calls": 3,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "make a sad face",
+          "say": "I've shown a sad expression for you.",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 3,
+          "seconds": 1.71,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": null,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "express",
+              "args": {
+                "emotion": "sad"
+              },
+              "ok": true,
+              "message": "Showing sad."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": []
+        }
+      ]
+    },
+    {
+      "scenario": "ball_color",
+      "description": "Answer a question about how something looks",
+      "seed": 0,
+      "passed": true,
+      "reason": "said red",
+      "details": {},
+      "error": null,
+      "seconds": 3.36,
+      "model_calls": 3,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "what color is the ball?",
+          "say": "The ball is red! I'm curious about what else you'd like to know.",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 3,
+          "seconds": 3.1,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 0.98,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 14.2,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "look_around",
+              "args": {
+                "query": "ball"
+              },
+              "ok": true,
+              "message": "Found it and turned to face it: ball_1 (red ball): 0.7 m straight ahead, seen just now."
+            },
+            {
+              "tool": "express",
+              "args": {
+                "emotion": "curious",
+                "gesture": "none"
+              },
+              "ok": true,
+              "message": "Showing curious."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              4.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              8.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              12.1,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "circle_box",
+      "description": "Drive all the way around the box without touching it",
+      "seed": 0,
+      "passed": true,
+      "reason": "went 703 deg around cardboard_box; 0 contact poses",
+      "details": {
+        "coverage_deg": 703.2,
+        "swept_deg": 703.2,
+        "contacts": 0,
+        "reflexes": 0
+      },
+      "error": null,
+      "seconds": 29.25,
+      "model_calls": 2,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 269.8,
+          "y_mm": 904.5,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 319.5,
+          "y_mm": -928.9,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 1273.8,
+          "y_mm": 884.5,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 1254.6,
+          "y_mm": -921.5,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 682.1,
+          "y_mm": 9.7,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -705.4,
+          "y_mm": -1.8,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 269.8,
+          "y_mm": 904.5,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 319.5,
+          "y_mm": -928.9,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 1273.8,
+          "y_mm": 884.5,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 1254.6,
+          "y_mm": -921.5,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 682.1,
+          "y_mm": 9.7,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -705.4,
+          "y_mm": -1.8,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "drive in a circle around the cardboard box",
+          "say": "I drove a loop around the box.",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 29.02,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 2.94,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 231.7,
+            "y_mm": 138.8,
+            "heading_deg": -17.9,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {
+                "direction": "front"
+              },
+              "ok": true,
+              "message": "I can see 1 thing(s)."
+            },
+            {
+              "tool": "circle_around",
+              "args": {
+                "target": "box_1",
+                "laps": 2,
+                "direction": "left"
+              },
+              "ok": true,
+              "message": "I drove a loop around box_1."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              6.2,
+              -0.3,
+              -4.2,
+              0.0
+            ],
+            [
+              13.9,
+              -1.3,
+              -9.5,
+              0.0
+            ],
+            [
+              19.9,
+              -2.7,
+              -14.0,
+              0.0
+            ],
+            [
+              26.2,
+              -4.6,
+              -18.0,
+              0.0
+            ],
+            [
+              36.5,
+              -8.7,
+              -23.2,
+              0.0
+            ],
+            [
+              47.1,
+              -13.9,
+              -27.6,
+              0.0
+            ],
+            [
+              61.7,
+              -22.6,
+              -32.4,
+              0.0
+            ],
+            [
+              79.8,
+              -35.5,
+              -37.1,
+              0.0
+            ],
+            [
+              97.5,
+              -50.0,
+              -40.7,
+              0.0
+            ],
+            [
+              114.8,
+              -65.8,
+              -43.5,
+              0.0
+            ],
+            [
+              131.6,
+              -82.5,
+              -45.6,
+              0.0
+            ],
+            [
+              147.9,
+              -99.8,
+              -47.3,
+              0.0
+            ],
+            [
+              163.8,
+              -117.5,
+              -48.6,
+              0.0
+            ],
+            [
+              179.9,
+              -136.2,
+              -49.6,
+              0.0
+            ],
+            [
+              194.8,
+              -154.0,
+              -50.4,
+              0.0
+            ],
+            [
+              208.5,
+              -170.9,
+              -51.0,
+              0.0
+            ],
+            [
+              221.7,
+              -186.6,
+              -48.9,
+              0.0
+            ],
+            [
+              237.5,
+              -203.6,
+              -45.9,
+              0.0
+            ],
+            [
+              254.4,
+              -220.1,
+              -43.5,
+              0.0
+            ],
+            [
+              271.9,
+              -236.0,
+              -41.7,
+              0.0
+            ],
+            [
+              289.9,
+              -251.6,
+              -40.3,
+              0.0
+            ],
+            [
+              308.3,
+              -266.8,
+              -39.2,
+              0.0
+            ],
+            [
+              327.5,
+              -282.1,
+              -38.3,
+              0.0
+            ],
+            [
+              348.9,
+              -298.8,
+              -37.5,
+              0.0
+            ],
+            [
+              365.0,
+              -310.8,
+              -36.3,
+              0.0
+            ],
+            [
+              384.5,
+              -324.7,
+              -35.2,
+              0.0
+            ],
+            [
+              404.2,
+              -338.3,
+              -34.3,
+              0.0
+            ],
+            [
+              424.1,
+              -351.7,
+              -33.5,
+              0.0
+            ],
+            [
+              444.1,
+              -364.8,
+              -33.0,
+              0.0
+            ],
+            [
+              464.0,
+              -377.5,
+              -32.2,
+              0.0
+            ],
+            [
+              483.4,
+              -388.6,
+              -28.0,
+              0.0
+            ],
+            [
+              498.8,
+              -395.8,
+              -23.5,
+              0.0
+            ],
+            [
+              514.8,
+              -401.8,
+              -18.9,
+              0.0
+            ],
+            [
+              536.3,
+              -408.0,
+              -14.4,
+              0.0
+            ],
+            [
+              558.8,
+              -413.0,
+              -11.0,
+              0.0
+            ],
+            [
+              582.0,
+              -416.8,
+              -8.4,
+              0.0
+            ],
+            [
+              605.5,
+              -419.7,
+              -6.4,
+              0.0
+            ],
+            [
+              629.1,
+              -422.0,
+              -4.8,
+              0.0
+            ],
+            [
+              654.3,
+              -423.8,
+              -3.6,
+              0.0
+            ],
+            [
+              677.0,
+              -425.0,
+              -2.7,
+              0.0
+            ],
+            [
+              700.8,
+              -425.9,
+              -1.9,
+              0.0
+            ],
+            [
+              724.7,
+              -426.5,
+              -1.3,
+              0.0
+            ],
+            [
+              748.7,
+              -426.9,
+              -0.8,
+              0.0
+            ],
+            [
+              771.2,
+              -427.0,
+              0.7,
+              0.0
+            ],
+            [
+              786.8,
+              -426.1,
+              5.6,
+              0.0
+            ],
+            [
+              798.9,
+              -424.3,
+              9.7,
+              0.0
+            ],
+            [
+              815.6,
+              -420.5,
+              14.3,
+              0.0
+            ],
+            [
+              836.7,
+              -413.9,
+              19.1,
+              0.0
+            ],
+            [
+              858.0,
+              -405.5,
+              23.1,
+              0.0
+            ],
+            [
+              872.8,
+              -398.3,
+              27.9,
+              0.0
+            ],
+            [
+              887.5,
+              -389.5,
+              32.5,
+              0.0
+            ],
+            [
+              905.8,
+              -376.6,
+              36.9,
+              0.0
+            ],
+            [
+              922.8,
+              -362.8,
+              40.2,
+              0.0
+            ],
+            [
+              941.1,
+              -346.3,
+              43.0,
+              0.0
+            ],
+            [
+              958.0,
+              -329.9,
+              45.1,
+              0.0
+            ],
+            [
+              974.5,
+              -312.7,
+              46.7,
+              0.0
+            ],
+            [
+              991.6,
+              -294.0,
+              48.1,
+              0.0
+            ],
+            [
+              1006.4,
+              -277.1,
+              49.1,
+              0.0
+            ],
+            [
+              1021.7,
+              -259.1,
+              50.3,
+              0.0
+            ],
+            [
+              1036.0,
+              -240.7,
+              53.3,
+              0.0
+            ],
+            [
+              1049.6,
+              -221.5,
+              55.7,
+              0.0
+            ],
+            [
+              1062.5,
+              -201.6,
+              57.8,
+              0.0
+            ],
+            [
+              1072.8,
+              -183.4,
+              62.9,
+              0.0
+            ],
+            [
+              1079.9,
+              -167.7,
+              67.3,
+              0.0
+            ],
+            [
+              1087.6,
+              -146.5,
+              71.7,
+              0.0
+            ],
+            [
+              1094.0,
+              -124.3,
+              75.0,
+              0.0
+            ],
+            [
+              1099.1,
+              -103.3,
+              77.4,
+              0.0
+            ],
+            [
+              1103.2,
+              -83.0,
+              79.3,
+              0.0
+            ],
+            [
+              1107.2,
+              -59.6,
+              81.0,
+              0.0
+            ],
+            [
+              1110.6,
+              -35.9,
+              82.3,
+              0.0
+            ],
+            [
+              1113.5,
+              -12.2,
+              83.4,
+              0.0
+            ],
+            [
+              1116.0,
+              11.5,
+              84.3,
+              0.0
+            ],
+            [
+              1117.8,
+              34.1,
+              86.9,
+              0.0
+            ],
+            [
+              1117.9,
+              56.5,
+              91.5,
+              0.0
+            ],
+            [
+              1116.4,
+              79.4,
+              95.2,
+              0.0
+            ],
+            [
+              1113.6,
+              100.8,
+              99.8,
+              0.0
+            ],
+            [
+              1109.6,
+              117.9,
+              104.7,
+              0.0
+            ],
+            [
+              1103.1,
+              138.6,
+              109.3,
+              0.0
+            ],
+            [
+              1094.6,
+              160.0,
+              112.9,
+              0.0
+            ],
+            [
+              1084.9,
+              181.2,
+              115.7,
+              0.0
+            ],
+            [
+              1074.2,
+              202.3,
+              117.8,
+              0.0
+            ],
+            [
+              1062.6,
+              223.1,
+              119.6,
+              0.0
+            ],
+            [
+              1050.6,
+              243.7,
+              120.9,
+              0.0
+            ],
+            [
+              1038.1,
+              264.0,
+              122.0,
+              0.0
+            ],
+            [
+              1025.2,
+              284.2,
+              122.9,
+              0.0
+            ],
+            [
+              1012.1,
+              304.1,
+              123.6,
+              0.0
+            ],
+            [
+              998.9,
+              322.5,
+              127.3,
+              0.0
+            ],
+            [
+              984.3,
+              340.2,
+              131.5,
+              0.0
+            ],
+            [
+              976.9,
+              347.8,
+              135.7,
+              0.0
+            ],
+            [
+              968.2,
+              355.3,
+              140.6,
+              0.0
+            ],
+            [
+              958.3,
+              362.7,
+              144.6,
+              0.0
+            ],
+            [
+              943.8,
+              371.9,
+              149.1,
+              0.0
+            ],
+            [
+              924.0,
+              382.5,
+              153.4,
+              0.0
+            ],
+            [
+              902.3,
+              392.4,
+              156.9,
+              0.0
+            ],
+            [
+              880.6,
+              401.0,
+              159.4,
+              0.0
+            ],
+            [
+              858.9,
+              408.6,
+              161.4,
+              0.0
+            ],
+            [
+              834.9,
+              416.2,
+              163.0,
+              0.0
+            ],
+            [
+              813.3,
+              422.5,
+              164.2,
+              0.0
+            ],
+            [
+              790.2,
+              428.8,
+              165.1,
+              0.0
+            ],
+            [
+              767.0,
+              434.8,
+              165.9,
+              0.0
+            ],
+            [
+              746.3,
+              439.8,
+              166.5,
+              0.0
+            ],
+            [
+              723.4,
+              444.3,
+              171.3,
+              0.0
+            ],
+            [
+              706.1,
+              446.1,
+              175.7,
+              0.0
+            ],
+            [
+              683.6,
+              446.8,
+              179.9,
+              0.0
+            ],
+            [
+              660.4,
+              446.0,
+              -176.8,
+              0.0
+            ],
+            [
+              637.1,
+              444.1,
+              -174.3,
+              0.0
+            ],
+            [
+              613.5,
+              441.2,
+              -172.4,
+              0.0
+            ],
+            [
+              589.9,
+              437.7,
+              -170.9,
+              0.0
+            ],
+            [
+              566.4,
+              433.6,
+              -169.7,
+              0.0
+            ],
+            [
+              543.4,
+              428.9,
+              -167.4,
+              0.0
+            ],
+            [
+              520.6,
+              423.2,
+              -165.0,
+              0.0
+            ],
+            [
+              497.9,
+              416.6,
+              -163.0,
+              0.0
+            ],
+            [
+              475.2,
+              409.2,
+              -161.5,
+              0.0
+            ],
+            [
+              452.7,
+              401.4,
+              -160.3,
+              0.0
+            ],
+            [
+              432.4,
+              393.6,
+              -157.6,
+              0.0
+            ],
+            [
+              421.6,
+              388.5,
+              -153.5,
+              0.0
+            ],
+            [
+              406.9,
+              380.1,
+              -148.3,
+              0.0
+            ],
+            [
+              392.7,
+              370.4,
+              -144.2,
+              0.0
+            ],
+            [
+              375.1,
+              356.4,
+              -139.8,
+              0.0
+            ],
+            [
+              358.1,
+              340.9,
+              -136.2,
+              0.0
+            ],
+            [
+              342.8,
+              324.7,
+              -131.6,
+              0.0
+            ],
+            [
+              328.3,
+              307.0,
+              -128.1,
+              0.0
+            ],
+            [
+              314.4,
+              288.1,
+              -125.3,
+              0.0
+            ],
+            [
+              301.1,
+              268.5,
+              -123.2,
+              0.0
+            ],
+            [
+              288.5,
+              248.4,
+              -121.6,
+              0.0
+            ],
+            [
+              276.3,
+              227.8,
+              -120.2,
+              0.0
+            ],
+            [
+              264.5,
+              207.0,
+              -119.2,
+              0.0
+            ],
+            [
+              253.0,
+              185.9,
+              -118.3,
+              0.0
+            ],
+            [
+              242.3,
+              165.8,
+              -117.6,
+              0.0
+            ],
+            [
+              233.1,
+              146.4,
+              -113.0,
+              0.0
+            ],
+            [
+              227.4,
+              130.7,
+              -108.0,
+              0.0
+            ],
+            [
+              222.8,
+              113.8,
+              -103.9,
+              0.0
+            ],
+            [
+              218.3,
+              91.6,
+              -99.8,
+              0.0
+            ],
+            [
+              215.2,
+              68.7,
+              -96.5,
+              0.0
+            ],
+            [
+              213.3,
+              45.3,
+              -93.7,
+              0.0
+            ],
+            [
+              212.3,
+              21.7,
+              -91.5,
+              0.0
+            ],
+            [
+              212.5,
+              -0.3,
+              -87.4,
+              0.0
+            ],
+            [
+              214.7,
+              -22.3,
+              -82.7,
+              0.0
+            ],
+            [
+              218.5,
+              -45.1,
+              -79.0,
+              0.0
+            ],
+            [
+              223.6,
+              -67.8,
+              -76.2,
+              0.0
+            ],
+            [
+              229.8,
+              -90.5,
+              -74.0,
+              0.0
+            ],
+            [
+              236.8,
+              -113.3,
+              -72.2,
+              0.0
+            ],
+            [
+              244.4,
+              -135.9,
+              -70.8,
+              0.0
+            ],
+            [
+              252.4,
+              -157.8,
+              -68.8,
+              0.0
+            ],
+            [
+              259.2,
+              -173.2,
+              -64.7,
+              0.0
+            ],
+            [
+              269.8,
+              -193.1,
+              -60.3,
+              0.0
+            ],
+            [
+              282.0,
+              -212.7,
+              -56.9,
+              0.0
+            ],
+            [
+              295.3,
+              -232.0,
+              -54.3,
+              0.0
+            ],
+            [
+              309.5,
+              -250.9,
+              -52.2,
+              0.0
+            ],
+            [
+              324.4,
+              -269.4,
+              -50.6,
+              0.0
+            ],
+            [
+              339.9,
+              -287.6,
+              -49.2,
+              0.0
+            ],
+            [
+              354.6,
+              -304.3,
+              -48.2,
+              0.0
+            ],
+            [
+              368.8,
+              -319.2,
+              -44.7,
+              0.0
+            ],
+            [
+              384.8,
+              -333.8,
+              -41.1,
+              0.0
+            ],
+            [
+              402.8,
+              -348.5,
+              -38.0,
+              0.0
+            ],
+            [
+              421.7,
+              -362.5,
+              -35.6,
+              0.0
+            ],
+            [
+              442.3,
+              -376.6,
+              -33.6,
+              0.0
+            ],
+            [
+              460.2,
+              -388.0,
+              -31.2,
+              0.0
+            ],
+            [
+              475.0,
+              -395.9,
+              -26.3,
+              0.0
+            ],
+            [
+              491.0,
+              -402.9,
+              -22.1,
+              0.0
+            ],
+            [
+              512.2,
+              -410.3,
+              -17.7,
+              0.0
+            ],
+            [
+              534.4,
+              -416.4,
+              -13.9,
+              0.0
+            ],
+            [
+              556.7,
+              -421.0,
+              -10.3,
+              0.0
+            ],
+            [
+              579.9,
+              -424.5,
+              -7.5,
+              0.0
+            ],
+            [
+              603.3,
+              -427.1,
+              -5.4,
+              0.0
+            ],
+            [
+              626.1,
+              -428.8,
+              -3.8,
+              0.0
+            ],
+            [
+              646.1,
+              -429.9,
+              -2.7,
+              0.0
+            ],
+            [
+              670.0,
+              -430.8,
+              -1.6,
+              0.0
+            ],
+            [
+              695.3,
+              -431.2,
+              -0.7,
+              0.0
+            ],
+            [
+              717.8,
+              -431.4,
+              -0.1,
+              0.0
+            ],
+            [
+              741.8,
+              -431.3,
+              0.4,
+              0.0
+            ],
+            [
+              765.2,
+              -431.0,
+              1.3,
+              0.0
+            ],
+            [
+              781.0,
+              -430.0,
+              5.4,
+              0.0
+            ],
+            [
+              793.0,
+              -428.3,
+              9.5,
+              0.0
+            ],
+            [
+              809.6,
+              -424.6,
+              14.2,
+              0.0
+            ],
+            [
+              826.5,
+              -419.5,
+              18.2,
+              0.0
+            ],
+            [
+              848.6,
+              -411.0,
+              22.5,
+              0.0
+            ],
+            [
+              867.3,
+              -402.3,
+              27.2,
+              0.0
+            ],
+            [
+              882.7,
+              -393.4,
+              32.0,
+              0.0
+            ],
+            [
+              900.4,
+              -381.1,
+              36.4,
+              0.0
+            ],
+            [
+              916.9,
+              -367.9,
+              39.7,
+              0.0
+            ],
+            [
+              933.7,
+              -353.1,
+              42.4,
+              0.0
+            ],
+            [
+              949.5,
+              -338.0,
+              44.4,
+              0.0
+            ],
+            [
+              966.1,
+              -321.1,
+              46.2,
+              0.0
+            ],
+            [
+              982.4,
+              -303.6,
+              47.6,
+              0.0
+            ],
+            [
+              998.8,
+              -285.3,
+              48.7,
+              0.0
+            ],
+            [
+              1016.4,
+              -264.8,
+              49.7,
+              0.0
+            ],
+            [
+              1031.5,
+              -245.9,
+              52.6,
+              0.0
+            ],
+            [
+              1045.3,
+              -226.8,
+              55.1,
+              0.0
+            ],
+            [
+              1058.4,
+              -207.1,
+              57.2,
+              0.0
+            ],
+            [
+              1069.3,
+              -188.7,
+              61.5,
+              0.0
+            ],
+            [
+              1076.7,
+              -173.4,
+              66.1,
+              0.0
+            ],
+            [
+              1084.7,
+              -152.5,
+              70.7,
+              0.0
+            ],
+            [
+              1091.5,
+              -130.5,
+              74.2,
+              0.0
+            ],
+            [
+              1097.2,
+              -107.8,
+              76.9,
+              0.0
+            ],
+            [
+              1102.2,
+              -83.4,
+              79.2,
+              0.0
+            ],
+            [
+              1106.1,
+              -61.2,
+              80.8,
+              0.0
+            ],
+            [
+              1109.6,
+              -37.6,
+              82.1,
+              0.0
+            ],
+            [
+              1112.6,
+              -13.9,
+              83.2,
+              0.0
+            ],
+            [
+              1115.2,
+              9.9,
+              84.1,
+              0.0
+            ],
+            [
+              1117.1,
+              31.6,
+              86.3,
+              0.0
+            ],
+            [
+              1117.3,
+              42.4,
+              90.5,
+              0.0
+            ],
+            [
+              1116.6,
+              54.0,
+              95.2,
+              0.0
+            ],
+            [
+              1114.9,
+              66.1,
+              99.2,
+              0.0
+            ],
+            [
+              1111.3,
+              83.1,
+              103.5,
+              0.0
+            ],
+            [
+              1104.9,
+              104.8,
+              107.8,
+              0.0
+            ],
+            [
+              1097.1,
+              126.5,
+              111.1,
+              0.0
+            ],
+            [
+              1088.0,
+              148.3,
+              113.7,
+              0.0
+            ],
+            [
+              1078.1,
+              169.7,
+              115.6,
+              0.0
+            ],
+            [
+              1068.2,
+              189.4,
+              117.0,
+              0.0
+            ],
+            [
+              1058.0,
+              208.8,
+              118.2,
+              0.0
+            ],
+            [
+              1047.0,
+              228.9,
+              119.1,
+              0.0
+            ],
+            [
+              1037.0,
+              246.4,
+              119.8,
+              0.0
+            ],
+            [
+              1025.5,
+              266.2,
+              120.4,
+              0.0
+            ],
+            [
+              1014.6,
+              284.5,
+              120.9,
+              0.0
+            ],
+            [
+              1003.2,
+              303.3,
+              121.8,
+              0.0
+            ],
+            [
+              990.8,
+              321.6,
+              125.8,
+              0.0
+            ],
+            [
+              977.2,
+              338.9,
+              130.0,
+              0.0
+            ],
+            [
+              969.9,
+              346.8,
+              134.8,
+              0.0
+            ],
+            [
+              960.5,
+              355.1,
+              140.2,
+              0.0
+            ],
+            [
+              948.3,
+              364.2,
+              145.1,
+              0.0
+            ],
+            [
+              933.6,
+              373.4,
+              149.4,
+              0.0
+            ],
+            [
+              913.7,
+              384.0,
+              153.6,
+              0.0
+            ],
+            [
+              892.6,
+              393.6,
+              156.8,
+              0.0
+            ],
+            [
+              866.9,
+              403.6,
+              159.7,
+              0.0
+            ],
+            [
+              843.9,
+              411.6,
+              161.6,
+              0.0
+            ],
+            [
+              821.2,
+              418.7,
+              163.1,
+              0.0
+            ],
+            [
+              798.2,
+              425.4,
+              164.3,
+              0.0
+            ],
+            [
+              775.2,
+              431.6,
+              165.2,
+              0.0
+            ],
+            [
+              751.9,
+              437.6,
+              165.9,
+              0.0
+            ],
+            [
+              730.4,
+              442.6,
+              168.4,
+              0.0
+            ],
+            [
+              713.8,
+              445.1,
+              173.2,
+              0.0
+            ],
+            [
+              696.3,
+              446.4,
+              177.2,
+              0.0
+            ],
+            [
+              673.5,
+              446.5,
+              -178.9,
+              0.0
+            ],
+            [
+              650.3,
+              445.3,
+              -175.9,
+              0.0
+            ],
+            [
+              626.9,
+              443.0,
+              -173.6,
+              0.0
+            ],
+            [
+              603.3,
+              439.9,
+              -171.8,
+              0.0
+            ],
+            [
+              579.8,
+              436.2,
+              -170.4,
+              0.0
+            ],
+            [
+              556.4,
+              431.9,
+              -168.8,
+              0.0
+            ],
+            [
+              533.6,
+              426.6,
+              -166.1,
+              0.0
+            ],
+            [
+              510.9,
+              420.4,
+              -163.9,
+              0.0
+            ],
+            [
+              488.1,
+              413.4,
+              -162.2,
+              0.0
+            ],
+            [
+              465.5,
+              405.8,
+              -160.8,
+              0.0
+            ],
+            [
+              443.7,
+              397.9,
+              -159.3,
+              0.0
+            ],
+            [
+              429.0,
+              391.6,
+              -154.7,
+              0.0
+            ],
+            [
+              417.7,
+              385.5,
+              -150.6,
+              0.0
+            ],
+            [
+              403.6,
+              376.6,
+              -146.3,
+              0.0
+            ],
+            [
+              385.6,
+              363.3,
+              -141.7,
+              0.0
+            ],
+            [
+              368.3,
+              348.4,
+              -137.9,
+              0.0
+            ],
+            [
+              352.0,
+              332.6,
+              -134.1,
+              0.0
+            ],
+            [
+              336.9,
+              315.6,
+              -130.1,
+              0.0
+            ],
+            [
+              322.5,
+              297.3,
+              -126.9,
+              0.0
+            ],
+            [
+              309.0,
+              278.2,
+              -124.5,
+              0.0
+            ],
+            [
+              296.0,
+              258.4,
+              -122.6,
+              0.0
+            ],
+            [
+              283.4,
+              238.1,
+              -121.1,
+              0.0
+            ],
+            [
+              271.4,
+              217.5,
+              -119.9,
+              0.0
+            ],
+            [
+              259.6,
+              196.6,
+              -119.0,
+              0.0
+            ],
+            [
+              248.2,
+              175.6,
+              -118.2,
+              0.0
+            ],
+            [
+              238.0,
+              155.9,
+              -116.3,
+              0.0
+            ],
+            [
+              233.4,
+              145.2,
+              -110.8,
+              0.0
+            ],
+            [
+              232.3,
+              141.8,
+              -106.5,
+              0.0
+            ],
+            [
+              231.8,
+              139.6,
+              -101.6,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -96.9,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -92.1,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -87.3,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -81.9,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -77.7,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -72.9,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -68.1,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -63.3,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -58.5,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -53.7,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -49.0,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -44.9,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -39.7,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -35.1,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -30.8,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -26.6,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -22.6,
+              0.0
+            ],
+            [
+              231.7,
+              138.8,
+              -18.6,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "find_and_go",
+      "description": "Find a duck behind the robot and drive to it",
+      "seed": 0,
+      "passed": false,
+      "reason": "597 mm from yellow_duck",
+      "details": {
+        "distance_mm": 596.6
+      },
+      "error": null,
+      "seconds": 25.87,
+      "model_calls": 3,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -740.5,
+          "y_mm": 311.2,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -740.5,
+          "y_mm": 311.2,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "find the yellow duck and go to it",
+          "say": "It was not where I first thought, so I searched and found the dock.",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 3,
+          "seconds": 25.47,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 0.56,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": -386.2,
+            "y_mm": -168.8,
+            "heading_deg": 156.6,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "look_around",
+              "args": {
+                "query": "yellow duck"
+              },
+              "ok": true,
+              "message": "Found it and turned to face it: dock_1 (charging dock): 0.7 m straight ahead, seen just now."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "dock_1",
+                "relation": "on"
+              },
+              "ok": true,
+              "message": "I'm near dock_1 now. I can see dock_1 0.5 m away."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "duck_2",
+                "relation": "on"
+              },
+              "ok": true,
+              "message": "It was not where I first thought, so I searched and found dock_1. I'm near dock_1 now (as close as the space allows). I can see dock_1 0.4 m away."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              4.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              9.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              13.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              17.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              22.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              26.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              31.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              35.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              39.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              44.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              48.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              53.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              57.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              61.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              66.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              70.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              75.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              79.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              83.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              88.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              92.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              97.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              101.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              105.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              110.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              114.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              119.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              123.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              127.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              132.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              136.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              141.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              145.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              149.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              153.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              157.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              161.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              166.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              170.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              174.2,
+              0.0
+            ],
+            [
+              -23.8,
+              2.0,
+              175.4,
+              0.0
+            ],
+            [
+              -48.5,
+              3.9,
+              175.4,
+              0.0
+            ],
+            [
+              -68.9,
+              5.5,
+              175.5,
+              0.0
+            ],
+            [
+              -91.6,
+              7.3,
+              175.5,
+              0.0
+            ],
+            [
+              -113.3,
+              9.0,
+              175.6,
+              0.0
+            ],
+            [
+              -135.1,
+              10.7,
+              175.6,
+              0.0
+            ],
+            [
+              -155.2,
+              12.2,
+              176.4,
+              0.0
+            ],
+            [
+              -169.7,
+              12.4,
+              -179.3,
+              0.0
+            ],
+            [
+              -186.1,
+              11.5,
+              -174.9,
+              0.0
+            ],
+            [
+              -205.7,
+              8.9,
+              -170.8,
+              0.0
+            ],
+            [
+              -226.4,
+              4.8,
+              -167.3,
+              0.0
+            ],
+            [
+              -246.6,
+              -0.3,
+              -164.9,
+              0.0
+            ],
+            [
+              -266.0,
+              -5.9,
+              -163.2,
+              0.0
+            ],
+            [
+              -269.4,
+              -6.9,
+              -168.0,
+              0.0
+            ],
+            [
+              -269.4,
+              -6.9,
+              -172.2,
+              0.0
+            ],
+            [
+              -269.4,
+              -6.9,
+              -176.2,
+              0.0
+            ],
+            [
+              -269.4,
+              -6.9,
+              179.2,
+              0.0
+            ],
+            [
+              -269.4,
+              -6.9,
+              174.9,
+              0.0
+            ],
+            [
+              -269.4,
+              -6.9,
+              170.8,
+              0.0
+            ],
+            [
+              -269.4,
+              -6.9,
+              166.0,
+              0.0
+            ],
+            [
+              -269.4,
+              -6.9,
+              161.2,
+              0.0
+            ],
+            [
+              -269.4,
+              -6.9,
+              156.4,
+              0.0
+            ],
+            [
+              -270.4,
+              -6.4,
+              151.6,
+              0.0
+            ],
+            [
+              -272.5,
+              -5.0,
+              146.7,
+              0.0
+            ],
+            [
+              -275.7,
+              -2.7,
+              142.2,
+              0.0
+            ],
+            [
+              -279.8,
+              0.9,
+              138.2,
+              0.0
+            ],
+            [
+              -287.3,
+              8.6,
+              133.0,
+              0.0
+            ],
+            [
+              -296.4,
+              19.4,
+              128.5,
+              0.0
+            ],
+            [
+              -309.2,
+              37.6,
+              123.5,
+              0.0
+            ],
+            [
+              -321.1,
+              57.5,
+              119.2,
+              0.0
+            ],
+            [
+              -332.0,
+              79.3,
+              115.1,
+              0.0
+            ],
+            [
+              -339.3,
+              97.2,
+              110.9,
+              0.0
+            ],
+            [
+              -346.9,
+              117.7,
+              110.3,
+              0.0
+            ],
+            [
+              -355.1,
+              139.9,
+              110.4,
+              0.0
+            ],
+            [
+              -362.5,
+              159.7,
+              110.5,
+              0.0
+            ],
+            [
+              -370.4,
+              180.8,
+              110.6,
+              0.0
+            ],
+            [
+              -377.9,
+              200.5,
+              110.6,
+              0.0
+            ],
+            [
+              -385.5,
+              220.6,
+              110.7,
+              0.0
+            ],
+            [
+              -393.0,
+              240.6,
+              110.7,
+              0.0
+            ],
+            [
+              -400.3,
+              259.8,
+              110.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              115.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              121.6,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              126.6,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              131.2,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              135.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              140.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              145.4,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              149.8,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              154.4,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              158.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              162.8,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              166.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              171.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              175.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -179.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -175.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -170.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -166.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -162.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -157.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -153.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -148.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -144.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -140.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -135.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -131.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -126.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -122.4,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -118.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -113.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -109.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -104.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -100.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -96.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -91.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -87.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -82.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -78.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -74.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -69.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -65.2,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -60.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -56.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -52.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -47.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -43.0,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -38.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -34.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -30.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -25.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -21.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -16.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -12.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -8.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -3.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              0.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              5.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              9.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              13.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              18.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              22.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              27.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              31.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              36.0,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              40.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              44.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              49.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              53.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              57.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              62.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              66.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              71.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              75.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              79.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              84.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              88.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              93.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              97.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              101.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              106.6,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              110.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              115.2,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              119.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              123.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              128.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              133.0,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              137.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              141.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              145.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              150.0,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              154.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              158.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              162.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              166.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              172.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              178.1,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -177.0,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -172.6,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -166.9,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -162.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -157.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -152.5,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -148.3,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -144.2,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -139.7,
+              0.0
+            ],
+            [
+              -404.7,
+              271.3,
+              -134.7,
+              0.0
+            ],
+            [
+              -404.9,
+              271.1,
+              -130.1,
+              0.0
+            ],
+            [
+              -405.9,
+              269.6,
+              -125.3,
+              0.0
+            ],
+            [
+              -407.6,
+              266.8,
+              -120.5,
+              0.0
+            ],
+            [
+              -409.8,
+              262.7,
+              -116.2,
+              0.0
+            ],
+            [
+              -413.4,
+              253.8,
+              -110.7,
+              0.0
+            ],
+            [
+              -417.4,
+              241.3,
+              -106.0,
+              0.0
+            ],
+            [
+              -422.4,
+              218.7,
+              -100.6,
+              0.0
+            ],
+            [
+              -425.4,
+              197.2,
+              -96.8,
+              0.0
+            ],
+            [
+              -427.4,
+              173.2,
+              -93.4,
+              0.0
+            ],
+            [
+              -428.0,
+              148.5,
+              -90.6,
+              0.0
+            ],
+            [
+              -427.7,
+              128.2,
+              -88.7,
+              0.0
+            ],
+            [
+              -426.8,
+              104.4,
+              -87.1,
+              0.0
+            ],
+            [
+              -425.2,
+              80.5,
+              -85.7,
+              0.0
+            ],
+            [
+              -423.2,
+              58.4,
+              -84.5,
+              0.0
+            ],
+            [
+              -421.0,
+              37.8,
+              -83.5,
+              0.0
+            ],
+            [
+              -418.5,
+              17.5,
+              -82.7,
+              0.0
+            ],
+            [
+              -415.6,
+              -4.0,
+              -81.9,
+              0.0
+            ],
+            [
+              -412.1,
+              -27.0,
+              -81.1,
+              0.0
+            ],
+            [
+              -408.7,
+              -48.3,
+              -80.5,
+              0.0
+            ],
+            [
+              -405.1,
+              -68.8,
+              -80.1,
+              0.0
+            ],
+            [
+              -401.3,
+              -90.2,
+              -79.6,
+              0.0
+            ],
+            [
+              -397.4,
+              -111.2,
+              -79.3,
+              0.0
+            ],
+            [
+              -393.3,
+              -132.5,
+              -79.1,
+              0.0
+            ],
+            [
+              -389.3,
+              -153.1,
+              -78.9,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -83.9,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -90.1,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -94.4,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -99.1,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -104.0,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -108.8,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -113.6,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -118.4,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -123.2,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -128.0,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -132.8,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -137.6,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -142.4,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -147.3,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -152.0,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -156.8,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -161.6,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -166.4,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -171.2,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              -175.4,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              179.1,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              174.4,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              169.9,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              165.5,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              161.4,
+              0.0
+            ],
+            [
+              -386.2,
+              -168.8,
+              157.3,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "two_stops",
+      "description": "Visit the ball, then the cube, in one request",
+      "seed": 0,
+      "passed": true,
+      "reason": "came within 356 mm of the ball; ended 430 mm from the cube",
+      "details": {
+        "ball_min_mm": 355.7,
+        "cube_end_mm": 429.5
+      },
+      "error": null,
+      "seconds": 11.49,
+      "model_calls": 3,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 612.2,
+          "y_mm": 455.6,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 674.3,
+          "y_mm": -486.1,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -670.2,
+          "y_mm": 680.6,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 845.8,
+          "y_mm": -56.9,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 927.7,
+          "y_mm": 432.2,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -711.7,
+          "y_mm": -2.3,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 612.2,
+          "y_mm": 455.6,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 674.3,
+          "y_mm": -486.1,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -670.2,
+          "y_mm": 680.6,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 845.8,
+          "y_mm": -56.9,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 927.7,
+          "y_mm": 432.2,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -711.7,
+          "y_mm": -2.3,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "go to the red ball and then to the blue cube",
+          "say": "I'm near the cube now.",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 3,
+          "seconds": 11.08,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 2.7,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 476.9,
+            "y_mm": -104.6,
+            "heading_deg": -65.0,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {
+                "direction": "front"
+              },
+              "ok": true,
+              "message": "I can see 3 thing(s)."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "red ball"
+              },
+              "ok": true,
+              "message": "I'm near ball_1 now. I can see ball_1 0.4 m away."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "cube_1"
+              },
+              "ok": true,
+              "message": "I'm near cube_1 now. I can see cube_1 0.4 m away."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              4.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              9.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              13.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              17.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              22.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              26.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              31.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              35.2,
+              0.0
+            ],
+            [
+              16.3,
+              11.8,
+              35.9,
+              0.0
+            ],
+            [
+              35.3,
+              25.6,
+              36.0,
+              0.0
+            ],
+            [
+              55.4,
+              40.2,
+              36.1,
+              0.0
+            ],
+            [
+              75.9,
+              55.2,
+              36.1,
+              0.0
+            ],
+            [
+              96.8,
+              70.5,
+              36.2,
+              0.0
+            ],
+            [
+              116.8,
+              85.1,
+              36.2,
+              0.0
+            ],
+            [
+              135.8,
+              99.1,
+              36.2,
+              0.0
+            ],
+            [
+              152.9,
+              111.6,
+              36.3,
+              0.0
+            ],
+            [
+              170.9,
+              124.8,
+              36.3,
+              0.0
+            ],
+            [
+              189.3,
+              138.3,
+              36.3,
+              0.0
+            ],
+            [
+              205.9,
+              150.5,
+              36.3,
+              0.0
+            ],
+            [
+              224.0,
+              163.8,
+              36.3,
+              0.0
+            ],
+            [
+              240.1,
+              175.7,
+              36.3,
+              0.0
+            ],
+            [
+              256.7,
+              187.9,
+              36.4,
+              0.0
+            ],
+            [
+              276.2,
+              202.2,
+              36.4,
+              0.0
+            ],
+            [
+              293.1,
+              214.7,
+              36.4,
+              0.0
+            ],
+            [
+              309.6,
+              226.8,
+              36.4,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              31.3,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              25.5,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              20.6,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              15.8,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              11.1,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              6.3,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              1.5,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              -3.3,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              -8.1,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              -12.9,
+              0.0
+            ],
+            [
+              324.1,
+              237.5,
+              -17.7,
+              0.0
+            ],
+            [
+              324.4,
+              237.3,
+              -22.5,
+              0.0
+            ],
+            [
+              326.0,
+              236.5,
+              -27.4,
+              0.0
+            ],
+            [
+              328.8,
+              234.8,
+              -32.1,
+              0.0
+            ],
+            [
+              332.6,
+              232.1,
+              -36.5,
+              0.0
+            ],
+            [
+              337.3,
+              228.2,
+              -40.5,
+              0.0
+            ],
+            [
+              346.6,
+              219.0,
+              -45.9,
+              0.0
+            ],
+            [
+              360.4,
+              203.1,
+              -50.4,
+              0.0
+            ],
+            [
+              375.9,
+              183.0,
+              -53.5,
+              0.0
+            ],
+            [
+              389.2,
+              164.0,
+              -55.9,
+              0.0
+            ],
+            [
+              401.4,
+              145.0,
+              -58.0,
+              0.0
+            ],
+            [
+              412.2,
+              126.9,
+              -59.8,
+              0.0
+            ],
+            [
+              424.2,
+              105.4,
+              -61.5,
+              0.0
+            ],
+            [
+              434.6,
+              85.5,
+              -62.9,
+              0.0
+            ],
+            [
+              443.7,
+              67.2,
+              -64.0,
+              0.0
+            ],
+            [
+              452.6,
+              48.5,
+              -65.0,
+              0.0
+            ],
+            [
+              459.6,
+              31.7,
+              -69.2,
+              0.0
+            ],
+            [
+              464.9,
+              15.4,
+              -73.9,
+              0.0
+            ],
+            [
+              469.4,
+              -3.6,
+              -78.3,
+              0.0
+            ],
+            [
+              472.8,
+              -24.0,
+              -82.1,
+              0.0
+            ],
+            [
+              475.0,
+              -44.7,
+              -85.1,
+              0.0
+            ],
+            [
+              476.3,
+              -65.7,
+              -87.5,
+              0.0
+            ],
+            [
+              476.8,
+              -86.1,
+              -89.3,
+              0.0
+            ],
+            [
+              476.9,
+              -104.6,
+              -84.3,
+              0.0
+            ],
+            [
+              476.9,
+              -104.6,
+              -79.2,
+              0.0
+            ],
+            [
+              476.9,
+              -104.6,
+              -74.5,
+              0.0
+            ],
+            [
+              476.9,
+              -104.6,
+              -70.1,
+              0.0
+            ],
+            [
+              476.9,
+              -104.6,
+              -66.0,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "back_up",
+      "description": "Back up after arriving somewhere",
+      "seed": 0,
+      "passed": false,
+      "reason": "turned 176 deg",
+      "details": {
+        "forward_mm": -244.8,
+        "turned_deg": 176.3
+      },
+      "error": null,
+      "seconds": 11.29,
+      "model_calls": 3,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 851.6,
+          "y_mm": -83.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 905.3,
+          "y_mm": 444.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "go to the blue cube",
+          "say": "I'm near the cube now (as close as the space allows).",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 5.87,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 2.75,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 283.3,
+            "y_mm": -135.8,
+            "heading_deg": -25.1,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {
+                "direction": "front"
+              },
+              "ok": true,
+              "message": "I can see 4 thing(s)."
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "cube_1",
+                "relation": "on"
+              },
+              "ok": true,
+              "message": "I'm near cube_1 now (as close as the space allows). I can see cube_1 0.4 m away."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              7.6,
+              -0.4,
+              -4.8,
+              0.0
+            ],
+            [
+              23.8,
+              -2.6,
+              -9.5,
+              0.0
+            ],
+            [
+              48.2,
+              -7.8,
+              -13.1,
+              0.0
+            ],
+            [
+              68.7,
+              -13.1,
+              -15.4,
+              0.0
+            ],
+            [
+              92.3,
+              -20.2,
+              -17.8,
+              0.0
+            ],
+            [
+              113.7,
+              -27.5,
+              -19.6,
+              0.0
+            ],
+            [
+              133.1,
+              -34.8,
+              -21.1,
+              0.0
+            ],
+            [
+              151.9,
+              -42.4,
+              -22.3,
+              0.0
+            ],
+            [
+              171.8,
+              -51.6,
+              -26.9,
+              0.0
+            ],
+            [
+              189.6,
+              -61.6,
+              -31.0,
+              0.0
+            ],
+            [
+              207.4,
+              -73.1,
+              -34.4,
+              0.0
+            ],
+            [
+              225.3,
+              -86.2,
+              -37.3,
+              0.0
+            ],
+            [
+              241.1,
+              -98.7,
+              -39.3,
+              0.0
+            ],
+            [
+              256.4,
+              -111.7,
+              -40.9,
+              0.0
+            ],
+            [
+              271.5,
+              -125.1,
+              -42.0,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              -37.2,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              -33.1,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              -28.8,
+              0.0
+            ]
+          ]
+        },
+        {
+          "utterance": "back up a little",
+          "say": "I'm back at my start point.",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 1,
+          "seconds": 5.03,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 1.62,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 283.3,
+            "y_mm": -135.8,
+            "heading_deg": -25.1,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 78.6,
+            "y_mm": 4.4,
+            "heading_deg": 158.6,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "start",
+                "relation": "behind"
+              },
+              "ok": true,
+              "message": "I'm back at my start point."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              283.3,
+              -135.8,
+              -20.7,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              -15.5,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              -10.4,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              -6.0,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              -1.3,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              3.6,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              8.4,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              13.1,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              18.0,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              22.7,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              28.3,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              32.4,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              37.1,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              41.9,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              46.7,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              51.6,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              56.3,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              61.2,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              65.9,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              70.8,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              75.5,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              80.4,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              85.1,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              90.0,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              94.7,
+              0.0
+            ],
+            [
+              283.3,
+              -135.8,
+              99.5,
+              0.0
+            ],
+            [
+              283.2,
+              -135.4,
+              104.3,
+              0.0
+            ],
+            [
+              282.6,
+              -133.7,
+              109.2,
+              0.0
+            ],
+            [
+              281.4,
+              -130.7,
+              113.9,
+              0.0
+            ],
+            [
+              279.2,
+              -126.5,
+              118.2,
+              0.0
+            ],
+            [
+              274.0,
+              -118.3,
+              123.8,
+              0.0
+            ],
+            [
+              266.5,
+              -108.4,
+              128.6,
+              0.0
+            ],
+            [
+              258.1,
+              -98.8,
+              132.6,
+              0.0
+            ],
+            [
+              245.8,
+              -86.7,
+              137.2,
+              0.0
+            ],
+            [
+              229.9,
+              -73.4,
+              141.8,
+              0.0
+            ],
+            [
+              213.5,
+              -61.5,
+              145.5,
+              0.0
+            ],
+            [
+              195.9,
+              -50.3,
+              148.7,
+              0.0
+            ],
+            [
+              176.2,
+              -39.1,
+              151.6,
+              0.0
+            ],
+            [
+              158.3,
+              -29.9,
+              153.7,
+              0.0
+            ],
+            [
+              140.1,
+              -21.3,
+              155.4,
+              0.0
+            ],
+            [
+              120.7,
+              -12.7,
+              156.8,
+              0.0
+            ],
+            [
+              101.5,
+              -4.7,
+              157.8,
+              0.0
+            ],
+            [
+              82.8,
+              2.8,
+              158.5,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "closest",
+      "description": "Resolve 'the one closest to you' from what it just saw",
+      "seed": 0,
+      "passed": true,
+      "reason": "333 mm from red_ball (nearest now: red_ball)",
+      "details": {
+        "target": "red_ball",
+        "distance_mm": 333.5
+      },
+      "error": null,
+      "seconds": 9.19,
+      "model_calls": 5,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 449.8,
+          "y_mm": 124.5,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 919.5,
+          "y_mm": -378.9,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -676.2,
+          "y_mm": 684.5,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 844.6,
+          "y_mm": -51.5,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 932.1,
+          "y_mm": 429.7,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -705.4,
+          "y_mm": -1.8,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 449.8,
+          "y_mm": 124.5,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 919.5,
+          "y_mm": -378.9,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": -676.2,
+          "y_mm": 684.5,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 844.6,
+          "y_mm": -51.5,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 932.1,
+          "y_mm": 429.7,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -705.4,
+          "y_mm": -1.8,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "what do you see?",
+          "say": "I see a red ball in front of me, a green cylinder in the middle, and a blue cube to my right. There's also a brown box on the left side.",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 3.31,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": null,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {
+                "direction": "front"
+              },
+              "ok": true,
+              "message": "I can see 4 thing(s)."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": []
+        },
+        {
+          "utterance": "go to the one closest to you",
+          "say": "I've moved towards the ball, which is now about 0.4 meters away from me. What would you like to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 3,
+          "seconds": 5.56,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 2.42,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 125.6,
+            "y_mm": 46.3,
+            "heading_deg": 17.2,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "ball_1",
+                "relation": "closest"
+              },
+              "ok": false,
+              "message": "relation must be one of ['near', 'behind', 'in_front_of', 'left_of', 'right_of', 'between', 'on']"
+            },
+            {
+              "tool": "go_to",
+              "args": {
+                "target": "ball_1",
+                "relation": "near"
+              },
+              "ok": true,
+              "message": "I'm near ball_1 now (as close as the space allows). I can see ball_1 0.4 m away."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              7.6,
+              0.4,
+              4.9,
+              0.0
+            ],
+            [
+              18.9,
+              2.0,
+              9.4,
+              0.0
+            ],
+            [
+              33.0,
+              5.0,
+              13.9,
+              0.0
+            ],
+            [
+              48.6,
+              9.6,
+              18.0,
+              0.0
+            ],
+            [
+              66.0,
+              16.0,
+              22.0,
+              0.0
+            ],
+            [
+              85.5,
+              24.8,
+              25.8,
+              0.0
+            ],
+            [
+              103.9,
+              34.2,
+              28.3,
+              0.0
+            ],
+            [
+              121.7,
+              44.1,
+              29.4,
+              0.0
+            ],
+            [
+              125.6,
+              46.3,
+              25.1,
+              0.0
+            ],
+            [
+              125.6,
+              46.3,
+              20.9,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "left_of_box",
+      "description": "Go to the left side of the box",
+      "seed": 0,
+      "passed": false,
+      "reason": "+0 mm to the left of the box; 856 mm from box",
+      "details": {
+        "lateral_mm": 0.0,
+        "distance_mm": 855.6,
+        "contacts": 0,
+        "reflexes": 0
+      },
+      "error": null,
+      "seconds": 5.72,
+      "model_calls": 4,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 1161.6,
+          "y_mm": -753.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 855.3,
+          "y_mm": 24.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 604.4,
+          "y_mm": 171.2,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 668.7,
+          "y_mm": -282.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 451.3,
+          "y_mm": 432.0,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 1161.6,
+          "y_mm": -753.8,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 855.3,
+          "y_mm": 24.4,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -743.5,
+          "y_mm": -4.5,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "go to the left side of the box",
+          "say": "I turned left and couldn't find any objects in that direction. What would you like to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 4,
+          "seconds": 5.55,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 0.52,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 89.3,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "observe",
+              "args": {
+                "direction": "left"
+              },
+              "ok": true,
+              "message": "I turned left 90 degrees. I see no distinct objects in front of me."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              5.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              10.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              15.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              20.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              25.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              30.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              34.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              39.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              44.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              49.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              53.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              58.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              63.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              68.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              72.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              76.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              81.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              85.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              89.2,
+              0.0
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "turn_around_twice",
+      "description": "A repeated command is done again",
+      "seed": 1,
+      "passed": true,
+      "reason": "turned +179 deg (want +180)",
+      "details": {
+        "heading_change_deg": 179.1,
+        "error_deg": 0.9
+      },
+      "error": null,
+      "seconds": 8.99,
+      "model_calls": 4,
+      "actions": {
+        "completed": 0,
+        "failed": 0
+      },
+      "reflexes": 0,
+      "camera": {
+        "hfov_deg": 65.0,
+        "vfov_deg": 52.0,
+        "range_mm": 2600.0,
+        "image_w": 512,
+        "image_h": 384,
+        "mast_pivot_x_mm": 25.0,
+        "mast_pivot_z_mm": 210.0,
+        "cam_forward_mm": 42.0,
+        "cam_up_mm": 76.0,
+        "base_pitch_deg": -9.0
+      },
+      "objects_start": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 680.4,
+          "y_mm": 155.1,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 681.2,
+          "y_mm": -141.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 390.0,
+          "y_mm": 368.6,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 855.1,
+          "y_mm": -19.9,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 954.4,
+          "y_mm": 369.7,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -747.0,
+          "y_mm": 1.9,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "objects_end": [
+        {
+          "id": "red_ball",
+          "label": "Red Ball",
+          "shape": "sphere",
+          "x_mm": 680.4,
+          "y_mm": 155.1,
+          "z_mm": 0.0,
+          "width_mm": 96.0,
+          "depth_mm": 96.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "blue_cube",
+          "label": "Blue Cube",
+          "shape": "box",
+          "x_mm": 681.2,
+          "y_mm": -141.2,
+          "z_mm": 0.0,
+          "width_mm": 110.0,
+          "depth_mm": 110.0,
+          "height_mm": 110.0
+        },
+        {
+          "id": "yellow_duck",
+          "label": "Yellow Toy Duck",
+          "shape": "sphere",
+          "x_mm": 390.0,
+          "y_mm": 368.6,
+          "z_mm": 0.0,
+          "width_mm": 90.0,
+          "depth_mm": 90.0,
+          "height_mm": 96.0
+        },
+        {
+          "id": "green_mug",
+          "label": "Green Mug",
+          "shape": "cylinder",
+          "x_mm": 855.1,
+          "y_mm": -19.9,
+          "z_mm": 0.0,
+          "width_mm": 86.0,
+          "depth_mm": 86.0,
+          "height_mm": 116.0
+        },
+        {
+          "id": "cardboard_box",
+          "label": "Cardboard Box",
+          "shape": "box",
+          "x_mm": 954.4,
+          "y_mm": 369.7,
+          "z_mm": 0.0,
+          "width_mm": 220.0,
+          "depth_mm": 220.0,
+          "height_mm": 190.0
+        },
+        {
+          "id": "charging_dock",
+          "label": "Charging Dock",
+          "shape": "box",
+          "x_mm": -747.0,
+          "y_mm": 1.9,
+          "z_mm": 0.0,
+          "width_mm": 180.0,
+          "depth_mm": 220.0,
+          "height_mm": 130.0
+        }
+      ],
+      "transcript": [
+        {
+          "utterance": "turn around",
+          "say": "I've turned around and I see a yellow duck behind me and your charging dock straight ahead! What would you like to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 4.07,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 0.66,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 0.0,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 179.1,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "turn",
+              "args": {
+                "direction": "around"
+              },
+              "ok": true,
+              "message": "I turned around 180 degrees."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              5.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              11.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              15.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              20.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              25.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              30.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              34.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              39.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              44.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              49.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              54.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              59.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              63.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              68.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              73.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              78.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              82.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              87.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              92.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              97.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              102.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              106.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              111.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              116.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              121.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              125.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              130.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              135.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              140.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              144.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              149.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              154.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              159.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              163.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              167.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              172.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              176.2,
+              0.0
+            ]
+          ]
+        },
+        {
+          "utterance": "turn around again",
+          "say": "I've turned around again and I see a blue cube, a red ball, a green mug, and a cardboard box in front of me! What would you like to do next?",
+          "final_status": "completed",
+          "backend": "llamacpp:LFM3-VL-2B-Q4_K_M",
+          "responses": 1,
+          "model_calls": 2,
+          "seconds": 4.75,
+          "restarted_before": false,
+          "error": null,
+          "first_motion_s": 1.19,
+          "snapshots": [],
+          "pose_before": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": 179.1,
+            "head_tilt_deg": 0.0
+          },
+          "pose_after": {
+            "x_mm": 0.0,
+            "y_mm": 0.0,
+            "heading_deg": -1.8,
+            "head_tilt_deg": 0.0
+          },
+          "skills": [
+            {
+              "tool": "turn",
+              "args": {
+                "direction": "around"
+              },
+              "ok": true,
+              "message": "I turned around 180 degrees."
+            }
+          ],
+          "actions": [],
+          "reflexes": [],
+          "trajectory": [
+            [
+              0.0,
+              0.0,
+              -175.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -170.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -165.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -160.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -155.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -150.4,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -146.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -141.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -136.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -131.2,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -126.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -122.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -117.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -112.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -107.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -102.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -98.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -93.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -88.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -83.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -78.8,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -74.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -69.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -64.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -59.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -54.9,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -50.1,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -45.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -40.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -36.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -31.3,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -26.7,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -21.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -17.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -13.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -9.6,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -5.5,
+              0.0
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}
