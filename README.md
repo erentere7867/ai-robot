@@ -50,15 +50,56 @@ sudo systemctl start sprocket-llm sprocket                      # or: python -m 
 
 See [docs/ventuno_q.md](docs/ventuno_q.md) for the hardware (parts, wiring, cameras, lidar, microphones) and bring-up.
 
-## Measuring
+## Testing & Measuring
+
+Testing spans unit-level subsystem tests up to full simulator scenario grading:
+
+### 1. Subsystem unit & integration tests (`pytest`)
+
+330 tests without needing a model server or hardware, completing in < 1 minute:
 
 ```bash
-python -m pytest -q                                              # ~330 tests, no model needed, < 1 min
-python scripts/eval_scenarios.py --scenarios people --no-server-start   # graded tasks in the simulator
-python scripts/eval_decisions.py                                 # first-decision accuracy, ~1 min
-python scripts/probe_latency.py --pin                            # where inference time goes
-python scripts/bench_control.py                                  # control-loop timing under load
-python scripts/train_detector.py                                 # render a dataset, fine-tune, export NCNN
+python -m pytest -q                                              # full suite (330 tests)
+
+# Or test individual subsystems:
+pytest tests/test_control.py                                     # 50 Hz control loop, behaviors, safety monitor
+pytest tests/test_people.py                                      # 4-mic DOA voice localization & person tracking
+pytest tests/test_perception.py                                  # 3-camera rig, wide-lens geometry, detector, lidar
+pytest tests/test_bodies.py                                      # SimBody, MuJoCo PhysicsBody, VentunoBody
+pytest tests/test_skills.py                                      # go_to, follow, observe, circle_around
+pytest tests/test_runtime.py                                     # harness, reflexes, watchdog, telemetry
+pytest tests/test_cognition.py                                   # agent loop, prompt generation, tool calls
+pytest tests/test_memory.py                                      # SQLite + FTS5 facts, episode consolidation
+pytest tests/test_eval.py                                        # simulator scenario graders
+```
+
+### 2. Simulator scenario evaluations (`scripts/eval_scenarios.py`)
+
+Runs end-to-end tasks in the MuJoCo simulator, evaluated against ground truth:
+
+```bash
+python scripts/eval_scenarios.py --backend null --scenarios greet       # smoke test harness/graders without LLM
+python scripts/eval_scenarios.py --list                                 # list all scenario sets & suites
+python scripts/eval_scenarios.py --scenarios people --no-server-start   # test "come here", "follow me", etc.
+python scripts/eval_scenarios.py --scenarios core,tasks,realtime        # test navigation, multi-step tasks, moving targets
+```
+
+### 3. Decisions & benchmarks
+
+```bash
+python scripts/eval_decisions.py                                 # first-decision tool call accuracy (~1 min)
+python scripts/probe_latency.py --pin                            # breakdown of inference latencies
+python scripts/bench_control.py                                  # control-loop timing & lateness under load
+python scripts/bench_localization.py                             # correlative scan-to-map matching drift
+python scripts/eval_vision.py                                    # camera projection & detector mAP
+python scripts/train_detector.py                                 # render synthetic dataset, train, export NCNN
+```
+
+### 4. Hardware bring-up tests (on the robot)
+
+```bash
+python scripts/ventuno/mcu_check.py --wiggle                    # MCU RPC link, telemetry & motor watchdog
+python scripts/ventuno/calibrate_camera.py front                # camera calibration (front, rear_left, rear_right)
 ```
 
 ## Layout
