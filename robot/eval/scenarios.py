@@ -790,6 +790,8 @@ class Scenario:
     hard: bool = False  # the harder set: repeats, chained steps, references to earlier turns
     tasks: bool = False  # several-step tasks in a person's own words (what the task list is for)
     realtime: bool = False  # moving objects, following, interruptions
+    paraphrase: bool = False  # held-out rewordings of the other sets (see PARAPHRASE_SCENARIOS)
+    session: bool = False  # requests that failed in a real session
     # Per utterance index: seconds to keep watching after the reply (persistent behaviours, moving scenes).
     hold_s: tuple[float, ...] = ()
     # Per utterance index: send it this many seconds after the previous one, without waiting for its reply.
@@ -989,7 +991,77 @@ TASK_SCENARIOS: tuple[Scenario, ...] = (
     Scenario("look_back_tell", "Turn around and say what is there", ("look behind you and tell me what you see",),
              grade_look_back_and_tell, SceneSetup(overrides=_BOX_BEHIND, jitter_mm=40.0), tasks=True),
 )
-SCENARIO_LIST = SCENARIO_LIST + HARD_SCENARIOS + REALTIME_SCENARIOS + TASK_SCENARIOS
+# Held out: the same graders in other words. Written before any change made against them and never used
+# to write a word-matching rule, so they measure whether an ability is general or only fits the phrasing
+# it was developed on. Keep it that way: fix failures here with general mechanisms, then add a *new*
+# paraphrase, never a rule for this one.
+PARAPHRASE_SCENARIOS: tuple[Scenario, ...] = (
+    Scenario("p_face_away", "Face the other way", ("face the other way",), _turn_grader(180.0, 30.0),
+             paraphrase=True),
+    Scenario("p_check_left", "Turn to see what is on the left", ("check what's on your left side",),
+             _turn_grader(90.0, 35.0), paraphrase=True),
+    Scenario("p_scoot", "Small forward move", ("scoot forward a bit",), grade_move_forward, paraphrase=True),
+    Scenario("p_head_ball", "Go to the ball", ("head over to the red ball please",), grade_go_to_ball,
+             paraphrase=True),
+    Scenario("p_get_behind", "Behind the box, no look first", ("can you get behind the cardboard box?",),
+             grade_behind_box, SceneSetup(overrides={"cardboard_box": (900.0, 400.0)}), paraphrase=True),
+    Scenario("p_park_between", "Between ball and cube", ("park yourself between the blue cube and the red ball",),
+             grade_between, SceneSetup(overrides={"green_mug": (1050.0, -350.0), "red_ball": (700.0, 240.0),
+                                                  "blue_cube": (650.0, -240.0)}, jitter_mm=50.0), paraphrase=True),
+    Scenario("p_where_duck", "Find a duck behind it", ("where did the rubber duck go?",), grade_find_hidden,
+             SceneSetup(overrides={"yellow_duck": (-800.0, 350.0)}), paraphrase=True),
+    Scenario("p_charge", "Go to the dock", ("your battery is low, go charge yourself",), grade_go_to_dock,
+             paraphrase=True),
+    Scenario("p_return", "Out and back over two turns", ("drive over to the ball", "ok now return to where you began"),
+             grade_come_back, paraphrase=True),
+    Scenario("p_inventory", "Name four families", ("take a look around and list what's in here",),
+             grade_look_around_report, paraphrase=True),
+    Scenario("p_name", "Name after restart", ("I'm Deniz, nice to meet you", "do you remember who I am?"),
+             _recall_grader(r"\bdeniz\b", "name"), restart_before=frozenset({1}), paraphrase=True),
+    Scenario("p_rotate_45", "Stated angle", ("rotate 45 degrees to the right",), _turn_grader(-45.0, 15.0),
+             paraphrase=True),
+    Scenario("p_dance", "Dance", ("show me your dance moves!",), grade_dance, paraphrase=True),
+    Scenario("p_sad", "Sad face", ("can you look sad?",), grade_sad_face, paraphrase=True),
+    Scenario("p_ball_color", "Colour question", ("which colour is that ball over there?",), grade_ball_color,
+             paraphrase=True),
+    Scenario("p_lap", "Circle the box", ("do a lap around the box",), grade_circle_box,
+             SceneSetup(overrides=_ROOMY_BOX, jitter_mm=40.0), paraphrase=True),
+    Scenario("p_two_stops", "Ball then cube", ("visit the red ball first and after that the blue cube",),
+             grade_two_stops, SceneSetup(overrides={"red_ball": (650.0, 450.0), "blue_cube": (650.0, -450.0),
+                                                    "yellow_duck": (-700.0, 700.0)}, jitter_mm=50.0), paraphrase=True),
+    Scenario("p_reverse", "Back up after arriving", ("go to the blue cube", "reverse a bit"), grade_back_up,
+             paraphrase=True),
+    Scenario("p_nearest", "Nearest object", ("what's around you?", "drive to whichever one is nearest"),
+             grade_closest, SceneSetup(overrides={"red_ball": (480.0, 120.0), "blue_cube": (900.0, -350.0),
+                                                  "yellow_duck": (-700.0, 700.0)}, jitter_mm=40.0), paraphrase=True),
+    Scenario("p_left_side", "Left of the box", ("get on the left side of the box",), grade_left_of_box,
+             SceneSetup(overrides={"cardboard_box": (900.0, 0.0), "green_mug": (1150.0, -700.0)}), paraphrase=True),
+    Scenario("p_there_back", "Out and back in one request", ("drive up to that ball and then come back here",),
+             grade_there_and_back, SceneSetup(overrides={"red_ball": (1000.0, 300.0), "cardboard_box": (-300.0, -1000.0),
+                                                        "yellow_duck": (-700.0, 700.0)}, jitter_mm=60.0),
+             paraphrase=True),
+    Scenario("p_whats_behind", "Turn and report", ("what's behind you?",), grade_look_back_and_tell,
+             SceneSetup(overrides=_BOX_BEHIND, jitter_mm=40.0), paraphrase=True),
+    Scenario("p_is_box", "Yes to a box in view", ("is there a cardboard box in front of you?",), grade_sees_box,
+             paraphrase=True),
+)
+# Requests from a real session (2026-11-01 recording) that went wrong. Unlike the paraphrases these are a
+# development set: fixing them is the point.
+SESSION_SCENARIOS: tuple[Scenario, ...] = (
+    Scenario("s_behind_it_back", "Look at the cube, go behind it, go back",
+             ("look at the blue cube", "go behind it", "now go back"), grade_come_back,
+             SceneSetup(overrides={"blue_cube": (900.0, -300.0)}), session=True),
+    Scenario("s_look_back", "'Look back' turns round and reports", ("look back",), grade_look_back_and_tell,
+             SceneSetup(overrides=_BOX_BEHIND, jitter_mm=40.0), session=True),
+    Scenario("s_circle_behind", "Circle the thing behind, after other turns",
+             ("hey", "do a circle around the thing behind you"), grade_circle_box,
+             SceneSetup(overrides=_BOX_BEHIND, jitter_mm=40.0), session=True),
+    Scenario("s_short_ball", "Terse request", ("go to red ball",), grade_go_to_ball, session=True),
+    Scenario("s_typo_box", "Typo in a yes/no question", ("do you see a cardboard boz",), grade_sees_box,
+             session=True),
+)
+SCENARIO_LIST = (SCENARIO_LIST + HARD_SCENARIOS + REALTIME_SCENARIOS + TASK_SCENARIOS + PARAPHRASE_SCENARIOS
+                 + SESSION_SCENARIOS)
 SCENARIOS: dict[str, Scenario] = {s.name: s for s in SCENARIO_LIST}
 
 
@@ -999,7 +1071,13 @@ def select_scenarios(spec: str) -> list[Scenario]:
     if not names or names == ["all"]:
         return list(SCENARIO_LIST)
     if names == ["core"]:
-        return [s for s in SCENARIO_LIST if not s.hard and not s.realtime and not s.tasks]
+        return [s for s in SCENARIO_LIST if not (s.hard or s.realtime or s.tasks or s.paraphrase or s.session)]
+    if names == ["paraphrase"]:
+        return [s for s in SCENARIO_LIST if s.paraphrase]
+    if names == ["session"]:
+        return [s for s in SCENARIO_LIST if s.session]
+    if names == ["dev"]:  # everything except the held-out paraphrases
+        return [s for s in SCENARIO_LIST if not s.paraphrase]
     if names == ["hard"]:
         return [s for s in SCENARIO_LIST if s.hard]
     if names == ["realtime"]:
