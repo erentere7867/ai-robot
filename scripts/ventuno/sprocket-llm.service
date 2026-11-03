@@ -1,0 +1,19 @@
+[Unit]
+Description=llama-server for Sprocket (pinned to its own cores, away from control and perception)
+After=network.target
+
+[Service]
+User=@USER@
+CPUAffinity=@INFER_CPUS@
+Nice=5
+ExecStart=@RT@/llama.cpp/build/bin/llama-server \
+    -m @RT@/models/llm/LFM3-VL-2B-Q4_K_M.gguf --mmproj @RT@/models/llm/mmproj-LFM3-VL-2B-F16.gguf \
+    --host 127.0.0.1 --port 8080 -c 8192 -np 2 --jinja --temp 0 \
+    --reasoning auto --reasoning-format deepseek --no-reasoning-preserve --reasoning-budget 512 \
+    --swa-full --checkpoint-min-step 256 \
+    --threads @INFER_THREADS@ --threads-batch @INFER_THREADS@ --mlock
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

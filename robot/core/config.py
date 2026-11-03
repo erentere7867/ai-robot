@@ -203,6 +203,7 @@ class PerceptionConfig:
     realtime_priority: int = 0        # SCHED_FIFO priority for that thread (0: leave it normal)
     collision_monitor: bool = True    # limit every speed command to what can still stop in time
     tune_process: bool = False        # GC freeze, 1 ms GIL switch interval, mlockall (on the robot)
+    localization: bool = False        # correct odometry drift by matching lidar scans to the map
 
     def __post_init__(self) -> None:
         if not 0 <= self.realtime_priority <= 99:
@@ -229,7 +230,7 @@ class RobotConfig:
     # "kinematic" | "physics" (simulated) | "serial" (a USB motor board) | "mcu" (VENTUNO Q's on-board STM32H5)
     body_backend: str = "kinematic"
     serial_port: str = "/dev/ttyACM0"  # the motor microcontroller (firmware/base_controller)
-    camera: str = "sim"  # "sim" | "picamera" (Pi camera module) | "csi" (Jetson camera) | "usb"
+    camera: str = "sim"  # "sim" | "picamera" (Pi camera module) | "csi" (MIPI camera, GStreamer) | "usb"
     spatial_map_path: Path = field(
         default_factory=lambda: Path("~/robot-runtime/data/spatial_map.json").expanduser()
     )

@@ -12,9 +12,9 @@ dependencies = [
 
 [project.optional-dependencies]
 audio = ["sounddevice>=0.5"]
-# The fast layer's detector. On a Raspberry Pi add `ncnn` (the NCNN runtime) for the exported model.
+# Training and exporting the fast layer's detector (on the laptop); the robot runs the NCNN export.
 perception = ["ultralytics>=8.3", "opencv-python-headless>=4.9"]
-robot = ["pyserial>=3.5"]  # the real robot's motor microcontroller
+robot = ["pyserial>=3.5", "msgpack>=1.0", "ncnn"]  # the real robot: MCU link (Arduino Router), lidar, detector
 face = ["pygame-ce>=2.5"]
 dev = [
     "pytest>=8.0",
@@ -32,7 +32,7 @@ build-backend = "setuptools.build_meta"
 include = ["robot*"]
 
 [tool.setuptools.data-files]
-"share/companion-robot/config" = ["config/robot.yaml", "config/robot.pi5.yaml", "config/body.yaml", "config/SOUL.md", "config/companion_r1.xml", "config/companion_r1_physics.xml"]
+"share/companion-robot/config" = ["config/robot.yaml", "config/robot.ventuno.yaml", "config/body.yaml", "config/SOUL.md", "config/companion_r1.xml", "config/companion_r1_physics.xml"]
 "share/companion-robot/config/meshes" = ["config/meshes/*.stl"]
 
 [tool.pytest.ini_options]

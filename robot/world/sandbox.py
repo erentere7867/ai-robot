@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import atexit
 import base64
+import concurrent.futures
 import math
+import queue
 import subprocess
 import sys
-import concurrent.futures
-import queue
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path

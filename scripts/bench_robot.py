@@ -1,7 +1,7 @@
 """How fast is the robot on this machine? Run it on the Raspberry Pi (or the laptop, to compare).
 
-    python scripts/bench_pi.py                 # detector + fast-loop tick (+ decisions if llama-server runs)
-    python scripts/bench_pi.py --threads 4     # NCNN threads (a Pi 5 has 4 cores)
+    python scripts/bench_robot.py              # detector + fast-loop tick (+ decisions if llama-server runs)
+    python scripts/bench_robot.py --threads 2  # NCNN threads (the VENTUNO Q gives perception its fast cores)
 
 Reports per-frame detector time for each runtime that is installed (NCNN without PyTorch, PyTorch CPU,
 PyTorch CUDA), the cost of one fast-loop tick, and the language model's time per decision.

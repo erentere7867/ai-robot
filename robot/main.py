@@ -45,6 +45,7 @@ from robot.perception.camera import SimCamera
 from robot.perception.detector import VLMDetector
 from robot.perception.geometry import CameraModel
 from robot.skills import SkillContext, build_default_registry
+from robot.world.localization import LocalizedBody, Localizer
 from robot.world.sandbox import SimulationSandbox
 from robot.world.spatial_map import SpatialMap
 from robot.world.state import WorldState
@@ -91,6 +92,11 @@ class RobotHarness:
         self.consolidator = MemoryConsolidator(self.bus, self.memory)
         self.world = WorldState(self.bus, clock=self.clock, sandbox=self.sandbox)
         self.spatial_map = SpatialMap(self.clock)
+        # Lidar localization: everything downstream reads the corrected (map-frame) pose.
+        self.localizer: Localizer | None = None
+        if self.config.perception.localization and self.config.perception.lidar != "off":
+            self.localizer = Localizer(self.spatial_map)
+            self.body = LocalizedBody(self.body, self.localizer)
         self.planner = GridPlanner(room_half_extent_mm=self.spatial_map.half, resolution_mm=50.0)
         camera_model = CameraModel(self.sandbox.cam_width, self.sandbox.cam_height)
         if self.config.camera == "sim":
@@ -173,6 +179,7 @@ class RobotHarness:
         self.fast = FastLoop(
             bus=self.bus, clock=self.clock, body=self.body, camera=self.camera, spatial_map=self.spatial_map,
             planner=self.planner, detector=self.fast_detector or self.detector, lidar=self.lidar,
+            localizer=self.localizer,
             rate_hz=pcfg.loop_hz,
             continuous=isinstance(self.clock, RealClock) and self.fast_detector is not None,
             monitor=CollisionMonitor(half_length_mm=0.5 * dims.length_mm, half_width_mm=0.5 * dims.width_mm)
@@ -279,6 +286,8 @@ class RobotHarness:
         try:
             body_pose = BodyPose(float(pose["x_mm"]), float(pose["y_mm"]), float(pose["heading_deg"]),
                                  float(pose.get("head_tilt_deg", 0.0)))
+            if self.localizer is not None:
+                body_pose = self.localizer.to_map(body_pose)  # events carry raw odometry
             self.spatial_map.update_range(body_pose, float(sensors.get("front_tof_mm", float("inf"))))
         except (KeyError, TypeError, ValueError):
             return
@@ -353,7 +362,7 @@ class RobotHarness:
             if self._llama_client is not None and await self._llama_client.ensure_server_started():
                 await self.agent.warm_up(self.prompts.system_prompt)
             if self.config.body_backend not in ("serial", "mcu"):
-                self.sandbox.bind(self.body)  # simulated sensors; a real body has its own
+                self.sandbox.bind(getattr(self.body, "raw", self.body))  # simulated sensors; a real body has its own
             self.spatial_map.load(self.config.spatial_map_path)
             start = self.body.pose()
             self.spatial_map.places["start"] = (start.x_mm, start.y_mm)

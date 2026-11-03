@@ -67,7 +67,7 @@ class FastLoop:
     def __init__(self, *, bus: Any, clock: Any, body: Any, camera: Any, spatial_map: Any, planner: Any,
                  detector: Any = None, rate_hz: float = 20.0, continuous: bool = True, lidar: Any = None,
                  monitor: Any = None, threaded: bool = False, control_cores: list[int] | None = None,
-                 perception_cores: list[int] | None = None, priority: int = 0) -> None:
+                 perception_cores: list[int] | None = None, priority: int = 0, localizer: Any = None) -> None:
         self.bus = bus
         self.clock = clock
         self.body = body
@@ -77,6 +77,7 @@ class FastLoop:
         self.detector = detector
         self.lidar = lidar  # robot.perception.lidar source, or None
         self.monitor = monitor  # robot.control.safety.CollisionMonitor, or None
+        self.localizer = localizer  # robot.world.localization.Localizer, or None
         self.limit: Any = None  # the monitor's last verdict (for the dashboard)
         self._scan_stamp = -math.inf
         self.threaded = threaded and continuous
@@ -215,6 +216,7 @@ class FastLoop:
                 "detect_hz": round(self.detect_hz, 1), "tick_ms": round(self.tick_ms, 2),
                 "detector": type(self.detector).__name__ if self.detector else None,
                 "control_hz": round(1.0 / self.dt, 1), "realtime": self.realtime, "timing": self.stats.summary(),
+                "localization": self.localizer.snapshot() if self.localizer is not None else None,
                 "safety": None if self.limit is None else {"reason": self.limit.reason,
                                                           "clearance_mm": round(min(self.limit.clearance_mm, 9e3))}}
 
@@ -364,7 +366,10 @@ class FastLoop:
         if scan is None or scan.stamp == self._scan_stamp:
             return
         self._scan_stamp = scan.stamp
-        self.world.update_scan(scan.pose, scan.angles_deg, scan.ranges_mm)
+        pose = scan.pose
+        if self.localizer is not None:  # match against the map first, then add the scan where it fits
+            pose = self.localizer.correct(pose, scan.angles_deg, scan.ranges_mm)
+        self.world.update_scan(pose, scan.angles_deg, scan.ranges_mm)
 
     # -- loop ------------------------------------------------------------------------------------
     def _body_busy(self) -> bool:
@@ -448,7 +453,7 @@ class FastLoop:
             if end > deadline:
                 self.stats.overruns += 1
                 deadline = end
-            time.sleep(max(0.0, deadline - time.perf_counter()))  # precise; the loop has nothing else to do
+            time.sleep(max(0.0, deadline - time.perf_counter()))  # noqa: ASYNC251 - precise; own thread, nothing else to run
             await asyncio.sleep(0)  # run callbacks that arrived meanwhile (detections, start/cancel)
         if self.behavior is not None:
             self._finish(Done(False, "Stopped: shutting down."))

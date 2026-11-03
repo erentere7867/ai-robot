@@ -333,11 +333,12 @@ async def test_auto_backend_backoff_prevents_repeated_failed_requests():
     assert primary.calls == 1
 
 
-def test_pi_profile_and_strict_response_validation():
-    cfg = RobotConfig.from_yaml("config/robot.pi5.yaml")
-    assert cfg.max_queue_size == 64
-    assert cfg.record_events is False
-    assert cfg.face_fps == 30
+def test_ventuno_profile_and_strict_response_validation():
+    cfg = RobotConfig.from_yaml("config/robot.ventuno.yaml")
+    assert cfg.body_backend == "mcu" and cfg.camera == "csi" and cfg.max_queue_size == 128
+    assert cfg.perception.control_thread and cfg.perception.realtime_priority == 60
+    assert cfg.perception.lidar == "/dev/lidar" and cfg.llm.threads == 2 and not cfg.llm.auto_start_server
+    assert cfg.face_fps == 30 and cfg.autonomy.policy == "rules"
     # Model-supplied numbers are validated before any skill runs: NaN never reaches a motor.
     with pytest.raises(SkillError):
         _coerce("degrees", {"type": "number"}, "NaN")

@@ -107,8 +107,8 @@ class SimCamera:
 
 
 class RealCamera:
-    """A physical camera: Raspberry Pi camera module (Picamera2), a Jetson CSI camera (GStreamer through
-    OpenCV, `source="csi"`) or any USB camera (OpenCV).
+    """A physical camera: Raspberry Pi camera module (Picamera2), a MIPI camera on the VENTUNO Q (GStreamer
+    through OpenCV, `source="csi"`) or any USB camera (OpenCV).
 
     Frames carry the body's pose at capture, so detections are placed where the robot was when it saw them.
     Capture runs in a background thread that keeps only the newest image, so a read never waits for the
@@ -138,11 +138,15 @@ class RealCamera:
             import cv2
 
             if source == "csi":
-                # Jetson: the ISP debayers and scales on the hardware; appsink drops all but the newest frame.
-                pipeline = (f"nvarguscamerasrc sensor-id={device} ! video/x-raw(memory:NVMM),width=1280,height=720,"
-                            f"framerate=30/1 ! nvvidconv ! video/x-raw,width={w},height={h},format=BGRx ! "
-                            "videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1")
-                self._cam = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+                # MIPI camera through the SoC's ISP: Qualcomm's camera source first, libcamera as the fallback.
+                # The ISP scales; appsink keeps only the newest frame.
+                tail = (f"video/x-raw,width={w},height={h} ! videoconvert ! video/x-raw,format=BGR ! "
+                        "appsink drop=true max-buffers=1")
+                for src in (f"qtiqmmfsrc camera={device} ! video/x-raw,format=NV12,width=1280,height=720,"
+                            "framerate=30/1 ! videoscale ! ", "libcamerasrc ! videoconvert ! videoscale ! "):
+                    self._cam = cv2.VideoCapture(src + tail, cv2.CAP_GSTREAMER)
+                    if self._cam.isOpened():
+                        break
             else:
                 self._cam = cv2.VideoCapture(device)
                 self._cam.set(cv2.CAP_PROP_FRAME_WIDTH, w)
