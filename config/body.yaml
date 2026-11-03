@@ -55,8 +55,20 @@ sensors:
     hfov_deg: 65.0
     vfov_deg: 50.0
     resolution: [512, 384]
+  lidar:
+    enabled: true
+    model: "LDROBOT LD19 (or LD06), 360 deg, 0.02-12 m, 10 Hz, USB-UART 230400 baud"
+    x_offset_mm: -105.0
+    z_height_mm: 330.0
   microphone_array:
-    enabled: false
+    enabled: true
+    model: "4-mic circular array with direction of arrival (XMOS XVF3800 class), USB"
+
+compute:
+  board: "Arduino VENTUNO Q"
+  soc: "Qualcomm Dragonwing IQ8 (IQ-8275): 2x A78C 2.35 GHz + 2x A78C 2.1 GHz + 4x A55, Adreno 623, Hexagon NPU 40 TOPS INT8"
+  memory: "16 GB LPDDR5-6400, 64-bit (~51 GB/s)"
+  realtime_mcu: "STM32H5F5 Cortex-M33 250 MHz (firmware/ventuno_mcu): wheel loops, odometry, reflexes, watchdog"
 
 sounds:
   allowed:

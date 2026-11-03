@@ -107,7 +107,8 @@ class SimCamera:
 
 
 class RealCamera:
-    """A physical camera: Raspberry Pi camera module (Picamera2) or any USB camera (OpenCV).
+    """A physical camera: Raspberry Pi camera module (Picamera2), a Jetson CSI camera (GStreamer through
+    OpenCV, `source="csi"`) or any USB camera (OpenCV).
 
     Frames carry the body's pose at capture, so detections are placed where the robot was when it saw them.
     Capture runs in a background thread that keeps only the newest image, so a read never waits for the
@@ -136,10 +137,17 @@ class RealCamera:
         else:
             import cv2
 
-            self._cam = cv2.VideoCapture(device)
-            self._cam.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-            self._cam.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            self._cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if source == "csi":
+                # Jetson: the ISP debayers and scales on the hardware; appsink drops all but the newest frame.
+                pipeline = (f"nvarguscamerasrc sensor-id={device} ! video/x-raw(memory:NVMM),width=1280,height=720,"
+                            f"framerate=30/1 ! nvvidconv ! video/x-raw,width={w},height={h},format=BGRx ! "
+                            "videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1")
+                self._cam = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+            else:
+                self._cam = cv2.VideoCapture(device)
+                self._cam.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+                self._cam.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                self._cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
             def read() -> np.ndarray | None:
                 ok, bgr = self._cam.read()

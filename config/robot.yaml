@@ -62,4 +62,8 @@ perception:
   prefer_ncnn: true            # same runtime as the Raspberry Pi (no PyTorch)
   imgsz: 320
   confidence: 0.4
-  loop_hz: 20.0
+  loop_hz: 50.0
+  # Real-time layout: the control loop and perception each get a thread of their own (robot/control/fast_loop.py)
+  control_thread: true
+  collision_monitor: true
+  lidar: "sim"                 # simulated 360-degree lidar (robot/perception/lidar.py)

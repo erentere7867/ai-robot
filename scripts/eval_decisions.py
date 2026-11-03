@@ -107,6 +107,50 @@ CASES = [
 ]
 
 
+def turn_by(direction: str, lo: float, hi: float) -> Check:
+    def check(calls, _text):
+        if not calls or calls[0][0] != "turn":
+            return False
+        args = calls[0][1]
+        if direction == "around":
+            return args.get("direction") == "around" or lo <= float(args.get("degrees") or 0) <= hi
+        return args.get("direction") == direction and lo <= float(args.get("degrees") or 90) <= hi
+    return check
+
+
+def target_has(name: str, *words: str, **want: Any) -> Check:
+    def check(calls, _text):
+        if not calls or calls[0][0] != name:
+            return False
+        args = calls[0][1]
+        target = str(args.get("target", "")).lower()
+        return any(w in target for w in words) and all(str(args.get(k, "")).lower() == v for k, v in want.items())
+    return check
+
+
+# Held out: rewordings never used to tune prompts or rules (see PARAPHRASE_SCENARIOS). Compare models on these.
+HELD_OUT = [
+    Case("p/face-away", "face the other way", turn_by("around", 150, 210), SCENE),
+    Case("p/reverse", "reverse a bit", first("move", direction="backward"), SCENE),
+    Case("p/scoot", "scoot forward a bit", first("move", direction="forward"), SCENE),
+    Case("p/check-left", "check what's on your left side",
+         any_of(turn_by("left", 45, 135), first("observe", direction="left")), SCENE),
+    Case("p/rotate-45", "rotate 45 degrees to the right", turn_by("right", 40, 50), SCENE),
+    Case("p/head-ball", "head over to the red ball please", target_has("go_to", "ball"), SCENE),
+    Case("p/get-behind", "can you get behind the cardboard box?", target_has("go_to", "box", relation="behind"),
+         SCENE),
+    Case("p/park-between", "park yourself between the blue cube and the red ball", first("go_to", relation="between"),
+         SCENE),
+    Case("p/charge", "your battery is low, go charge yourself", target_has("go_to", "dock", "charg"), SCENE),
+    Case("p/nearest", "drive to whichever one is nearest", target_has("go_to", "cube", "near", "close"), SCENE),
+    Case("p/lap", "do a lap around the box", target_has("circle_around", "box"), SCENE),
+    Case("p/where-duck", "where did the rubber duck go?", first("look_around"), SCENE),
+    Case("p/name", "I'm Deniz, nice to meet you", first("remember")),
+    Case("p/dance", "show me your dance moves!", first("express", gesture="dance")),
+    Case("p/sad", "can you look sad?", first("express", emotion="sad")),
+]
+
+
 def build_messages(case: Case, prompts: PromptBuilder, image_url: str) -> list[dict[str, Any]]:
     clock = RealClock()
     smap = SpatialMap(clock)
@@ -125,9 +169,10 @@ def build_messages(case: Case, prompts: PromptBuilder, image_url: str) -> list[d
             {"role": "tool", "tool_call_id": "c1", "content": json.dumps(
                 {"ok": True, "result": "I can see 4 thing(s). If that answers the request, reply now.",
                  "objects": objs})},
-            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}},
-                                         {"type": "text", "text": "(camera view after observe)"}]},
         ]
+        if image_url:
+            messages.append({"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}},
+                                                         {"type": "text", "text": "(camera view after observe)"}]})
     return messages
 
 
@@ -138,6 +183,10 @@ async def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--thinking", choices=["on", "off"], help="override llm.thinking")
     parser.add_argument("--budget", type=int, help="override llm.thinking_budget_tokens (output cap)")
+    parser.add_argument("--set", choices=["dev", "heldout", "all"], default="all",
+                        help="dev: the cases prompts were tuned on; heldout: rewordings never tuned on")
+    parser.add_argument("--start-server", action="store_true", help="start llama-server for this config if needed")
+    parser.add_argument("--json", help="write per-case results here")
     args = parser.parse_args(argv)
     cfg = RobotConfig.from_yaml(args.config)
     if args.thinking:
@@ -145,21 +194,29 @@ async def main(argv: list[str] | None = None) -> int:
     if args.budget is not None:
         cfg.llm.thinking_budget_tokens = args.budget
     backend = LlamaCppBackend(cfg.llm)
+    if args.start_server:
+        await backend.ensure_server_started()
     if not await backend.is_available():
         print(f"llama-server is not answering at {cfg.llm.base_url}")
         return 2
     prompts = PromptBuilder(cfg.soul_path, cfg.context_budget, cfg.name)
-    tools = build_default_registry(sorted(EYE_COLOR_THEMES)).tool_schemas()
+    sees = cfg.llm.vision or cfg.vision_llm is None
+    tools = build_default_registry(sorted(EYE_COLOR_THEMES), ask_camera=not sees).tool_schemas()
+    # Warm the cached system prompt first, as the robot does at start (AgentLoop.warm_up).
+    await backend.chat([{"role": "system", "content": prompts.system_prompt}, {"role": "user", "content": "Hello."}],
+                       tools=tools, max_tokens=1)
+    cases = {"dev": CASES, "heldout": HELD_OUT, "all": CASES + HELD_OUT}[args.set]
+    rows: list[dict[str, Any]] = []
     names = {t["function"]["name"] for t in tools}
     image = Path(__file__).resolve().parents[1] / "tests" / "data" / "scene_front.png"
     image_url = ("data:image/png;base64," + base64.b64encode(image.read_bytes()).decode()) if image.exists() else ""
     passed = total = 0
     seconds = 0.0
     try:
-        for case in [c for c in CASES if args.k in c.name]:
+        for case in [c for c in cases if args.k in c.name]:
             for _ in range(args.repeat):
                 t0 = time.perf_counter()
-                result = await backend.chat(build_messages(case, prompts, image_url), tools=tools)
+                result = await backend.chat(build_messages(case, prompts, image_url if sees else ""), tools=tools)
                 calls = [(c.name, c.arguments) for c in result.tool_calls]
                 if not calls:
                     calls = [(c.name, c.arguments) for c in recover_text_tool_calls(result.content, names)]
@@ -169,8 +226,22 @@ async def main(argv: list[str] | None = None) -> int:
                 total += 1
                 shown = ", ".join(f"{n}({json.dumps(a)})" for n, a in calls) or repr(result.content[:70])
                 print(f"{'PASS' if ok else 'FAIL'}  {case.name:<20} {time.perf_counter() - t0:4.1f}s  {shown}")
+                rows.append({"case": case.name, "ok": bool(ok), "s": round(time.perf_counter() - t0, 3),
+                             "calls": calls, "text": result.content[:200], "prompt_tokens": result.prompt_tokens,
+                             "completion_tokens": result.completion_tokens})
     finally:
         await backend.close()
+    dev = [r for r in rows if not r["case"].startswith("p/")]
+    held = [r for r in rows if r["case"].startswith("p/")]
+    for name, part in (("dev", dev), ("held-out", held)):
+        if part:
+            print(f"{name}: {sum(r['ok'] for r in part)}/{len(part)}")
+    if args.json:
+        Path(args.json).write_text(json.dumps({"config": args.config, "model": cfg.llm.model_name, "rows": rows,
+                                               "dev": [sum(r["ok"] for r in dev), len(dev)],
+                                               "heldout": [sum(r["ok"] for r in held), len(held)],
+                                               "s_per_decision": round(seconds / max(1, total), 3)}, indent=1),
+                                   encoding="utf-8")
     print(f"\n{passed}/{total} passed ({100 * passed / max(1, total):.0f}%), {seconds / max(1, total):.1f} s per decision")
     return 0 if passed == total else 1
 

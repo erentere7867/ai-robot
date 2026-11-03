@@ -245,8 +245,30 @@ async def _look_around_vlm(ctx: SkillContext, query: str) -> SkillResult:
     return SkillResult(True, f"I looked all around and know of {len(objects)} object(s).", {"objects": objects})
 
 
-def skills() -> list[Skill]:
-    return [
+ASK_PROMPT = "Answer in one short sentence from what you see in this camera view. Question: {question}"
+
+
+async def ask_camera(ctx: SkillContext, question: str) -> SkillResult:
+    """Put a question about the current view to the vision model (for a decision model that cannot see)."""
+    ctx.check()
+    vlm = getattr(ctx.detector, "backend", None)
+    if vlm is None:
+        return SkillResult(False, "I have no way to look closely right now.")
+    frame = ctx.camera.capture()
+    reply = await vlm.chat([{"role": "user", "content": [{"type": "image_url", "image_url": {"url": frame.data_url}},
+                                                         {"type": "text", "text": ASK_PROMPT.format(question=question)}]}],
+                           max_tokens=60)
+    ctx.check()
+    answer = reply.content.strip()
+    return SkillResult(bool(answer), answer or "I couldn't make it out.")
+
+
+def skills(*, ask: bool = False) -> list[Skill]:
+    extra = [Skill("ask_camera", "Ask your camera a question about what is in front of you now, when the object "
+                   "list from observe does not answer it (colours, what something looks like, text, whether "
+                   "something is open). Turn first if it is elsewhere.",
+                   {"question": {"type": "string"}}, ask_camera, ["question"])] if ask else []
+    return [*extra,
         Skill("observe", "Look through your head camera, e.g. for 'what do you see?'. To see another side of "
               "yourself, give direction: you turn that way first. Returns each object with an id, direction and "
               "distance.",

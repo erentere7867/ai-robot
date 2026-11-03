@@ -15,6 +15,7 @@ import contextlib
 import dataclasses
 import logging
 import math
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -139,6 +140,7 @@ class PhysicsBody(SimBody):
         xml_path: Path | str | None = None,
     ) -> None:
         self._data: mujoco.MjData | None = None
+        self._step_lock = threading.RLock()  # the idle task and the control thread both advance the physics
         super().__init__(bus, capabilities, step_dt_s=step_dt_s)
         for key, value in (
             ("battery_idle_pct_per_min", battery_idle_pct_per_min),
@@ -549,6 +551,10 @@ class PhysicsBody(SimBody):
         self._awake_until = max(self._awake_until, self._sim_time + seconds)
 
     def advance_to_now(self) -> None:
+        with self._step_lock:
+            self._advance_to_now()
+
+    def _advance_to_now(self) -> None:
         """Step physics by the bus-clock time elapsed since the last call (catch-up is bounded).
 
         Commands call this every control tick, and with a `RealClock` an idle task calls it

@@ -1,0 +1,8 @@
+# 2.7 GB + 0.7 GB projector: fills the GTX 1650's 4 GB; fits an 8 GB Jetson Orin Nano comfortably.
+extends: ../robot.yaml
+llm:
+  base_url: "http://127.0.0.1:8100"
+  model_name: "Qwen3.5-4B-Q4_K_M"
+  model_path: "~/robot-runtime/models/llm/candidates/q35-4b/Qwen3.5-4B-Q4_K_M.gguf"
+  mmproj_path: "~/robot-runtime/models/llm/candidates/q35-4b/mmproj-F16.gguf"
+  ctx_size: 6144

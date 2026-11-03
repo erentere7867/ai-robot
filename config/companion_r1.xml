@@ -82,7 +82,15 @@
       <geom name="g_upper_cover" type="mesh" mesh="upper_cover" material="mat_shell" contype="0" conaffinity="0"/>
       <geom name="g_mast" type="mesh" mesh="mast" material="mat_dark_teal" contype="0" conaffinity="0"/>
       <geom name="g_frame_hardware" type="mesh" mesh="frame_hardware" material="mat_aluminum" contype="0" conaffinity="0"/>
-      <geom name="g_rpi5_board" type="mesh" mesh="rpi5_board" material="mat_pcb" contype="0" conaffinity="0"/>
+      <!-- Compute: Arduino VENTUNO Q (Qualcomm Dragonwing IQ8 + STM32H5), 160 x 100 x 26 mm with its fan
+           cooler, on the electronics deck under the cover -->
+      <geom name="g_ventuno_q" type="box" pos="-0.045 0 0.128" size="0.080 0.050 0.008" material="mat_pcb" contype="0" conaffinity="0"/>
+      <geom name="g_ventuno_cooler" type="box" pos="-0.035 0 0.141" size="0.035 0.035 0.005" material="mat_aluminum" contype="0" conaffinity="0"/>
+      <!-- 360-degree 2D lidar (LD19 class) on a rear post above the head: sees walls, furniture and legs -->
+      <geom name="g_lidar_post" type="cylinder" fromto="-0.105 0 0.164 -0.105 0 0.312" size="0.006" material="mat_dark_teal" contype="0" conaffinity="0"/>
+      <geom name="g_lidar_base" type="cylinder" pos="-0.105 0 0.318" size="0.027 0.006" material="mat_dark_teal" contype="0" conaffinity="0"/>
+      <geom name="g_lidar_dome" type="cylinder" pos="-0.105 0 0.336" size="0.022 0.012" rgba="0.08 0.09 0.11 1" contype="0" conaffinity="0"/>
+      <site name="lidar_site" pos="-0.105 0 0.330"/>
       <!-- Front ToF Sensor Lens Indicator on Front Bumper -->
       <geom name="g_tof_sensor" type="box" pos="0.141 0 0.065" size="0.003 0.016 0.007" rgba="0.0 0.90 1.0 1" contype="0" conaffinity="0"/>
       <site name="front_tof_site" pos="0.141 0 0.065" zaxis="1 0 0"/>
@@ -115,6 +123,8 @@
         <geom name="g_head_shell" type="mesh" mesh="head_shell" material="mat_shell" contype="0" conaffinity="0"/>
         <geom name="g_head_lens" type="mesh" mesh="head_lens" material="mat_lens" contype="0" conaffinity="0"/>
         <geom name="g_head_display" type="mesh" mesh="head_display" material="mat_lens" contype="0" conaffinity="0"/>
+        <!-- Circular 4-mic array (XVF3800 class) on the head top: direction of arrival for "follow me" -->
+        <geom name="g_mic_array" type="cylinder" pos="0 0 0.097" size="0.033 0.0015" material="mat_pcb" contype="0" conaffinity="0"/>
 
         <!-- Live Glowing Eyes & Mouth on the Front Visor (X = +44.5mm from pivot = +69.5mm world) -->
         <geom name="g_eye_left" type="box" pos="0.0445 0.024 0.052" size="0.0015 0.013 0.015" material="mat_eye_glow" contype="0" conaffinity="0"/>

@@ -6,9 +6,11 @@ range readings); nothing reads simulator ground truth. Positions live in the odo
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -82,7 +84,7 @@ def _near_miss(a: str, b: str) -> bool:
     if a[0] != b[0] or min(len(a), len(b)) < 3 or abs(len(a) - len(b)) > 1:
         return False
     if len(a) == len(b):
-        return sum(x != y for x, y in zip(a, b)) == 1
+        return sum(x != y for x, y in zip(a, b, strict=True)) == 1
     short, long = sorted((a, b), key=len)
     return any(long[:i] + long[i + 1:] == short for i in range(len(long)))
 
@@ -228,6 +230,19 @@ class ObjectTable(dict):
     def pop(self, key: Any, *default: Any) -> Any:
         return dict.pop(self, self._key(key), *default)
 
+    # Readers in one thread may iterate while the control thread adds a sighting: iterate over a snapshot.
+    def values(self) -> list[TrackedObject]:  # type: ignore[override]
+        return list(dict.values(self))
+
+    def items(self) -> list[tuple[str, TrackedObject]]:  # type: ignore[override]
+        return list(dict.items(self))
+
+    def keys(self) -> list[str]:  # type: ignore[override]
+        return list(dict.keys(self))
+
+    def __iter__(self):
+        return iter(list(dict.keys(self)))
+
     def rename(self, old: str, new: str) -> None:
         obj = dict.pop(self, old)
         obj.id = new
@@ -235,8 +250,18 @@ class ObjectTable(dict):
         self.aliases[old] = new
 
 
+def _locked(method):
+    """Run a SpatialMap method under the map's lock (the control thread fuses while cognition reads)."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class SpatialMap:
     def __init__(self, clock: Clock, *, half_extent_mm: float = 3000.0, max_objects: int = 48) -> None:
+        self.lock = threading.RLock()
         self.clock = clock
         self.half = float(half_extent_mm)
         self.max_objects = max_objects
@@ -269,6 +294,7 @@ class SpatialMap:
                 best, best_err = obj, abs(rel - bearing)
         return best
 
+    @_locked
     def integrate_view(self, pose: BodyPose, model: CameraModel, detections: list[Detection],
                        *, query: str | None = None, weight: float = 1.0, relabel: bool = False) -> ViewUpdate:
         """Fuse one camera view: associate detections with tracks and apply negative evidence.
@@ -384,6 +410,7 @@ class SpatialMap:
         victim = min(self.objects.values(), key=lambda o: (o.confidence, o.last_seen))
         del self.objects[victim.id]
 
+    @_locked
     def forget(self, obj_id: str) -> bool:
         return self.objects.pop(obj_id, None) is not None
 
@@ -392,6 +419,7 @@ class SpatialMap:
         key = re.sub(r"[\s_]+", "_", str(target or "").strip().lower())
         return (key, self.places[key]) if key in self.places else None
 
+    @_locked
     def resolve(self, target: str, pose: BodyPose | None = None) -> TrackedObject | None:
         """Find an object by id ("box_1") or description ("the brown box"); nearest wins ties."""
         key = str(target or "").strip().lower()
@@ -439,6 +467,7 @@ class SpatialMap:
         stale = ", from an earlier session" if obj.stale else ""
         return f"{obj.id} ({obj.label}): {dist / 1000:.1f} m {direction_words(bearing)}, {age_words(age)}{stale}"
 
+    @_locked
     def render_for_prompt(self, pose: BodyPose, *, limit: int = 8) -> str:
         if not self.objects:
             lines = ["Known objects: none yet."]
@@ -459,6 +488,7 @@ class SpatialMap:
         return "\n".join(lines)
 
     # ---- geometry for the planner ----------------------------------------------------------------
+    @_locked
     def obstacles(self, *, exclude: set[str] | None = None) -> list[CircleObstacle]:
         exclude = exclude or set()
         # Radii come from the visible width; a square box's corners reach sqrt(2) times further.
@@ -472,10 +502,12 @@ class SpatialMap:
         i, j = int((x_mm + self.half) // CELL_MM), int((y_mm + self.half) // CELL_MM)
         return (i, j) if 0 <= i < self.n and 0 <= j < self.n else None
 
+    @_locked
     def forget_range_hits(self) -> None:
         """Clear range-sensor occupancy (after the room is rearranged, old hits would be ghost obstacles)."""
         self.occupancy[:] = 0.0
 
+    @_locked
     def update_range(self, pose: BodyPose, range_mm: float, *, offset_mm: float = 141.0,
                      max_range_mm: float = 2400.0) -> None:
         """Integrate one forward range reading: free space along the beam, an obstacle at its end."""
@@ -499,11 +531,47 @@ class SpatialMap:
         if hit:
             self.add_obstacle_point(ox + range_mm * c, oy + range_mm * s, weight=0.9)
 
+    @_locked
+    def update_scan(self, pose: BodyPose, angles_deg: np.ndarray, ranges_mm: np.ndarray, *,
+                    max_range_mm: float = 4000.0, hit_weight: float = 0.7, free_weight: float = 0.25) -> None:
+        """Integrate a 360-degree scan: free space along the beams, an obstacle where each one ends.
+
+        Vectorised, ~1 ms: free space is traced on every second beam (neighbours cover the same cells at
+        this grid size), hits on all of them; the same evidence rules as a single range reading."""
+        ranges = np.asarray(ranges_mm, dtype=np.float64)
+        th = np.radians(pose.heading_deg + np.asarray(angles_deg, dtype=np.float64))
+        occ = self.occupancy.reshape(-1)
+        stride = 2 if len(ranges) >= 180 else 1
+        r_free, th_free = ranges[::stride], th[::stride]
+        length = np.minimum(np.where(np.isfinite(r_free), r_free, max_range_mm), max_range_mm)
+        d = np.arange(0.0, float(length.max(initial=0.0)), CELL_MM)
+        free = d[None, :] < (length[:, None] - CELL_MM)
+        cells = self._cells((pose.x_mm + d[None, :] * np.cos(th_free)[:, None])[free],
+                            (pose.y_mm + d[None, :] * np.sin(th_free)[:, None])[free])
+        mask = np.zeros(occ.size, dtype=bool)
+        mask[cells] = True
+        occ[mask] = np.maximum(-2.0, occ[mask] - free_weight)
+        hit = np.isfinite(ranges) & (ranges < max_range_mm)
+        if hit.any():
+            mask[:] = False
+            mask[self._cells(pose.x_mm + ranges[hit] * np.cos(th[hit]),
+                             pose.y_mm + ranges[hit] * np.sin(th[hit]))] = True
+            occ[mask] = np.minimum(3.0, occ[mask] + hit_weight)
+
+    def _cells(self, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+        """Flat grid indices of points inside the map."""
+        i = np.floor((xs + self.half) / CELL_MM).astype(np.int64)
+        j = np.floor((ys + self.half) / CELL_MM).astype(np.int64)
+        inside = (i >= 0) & (i < self.n) & (j >= 0) & (j < self.n)
+        return i[inside] * self.n + j[inside]
+
+    @_locked
     def add_obstacle_point(self, x_mm: float, y_mm: float, *, weight: float = 1.5) -> None:
         cell = self.to_cell(x_mm, y_mm)
         if cell is not None:
             self.occupancy[cell] = min(3.0, self.occupancy[cell] + weight)
 
+    @_locked
     def mark_coverage(self, pose: BodyPose, model: CameraModel, *, range_mm: float = 2200.0) -> None:
         cx, cy, _, yaw, _ = model.extrinsics(pose)
         dx, dy = self._xs - cx, self._ys - cy
@@ -511,6 +579,7 @@ class SpatialMap:
         ang = (np.degrees(np.arctan2(dy, dx) - yaw) + 180.0) % 360.0 - 180.0
         self.seen |= (dist <= range_mm) & (dist >= 250.0) & (np.abs(ang) <= 0.5 * model.hfov_deg - 2)
 
+    @_locked
     def unseen_fraction_near(self, x_mm: float, y_mm: float, radius_mm: float = 1500.0) -> float:
         mask = (self._xs - x_mm) ** 2 + (self._ys - y_mm) ** 2 <= radius_mm ** 2
         free = mask & ~(self.occupancy > 0.6)
@@ -518,6 +587,7 @@ class SpatialMap:
         return float((free & ~self.seen).sum()) / total if total else 0.0
 
     # ---- persistence -----------------------------------------------------------------------------
+    @_locked
     def snapshot(self, pose: BodyPose) -> dict[str, Any]:
         now = self.clock.monotonic()
         return {
@@ -530,6 +600,7 @@ class SpatialMap:
             "coverage": round(float(self.seen.mean()), 3),
         }
 
+    @_locked
     def save(self, path: Path) -> None:
         now_mono, now_wall = self.clock.monotonic(), time.time()
         places = {k: v for k, v in self.places.items() if k != ASKED_PLACE}  # only true for one request
@@ -540,6 +611,7 @@ class SpatialMap:
         tmp.write_text(json.dumps(data, default=float), encoding="utf-8")  # numpy scalars from detectors
         tmp.replace(path)
 
+    @_locked
     def load(self, path: Path) -> int:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))

@@ -14,14 +14,28 @@ except ImportError:  # pragma: no cover
     yaml = None  # type: ignore[assignment]
 
 
-def load_yaml_file(path: Path | str) -> dict[str, Any]:
-    """Load a YAML file into a dictionary."""
+def load_yaml_file(path: Path | str, _depth: int = 0) -> dict[str, Any]:
+    """Load a YAML file into a dictionary. `extends: other.yaml` (relative to this file) starts from that file;
+    each section given here replaces keys of the same section there, and a section set to null removes it."""
     file_path = Path(path).expanduser().resolve()
     text = file_path.read_text(encoding="utf-8")
-    if yaml is not None:
-        data = yaml.safe_load(text)
-        return dict(data or {})
-    raise RuntimeError(f"PyYAML is required to load {file_path}")
+    if yaml is None:
+        raise RuntimeError(f"PyYAML is required to load {file_path}")
+    data = dict(yaml.safe_load(text) or {})
+    base_name = data.pop("extends", None)
+    if base_name is None:
+        return data
+    if _depth > 4:
+        raise ValueError(f"{file_path}: 'extends' nests too deeply")
+    merged = load_yaml_file(file_path.parent / str(base_name), _depth + 1)
+    for key, value in data.items():
+        if value is None:
+            merged.pop(key, None)
+        elif isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged
 
 
 _BOOL_WORDS = {"true": True, "yes": True, "on": True, "1": True, "false": False, "no": False, "off": False, "0": False}
@@ -100,6 +114,10 @@ class LLMConfig:
     # off 95% at 0.7 s per decision, on 86% at 5-9 s, so it is off by default.
     thinking: bool = False
     thinking_budget_tokens: int = 512
+    # Can this model see camera images? False for a text-only decision model (then `vision_llm` is the eye).
+    vision: bool = True
+    # Extra llama-server flags for this model, e.g. ["--swa-full", "--checkpoint-min-step", "256"] for LFM3.
+    server_args: list[str] | None = None
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "null", "llamacpp"}:
@@ -172,14 +190,23 @@ class PerceptionConfig:
     """The fast layer: a small detector on every frame and a 20 Hz control loop."""
 
     fast_detector: str = "auto"  # auto: use ~/robot-runtime/models/fast_detector* if trained; off: VLM only
+    # 2D lidar: "off", "sim" (raycast in the sandbox) or a serial port for an LD19/LD06 ("/dev/ttyUSB0").
+    lidar: str = "off"
     # NCNN (no PyTorch) is the fastest CPU runtime for YOLO on ARM and is what the Pi runs; using it on the
     # laptop too means every simulator run exercises the exact perception code of the robot.
     prefer_ncnn: bool = True
     imgsz: int = 320
     confidence: float = 0.4
     loop_hz: float = 20.0
+    # Real-time control (see robot/control/fast_loop.py and robot/core/realtime.py).
+    control_thread: bool = False      # run the fast loop in its own pinned, prioritised thread
+    realtime_priority: int = 0        # SCHED_FIFO priority for that thread (0: leave it normal)
+    collision_monitor: bool = True    # limit every speed command to what can still stop in time
+    tune_process: bool = False        # GC freeze, 1 ms GIL switch interval, mlockall (on the robot)
 
     def __post_init__(self) -> None:
+        if not 0 <= self.realtime_priority <= 99:
+            raise ValueError("perception.realtime_priority must be 0..99")
         if self.fast_detector not in ("auto", "off"):
             raise ValueError("perception.fast_detector must be 'auto' or 'off'")
         if not 64 <= self.imgsz <= 1280 or not 0.05 <= self.confidence <= 0.95 or not 2 <= self.loop_hz <= 100:
@@ -199,9 +226,10 @@ class RobotConfig:
     soul_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "SOUL.md")
     body_config_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "body.yaml")
     sim_tick_hz: float = 20.0
-    body_backend: str = "kinematic"  # "kinematic" | "physics" (simulated) | "serial" (the real robot)
+    # "kinematic" | "physics" (simulated) | "serial" (a USB motor board) | "mcu" (VENTUNO Q's on-board STM32H5)
+    body_backend: str = "kinematic"
     serial_port: str = "/dev/ttyACM0"  # the motor microcontroller (firmware/base_controller)
-    camera: str = "sim"  # "sim" | "picamera" (Pi camera module) | "usb"
+    camera: str = "sim"  # "sim" | "picamera" (Pi camera module) | "csi" (Jetson camera) | "usb"
     spatial_map_path: Path = field(
         default_factory=lambda: Path("~/robot-runtime/data/spatial_map.json").expanduser()
     )
@@ -216,6 +244,9 @@ class RobotConfig:
         default_factory=lambda: Path("~/robot-runtime/models/ggml-tiny.en.bin").expanduser()
     )
     llm: LLMConfig = field(default_factory=LLMConfig)
+    # Optional second model for the camera (naming things, yes/no checks, questions about the view) when
+    # `llm` is a text-only decision model. None: `llm` does both.
+    vision_llm: LLMConfig | None = None
     context_budget: ContextBudgetConfig = field(default_factory=ContextBudgetConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     autonomy: AutonomyConfig = field(default_factory=AutonomyConfig)
@@ -234,10 +265,10 @@ class RobotConfig:
                 raise ValueError(f"{key} must be finite and positive")
         if not 1 <= self.sim_tick_hz <= 200 or not 1 <= self.max_queue_size <= 4096:
             raise ValueError("Simulation rate or queue size is outside supported limits")
-        if self.body_backend not in ("kinematic", "physics", "serial"):
-            raise ValueError("runtime.body_backend must be 'kinematic', 'physics' or 'serial'")
-        if self.camera not in ("sim", "picamera", "usb"):
-            raise ValueError("runtime.camera must be 'sim', 'picamera' or 'usb'")
+        if self.body_backend not in ("kinematic", "physics", "serial", "mcu"):
+            raise ValueError("runtime.body_backend must be 'kinematic', 'physics', 'serial' or 'mcu'")
+        if self.camera not in ("sim", "picamera", "csi", "usb"):
+            raise ValueError("runtime.camera must be 'sim', 'picamera', 'csi' or 'usb'")
 
     @classmethod
     def from_yaml(
@@ -268,29 +299,37 @@ class RobotConfig:
                 return expanded
             return (root / expanded).resolve() if default_rel else expanded.resolve()
 
-        llm = LLMConfig(
-            backend=str(llm_raw.get("backend", "auto")),
-            auto_start_server=_as_bool(llm_raw.get("auto_start_server", True), "llm.auto_start_server"),
-            base_url=str(llm_raw.get("base_url", "http://127.0.0.1:8080")),
-            model_name=str(llm_raw.get("model_name", "LFM3-VL-2B-Q4_K_M")),
-            model_path=_resolve(str(llm_raw.get("model_path", "~/Downloads/LFM3-VL-2B-Q4_K_M.gguf"))),
-            mmproj_path=_resolve(
-                str(llm_raw.get("mmproj_path", "~/Downloads/mmproj-LFM3-VL-2B-F16.gguf"))
-            ),
-            llama_server_bin=_resolve(
-                str(llm_raw.get("llama_server_bin", str(LLMConfig().llama_server_bin)))
-            ),
-            gpu_layers=int(llm_raw.get("gpu_layers", 99)),
-            threads=int(llm_raw.get("threads", 0)),
-            ctx_size=int(llm_raw.get("ctx_size", 8192)),
-            timeout_s=float(llm_raw.get("timeout_s", 90.0)),
-            temperature=float(llm_raw.get("temperature", 0.0)),
-            max_tokens=int(llm_raw.get("max_tokens", 256)),
-            native_tools=llm_raw.get("native_tools", True),
-            startup_timeout_s=float(llm_raw.get("startup_timeout_s", 90.0)),
-            thinking=_as_bool(llm_raw.get("thinking", False), "llm.thinking"),
-            thinking_budget_tokens=int(llm_raw.get("thinking_budget_tokens", 512)),
-        )
+        def _llm(llm_raw: dict[str, Any], defaults: LLMConfig) -> LLMConfig:
+            extra = llm_raw.get("server_args")
+            if extra is not None and not (isinstance(extra, list) and all(isinstance(a, (str, int, float))
+                                                                          for a in extra)):
+                raise ValueError("llm.server_args must be a list of strings")
+            mmproj = llm_raw.get("mmproj_path", str(defaults.mmproj_path))
+            return LLMConfig(
+                backend=str(llm_raw.get("backend", defaults.backend)),
+                auto_start_server=_as_bool(llm_raw.get("auto_start_server", True), "llm.auto_start_server"),
+                base_url=str(llm_raw.get("base_url", defaults.base_url)),
+                model_name=str(llm_raw.get("model_name", defaults.model_name)),
+                model_path=_resolve(str(llm_raw.get("model_path", str(defaults.model_path)))),
+                mmproj_path=_resolve(str(mmproj)) if mmproj else Path(),
+                llama_server_bin=_resolve(str(llm_raw.get("llama_server_bin", str(defaults.llama_server_bin)))),
+                gpu_layers=int(llm_raw.get("gpu_layers", defaults.gpu_layers)),
+                threads=int(llm_raw.get("threads", defaults.threads)),
+                ctx_size=int(llm_raw.get("ctx_size", defaults.ctx_size)),
+                timeout_s=float(llm_raw.get("timeout_s", defaults.timeout_s)),
+                temperature=float(llm_raw.get("temperature", defaults.temperature)),
+                max_tokens=int(llm_raw.get("max_tokens", defaults.max_tokens)),
+                native_tools=llm_raw.get("native_tools", True),
+                startup_timeout_s=float(llm_raw.get("startup_timeout_s", defaults.startup_timeout_s)),
+                thinking=_as_bool(llm_raw.get("thinking", False), "llm.thinking"),
+                thinking_budget_tokens=int(llm_raw.get("thinking_budget_tokens", 512)),
+                vision=_as_bool(llm_raw.get("vision", bool(mmproj)), "llm.vision"),
+                server_args=[str(a) for a in extra] if extra is not None else None,
+            )
+
+        llm = _llm(llm_raw, LLMConfig())
+        vision_raw = _section(raw, "vision_llm")
+        vision_llm = _llm(vision_raw, LLMConfig(base_url="http://127.0.0.1:8081")) if vision_raw else None
         defaults = ContextBudgetConfig()
         cb = ContextBudgetConfig(**{key: int(cb_raw.get(key, getattr(defaults, key))) for key in vars(defaults)})
         return cls(
@@ -320,6 +359,7 @@ class RobotConfig:
                 str(audio_raw.get("asr_model_path", "~/robot-runtime/models/ggml-tiny.en.bin"))
             ),
             llm=llm,
+            vision_llm=vision_llm,
             context_budget=cb,
             agent=AgentConfig(**_section(raw, "agent")),
             autonomy=AutonomyConfig(**_section(raw, "autonomy")),

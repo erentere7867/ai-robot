@@ -42,6 +42,8 @@ class BodyCapabilities:
     description: str = "Mobile 4-wheel skid-steer companion robot"
     wheel_diameter_mm: float = 120.0
     track_width_mm: float = 208.0
+    length_mm: float = 282.0
+    width_mm: float = 228.0
     max_linear_speed_mm_s: float = 400.0
     max_angular_speed_deg_s: float = 120.0
     max_single_move_mm: float = 2000.0
@@ -165,6 +167,8 @@ class BodyCapabilities:
             description=str(raw.get("description", "Mobile 4-wheel skid-steer companion robot")),
             wheel_diameter_mm=float(dims.get("wheel_diameter", 120.0)),
             track_width_mm=float(dims.get("track_width", 208.0)),
+            length_mm=float(dims.get("length", 282.0)),
+            width_mm=float(dims.get("width", 228.0)),
             max_linear_speed_mm_s=float(drive.get("max_linear_speed_mm_s", 400.0)),
             max_angular_speed_deg_s=float(drive.get("max_angular_speed_deg_s", 120.0)),
             max_single_move_mm=float(drive.get("max_single_move_mm", 2000.0)),

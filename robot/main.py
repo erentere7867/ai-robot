@@ -26,10 +26,12 @@ from robot.cognition.backend import InferenceBackend, NullBackend
 from robot.cognition.llamacpp import AutoBackend, LlamaCppBackend
 from robot.cognition.prompts import PromptBuilder, estimate_tokens
 from robot.control.fast_loop import FastLoop
+from robot.control.safety import CollisionMonitor
 from robot.core.bus import EventBus
 from robot.core.clock import Clock, RealClock
 from robot.core.config import RobotConfig
 from robot.core.events import Event, EventPriority
+from robot.core.realtime import plan_cores, tune_process
 from robot.core.recorder import EventRecorder
 from robot.core.service import ServiceSupervisor
 from robot.face.animator import EYE_COLOR_THEMES
@@ -147,8 +149,15 @@ class RobotHarness:
             self._llama_client = LlamaCppBackend(self.config.llm)
             self.backend = AutoBackend(self._llama_client)
 
-        self.detector = VLMDetector(self.backend)
-        self.skills = build_default_registry(sorted(EYE_COLOR_THEMES))
+        # The eye: the decision model itself, or a separate vision model when the decision model is text-only.
+        self._vision_client: LlamaCppBackend | None = None
+        self.vision_backend: InferenceBackend = self.backend
+        if backend is None and self.config.vision_llm is not None and self.config.llm.backend != "null":
+            self._vision_client = LlamaCppBackend(self.config.vision_llm)
+            self.vision_backend = AutoBackend(self._vision_client)
+        self.detector = VLMDetector(self.vision_backend)
+        sees = self.config.llm.vision or self.config.vision_llm is None
+        self.skills = build_default_registry(sorted(EYE_COLOR_THEMES), ask_camera=not sees)
         self.skill_context = SkillContext(
             bus=self.bus, executor=self.executor, body=self.body, camera=self.camera, detector=self.detector,
             spatial_map=self.spatial_map, planner=self.planner, memory=self.memory, emotion=self.emotion,
@@ -157,17 +166,26 @@ class RobotHarness:
         # Fast layer: the trained detector on every frame plus closed-loop behaviours. Without a trained
         # detector the VLM serves single looks and the behaviours still run on the map.
         self.fast_detector = self._load_fast_detector()
+        self.lidar = self._make_lidar()
+        pcfg = self.config.perception
+        self.core_plan = plan_cores()
+        dims = self.capabilities
         self.fast = FastLoop(
             bus=self.bus, clock=self.clock, body=self.body, camera=self.camera, spatial_map=self.spatial_map,
-            planner=self.planner, detector=self.fast_detector or self.detector,
-            rate_hz=self.config.perception.loop_hz,
+            planner=self.planner, detector=self.fast_detector or self.detector, lidar=self.lidar,
+            rate_hz=pcfg.loop_hz,
             continuous=isinstance(self.clock, RealClock) and self.fast_detector is not None,
+            monitor=CollisionMonitor(half_length_mm=0.5 * dims.length_mm, half_width_mm=0.5 * dims.width_mm)
+            if pcfg.collision_monitor else None,
+            threaded=pcfg.control_thread and isinstance(self.clock, RealClock),
+            control_cores=self.core_plan.control, perception_cores=self.core_plan.perception,
+            priority=pcfg.realtime_priority,
         )
         self.skill_context.fast = self.fast
         budget = self.config.context_budget
         self.agent = AgentLoop(self.backend, self.skills, self.config.agent,
                                prompt_limit_tokens=budget.total_tokens - budget.response_reserve_tokens,
-                               on_event=self._emit_skill_event, robot_name=self.config.name)
+                               on_event=self._emit_skill_event, robot_name=self.config.name, sees_images=sees)
         self.arbiter = BehaviorArbiter(
             bus=self.bus, fsm=self.fsm, emotion=self.emotion, prompts=self.prompts, agent=self.agent,
             skill_context=self.skill_context, memory=self.memory, world=self.world,
@@ -222,12 +240,28 @@ class RobotHarness:
                                              "perception uses the VLM only")
         return detector
 
+    def _make_lidar(self):
+        source = self.config.perception.lidar
+        if source == "off":
+            return None
+        if source == "sim":
+            from robot.perception.lidar import SimLidar
+
+            return SimLidar(self.sandbox, self.body, self.clock)
+        from robot.perception.lidar import Ld19Lidar
+
+        return Ld19Lidar(self.body, self.clock, port=source)
+
     def _make_body(self):
         tick = 1.0 / self.config.sim_tick_hz
         if self.config.body_backend == "serial":
             from robot.body.serial_body import SerialBody
 
             return SerialBody(self.bus, self.capabilities, port=self.config.serial_port)
+        if self.config.body_backend == "mcu":
+            from robot.body.mcu_body import McuBody
+
+            return McuBody(self.bus, self.capabilities)
         if self.config.body_backend == "physics":
             from robot.body.physics_body import PhysicsBody
 
@@ -314,9 +348,11 @@ class RobotHarness:
         try:
             if self.recorder is not None:
                 self.recorder.open()
+            if self._vision_client is not None:
+                await self._vision_client.ensure_server_started()
             if self._llama_client is not None and await self._llama_client.ensure_server_started():
                 await self.agent.warm_up(self.prompts.system_prompt)
-            if self.config.body_backend != "serial":
+            if self.config.body_backend not in ("serial", "mcu"):
                 self.sandbox.bind(self.body)  # simulated sensors; a real body has its own
             self.spatial_map.load(self.config.spatial_map_path)
             start = self.body.pose()
@@ -333,6 +369,8 @@ class RobotHarness:
             await self.bus.start()
             await self.supervisor.start_all()
             self._started = True
+            if self.config.perception.tune_process:
+                logging.getLogger(__name__).info("Real-time tuning: %s", tune_process())
             if isinstance(self.clock, RealClock):
                 self._runtime_task = asyncio.create_task(self._runtime_loop(), name="runtime:timers")
         except BaseException:
@@ -370,6 +408,8 @@ class RobotHarness:
         await self.bus.stop()
         if self._llama_client is not None:
             await self._llama_client.close()
+        if self._vision_client is not None:
+            await self._vision_client.close()
         if self.recorder is not None:
             await asyncio.to_thread(self.recorder.close)
         self.memory.close()

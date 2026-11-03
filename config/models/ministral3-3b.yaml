@@ -1,0 +1,8 @@
+extends: ../robot.yaml
+llm:
+  base_url: "http://127.0.0.1:8100"
+  model_name: "Ministral-3-3B-Instruct-Q4_K_M"
+  model_path: "~/robot-runtime/models/llm/candidates/ministral/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf"
+  mmproj_path: "~/robot-runtime/models/llm/candidates/ministral/Ministral-3-3B-Instruct-2512-BF16-mmproj.gguf"
+  server_args: []
+  ctx_size: 6144

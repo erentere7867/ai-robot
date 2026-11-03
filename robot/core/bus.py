@@ -87,6 +87,9 @@ class EventBus:
         self.dropped_count: int = 0
         self._background_tasks: set[asyncio.Task] = set()
         self._match_cache: dict[str, tuple[Subscription, ...]] = {}
+        # The loop the bus runs on. The real-time control thread has a loop of its own; what it emits is
+        # handed over to this one (fire-and-forget), so subscribers always run on the bus's loop.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def add_record_hook(self, hook: Callable[[Event], None]) -> None:
         """Attach a synchronous recorder hook invoked on every published event."""
@@ -133,6 +136,7 @@ class EventBus:
         if self._running:
             return
         self._running = True
+        self._loop = asyncio.get_running_loop()
         for sub in self._subscriptions.values():
             if not sub.immediate and (sub.task is None or sub.task.done()):
                 sub.task = asyncio.create_task(self._run_subscriber(sub), name=f"bus:{sub.id}")
@@ -191,8 +195,35 @@ class EventBus:
             priority=priority,
             correlation_id=correlation_id,
         )
+        if self._foreign_thread():
+            self._loop.call_soon_threadsafe(lambda: self.track_task(asyncio.ensure_future(self.publish(event))))
+            return event
         await self.publish(event)
         return event
+
+    def emit_nowait(self, event_type: str, source: str, payload: dict[str, Any] | None = None, *,
+                    priority: EventPriority = EventPriority.NORMAL, correlation_id: str | None = None) -> None:
+        """Publish from any thread (an event loop or a plain worker thread) without waiting for it."""
+        def go() -> None:
+            self.track_task(asyncio.ensure_future(self.emit(event_type, source, payload, priority=priority,
+                                                            correlation_id=correlation_id)))
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and (self._loop is None or running is self._loop):
+            go()
+        elif self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(go)
+
+    def _foreign_thread(self) -> bool:
+        """True when called from another thread's event loop (the real-time control thread)."""
+        if self._loop is None or self._loop.is_closed():
+            return False
+        try:
+            return asyncio.get_running_loop() is not self._loop
+        except RuntimeError:
+            return True
 
     async def publish(self, event: Event) -> Event:
         """Publish an Event to all matching subscribers."""
@@ -314,6 +345,8 @@ class EventBus:
 
     def track_task(self, task: asyncio.Task) -> None:
         """Include explicitly owned work in drain/shutdown without blocking a subscriber."""
+        if self._foreign_thread():
+            return  # owned by the thread that made it (the control thread awaits or cancels its own)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 

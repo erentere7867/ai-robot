@@ -60,14 +60,18 @@ class LlamaCppBackend:
             "-ngl", str(self.config.gpu_layers), "-c", str(self.config.ctx_size), "-np", "2",
             "--jinja", "--reasoning", "auto", "--reasoning-format", "deepseek", "--no-reasoning-preserve",
             "--reasoning-budget", str(self.config.thinking_budget_tokens), "--temp", str(self.config.temperature),
-            # LFM3 mixes convolutions and sliding-window attention, so a cached prompt can only be resumed
-            # from a checkpoint. The default spacing (8192 tokens) is longer than our prompts; with these two
-            # flags a decision re-reads ~5-150 tokens instead of ~400 (measured: 1.9 s -> 0.7 s per call).
-            "--swa-full", "--checkpoint-min-step", "256",
         ]
+        # LFM3 mixes convolutions and sliding-window attention, so a cached prompt can only be resumed from a
+        # checkpoint. The default spacing (8192 tokens) is longer than our prompts; with these two flags a
+        # decision re-reads ~5-150 tokens instead of ~400 (measured: 1.9 s -> 0.7 s per call). Other hybrid
+        # models (Qwen3.5) benefit the same way; `server_args` replaces them per model.
+        cmd.extend(self.config.server_args if self.config.server_args is not None
+                   else ["--swa-full", "--checkpoint-min-step", "256"])
         if self.config.threads > 0:
             cmd.extend(["--threads", str(self.config.threads), "--threads-batch", str(self.config.threads)])
-        if self.config.mmproj_path and self.config.mmproj_path.exists():
+        if not self.config.vision:
+            pass  # a text-only decision model; another model is the eye
+        elif self.config.mmproj_path.is_file():
             cmd.extend(["--mmproj", str(self.config.mmproj_path)])
         else:
             logger.warning("Vision projector not found (%s); the robot will be blind", self.config.mmproj_path)

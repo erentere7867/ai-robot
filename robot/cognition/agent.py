@@ -250,8 +250,9 @@ def _shorten(payload: dict[str, Any]) -> str:
 class AgentLoop:
     def __init__(self, backend: InferenceBackend, skills: SkillRegistry, config: AgentConfig,
                  *, prompt_limit_tokens: int = 3300, on_event: Callable[[str, dict[str, Any]], Awaitable[None]]
-                 | None = None, robot_name: str = "") -> None:
+                 | None = None, robot_name: str = "", sees_images: bool = True) -> None:
         self.backend = backend
+        self.sees_images = sees_images  # False: a text-only model; views reach it as object lists only
         self.robot_name = robot_name
         self.skills = skills
         self.config = config
@@ -426,6 +427,8 @@ class AgentLoop:
                 last["next"] = (f"Part {todo.index + 1} (\"{todo.current}\") is done." if advance and todo
                                 else todo.hint() if todo is not None else hint.format(request=request))
                 messages[-1]["content"] = json.dumps(last, ensure_ascii=False)
+            if ctx.attached_image is not None and not self.sees_images:
+                ctx.attached_image = None
             if ctx.attached_image is not None:
                 self._attach_image(messages, ctx.attached_image.data_url, reply.tool_calls[-1].name)
                 ctx.attached_image = None
