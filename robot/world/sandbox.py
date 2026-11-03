@@ -7,6 +7,8 @@ import base64
 import math
 import subprocess
 import sys
+import concurrent.futures
+import queue
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,20 +24,69 @@ from robot.core.events import Event
 from robot.perception.camera import encode_png
 from robot.world.state import relative_direction_label
 
-# Shared lock for MuJoCo Renderer calls
-_MJ_SHARED_LOCK = threading.Lock()
 _MJ_SHARED_STATE: dict[str, Any] = {}
 
 
+class _GLThread:
+    """Every MuJoCo render runs on this one thread.
+
+    An OpenGL context belongs to the thread that made it current; with the camera captured on the
+    perception thread, "what do you see?" on a worker thread and the dashboard on the main loop, renders
+    from several threads made WGL refuse the context ("resource is in use") and crashed at exit."""
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._ident: int | None = None
+        self._start_lock = threading.Lock()
+
+    def run(self, fn: Any, timeout: float | None = None) -> Any:
+        if threading.get_ident() == self._ident:
+            return fn()
+        with self._start_lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._serve, name="mujoco-gl", daemon=True)
+                self._thread.start()
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        self._queue.put((fn, future))
+        return future.result(timeout)
+
+    def _serve(self) -> None:
+        self._ident = threading.get_ident()
+        while True:
+            fn, future = self._queue.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn())
+            except BaseException as exc:  # handed to the caller
+                future.set_exception(exc)
+
+    @property
+    def alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+
+_GL = _GLThread()
+
+
 def _cleanup_mujoco_gl_on_exit() -> None:
-    for st in list(_MJ_SHARED_STATE.values()):
-        for k in ("head_renderer", "over_renderer"):
-            r = st.get(k)
-            if r is not None:
-                try:
-                    r.close()
-                except Exception:
-                    pass
+    def close_all() -> None:
+        for st in list(_MJ_SHARED_STATE.values()):
+            for k in ("head_renderer", "over_renderer", "seg_renderer"):
+                r = st.get(k)
+                if r is not None:
+                    try:
+                        r.close()
+                    except Exception:
+                        pass
+        _MJ_SHARED_STATE.clear()
+
+    if _GL.alive:
+        try:
+            _GL.run(close_all, timeout=2.0)  # contexts are closed by the thread that owns them
+        except Exception:
+            pass
     _MJ_SHARED_STATE.clear()
 
 
@@ -966,11 +1017,13 @@ class SimulationSandbox:
     def render_head_rgb(self, pose: BodyPose | None = None) -> np.ndarray:
         """Raw first-person RGB render from `head_cam` (what a physical camera would deliver)."""
         p = pose or self._last_pose
-        with _MJ_SHARED_LOCK:
+
+        def render() -> np.ndarray:
             st = self._sync_mujoco_state_on_gl_thread(p)
             renderer: mujoco.Renderer = st["head_renderer"]
             renderer.update_scene(st["data"], camera="head_cam")
             return renderer.render().copy()
+        return _GL.run(render)
 
     def render_head_labels(self, pose: BodyPose | None = None) -> tuple[np.ndarray, dict[str, dict[str, Any]]]:
         """RGB head view plus exact per-object boxes from a segmentation render (occlusion included).
@@ -979,7 +1032,8 @@ class SimulationSandbox:
         simulator ground truth for training and grading a detector; the robot never sees it.
         """
         p = pose or self._last_pose
-        with _MJ_SHARED_LOCK:
+
+        def render() -> tuple[Any, np.ndarray, np.ndarray]:
             st = self._sync_mujoco_state_on_gl_thread(p)
             model: mujoco.MjModel = st["model"]
             renderer: mujoco.Renderer = st["head_renderer"]
@@ -991,8 +1045,9 @@ class SimulationSandbox:
                 seg.enable_segmentation_rendering()
                 st["seg_renderer"] = seg
             seg.update_scene(st["data"], camera="head_cam")
-            ids = seg.render()[:, :, 0].copy()  # geom id per pixel, -1 for background
-            body_of_geom = model.geom_bodyid
+            return model, rgb, seg.render()[:, :, 0].copy()  # geom id per pixel, -1 for background
+        model, rgb, ids = _GL.run(render)
+        body_of_geom = model.geom_bodyid
         # Which sandbox object each MuJoCo body shows (defaults by name, extras by spawn slot order).
         body_to_obj: dict[int, str] = {}
         extras = iter([o.id for o in self._objects.values()
@@ -1044,19 +1099,18 @@ class SimulationSandbox:
         lookat = list(self.cam_lookat_m)
 
         def _render_over() -> np.ndarray:
-            with _MJ_SHARED_LOCK:
-                st = self._sync_mujoco_state_on_gl_thread(p)
-                cam = mujoco.MjvCamera()
-                cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-                cam.lookat[:] = lookat
-                cam.distance = dist
-                cam.azimuth = az
-                cam.elevation = el
-                renderer: mujoco.Renderer = st["over_renderer"]
-                renderer.update_scene(st["data"], camera=cam)
-                return renderer.render().copy()
+            st = self._sync_mujoco_state_on_gl_thread(p)
+            cam = mujoco.MjvCamera()
+            cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+            cam.lookat[:] = lookat
+            cam.distance = dist
+            cam.azimuth = az
+            cam.elevation = el
+            renderer: mujoco.Renderer = st["over_renderer"]
+            renderer.update_scene(st["data"], camera=cam)
+            return renderer.render().copy()
 
-        img = _render_over()
+        img = _GL.run(_render_over)
         b64 = base64.b64encode(_encode_rgb_to_png_bytes(img)).decode("ascii")
         self._last_overview_url = f"data:image/png;base64,{b64}"
         return self._last_overview_url

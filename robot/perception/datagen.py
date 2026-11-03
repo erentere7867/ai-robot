@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 
 from robot.body.hal import BodyPose
-from robot.world.sandbox import _MJ_SHARED_LOCK, SimulationSandbox, _get_or_init_mujoco_gl
+from robot.world.sandbox import _GL, SimulationSandbox, _get_or_init_mujoco_gl
 
 # Class 0..5 are the room's known objects; "object" is anything else (distractors here, unknown things on
 # the robot). The fast layer tracks unknown objects too, and the VLM names them when it matters.
@@ -85,10 +85,14 @@ class SceneRandomizer:
                 sb.add_object(obj_id=f"distractor_{k}", label="object", shape="box", x_mm=spot[0], y_mm=spot[1],
                               size_mm=110.0, color=rng.choice(DISTRACTOR_COLORS))
                 taken.append((spot[0], spot[1], 60.0))
-        with _MJ_SHARED_LOCK:
-            scale = rng.uniform(0.55, 1.35)
-            self._model.light_diffuse[:] = np.clip(self._light0 * scale * np.array([rng.uniform(0.9, 1.1) for _ in range(3)]), 0, 1)
-            self._model.vis.headlight.ambient[:] = np.clip(self._ambient0 * rng.uniform(0.6, 1.4), 0, 1)
+        scale = rng.uniform(0.55, 1.35)
+        tint = np.array([rng.uniform(0.9, 1.1) for _ in range(3)])
+        ambient = rng.uniform(0.6, 1.4)
+
+        def relight() -> None:  # the model is the renderer's: change it on the GL thread
+            self._model.light_diffuse[:] = np.clip(self._light0 * scale * tint, 0, 1)
+            self._model.vis.headlight.ambient[:] = np.clip(self._ambient0 * ambient, 0, 1)
+        _GL.run(relight)
         sb._invalidate_renders()
         # Robot somewhere free, usually looking roughly at something (that is what the camera mostly sees).
         spot = _free_spot(rng, taken, 230.0, limit=1250.0) or (0.0, 0.0)

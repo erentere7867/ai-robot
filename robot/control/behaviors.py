@@ -27,6 +27,7 @@ FACE_TOLERANCE_DEG = 3.0
 MAX_V = 320.0
 MAX_W = 120.0
 REFLEX_WORDS = {"obstacle_stop": "something is right in front of me",
+                "obstacle_behind": "something is right behind me",
                 "bumper": "Bumper pressed: I bumped into something", "cliff_detected": "there is a drop ahead",
                 "estop_active": "the emergency stop is on"}
 
@@ -129,6 +130,8 @@ class PathFollower:
             self.planned_at = -math.inf
         elif t.blocked in ("bumper", "cliff_detected", "estop_active"):
             return REFLEX_WORDS[t.blocked]
+        elif t.blocked == "obstacle_behind":  # paths are driven forwards; only a reversing correction meets it
+            self.planned_at = -math.inf
         moved = self.goal is None or math.hypot(goal[0] - self.goal[0], goal[1] - self.goal[1]) > 120.0
         if moved or not self.waypoints or t.now - self.planned_at > self.REPLAN_S:
             # The object I am approaching gets its plain radius: its padded outline would swallow the very spot

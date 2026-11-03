@@ -144,10 +144,12 @@ async def test_move_reports_a_bumper_stop(sim):
     assert 200 < x < 600 - 110 - 140 + 1  # stopped at contact, not through the box
 
 
-async def test_move_backward_into_a_wall_is_stopped_by_the_bumper(sim):
+async def test_move_backward_into_a_wall_stops_short_of_it(sim):
+    # The lidar sees the wall behind (the front range sensor cannot): the collision monitor stops the robot
+    # before its rear touches the wall, and the move says why.
     result = await run(sim, "move", direction="backward", distance_cm=200)
-    assert not result.ok and "Bumper" in result.message
-    assert -1500 + 140 - 30 < sim.body.pose().x_mm < -1000
+    assert not result.ok and "behind me" in result.message
+    assert -1500 + 140 < sim.body.pose().x_mm < -1000
 
 
 async def test_look_around_with_query_faces_the_exact_match_over_a_synonym(sim):

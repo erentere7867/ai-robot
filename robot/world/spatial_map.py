@@ -533,13 +533,17 @@ class SpatialMap:
 
     @_locked
     def update_scan(self, pose: BodyPose, angles_deg: np.ndarray, ranges_mm: np.ndarray, *,
-                    max_range_mm: float = 4000.0, hit_weight: float = 0.7, free_weight: float = 0.25) -> None:
+                    max_range_mm: float = 4000.0, hit_weight: float = 0.7, free_weight: float = 0.25,
+                    mount_x_mm: float = -105.0) -> None:
         """Integrate a 360-degree scan: free space along the beams, an obstacle where each one ends.
 
         Vectorised, ~1 ms: free space is traced on every second beam (neighbours cover the same cells at
         this grid size), hits on all of them; the same evidence rules as a single range reading."""
         ranges = np.asarray(ranges_mm, dtype=np.float64)
         th = np.radians(pose.heading_deg + np.asarray(angles_deg, dtype=np.float64))
+        yaw = math.radians(pose.heading_deg)
+        pose = BodyPose(pose.x_mm + mount_x_mm * math.cos(yaw), pose.y_mm + mount_x_mm * math.sin(yaw),
+                        pose.heading_deg)  # rays start at the lidar, not the robot's centre
         occ = self.occupancy.reshape(-1)
         stride = 2 if len(ranges) >= 180 else 1
         r_free, th_free = ranges[::stride], th[::stride]

@@ -32,13 +32,15 @@ class SimLidar:
     """Raycasts the simulated room: walls plus every object taller than the lidar's mounting height."""
 
     def __init__(self, sandbox: Any, body: Any, clock: Any, *, beams: int = 360, max_range_mm: float = 8000.0,
-                 height_mm: float = 330.0, rate_hz: float = 10.0, noise_mm: float = 8.0) -> None:
+                 height_mm: float = 330.0, rate_hz: float = 10.0, noise_mm: float = 8.0,
+                 mount_x_mm: float = -105.0) -> None:
         self.sandbox, self.body, self.clock = sandbox, body, clock
         self.angles = np.linspace(-180.0, 180.0, beams, endpoint=False)
         self.max_range = max_range_mm
         self.height = height_mm
         self.period = 1.0 / rate_hz
         self.noise = noise_mm
+        self.mount_x = mount_x_mm  # behind the robot's centre, on the mast post (config/body.yaml)
         self._rng = np.random.default_rng(0)
         self._last: Scan | None = None
 
@@ -54,7 +56,8 @@ class SimLidar:
     def _cast(self, pose: Any) -> np.ndarray:
         th = np.radians(pose.heading_deg + self.angles)
         dx, dy = np.cos(th), np.sin(th)
-        ox, oy = pose.x_mm, pose.y_mm
+        yaw = math.radians(pose.heading_deg)
+        ox, oy = pose.x_mm + self.mount_x * math.cos(yaw), pose.y_mm + self.mount_x * math.sin(yaw)
         half = self.sandbox.room_half_extent_mm
         with np.errstate(divide="ignore", invalid="ignore"):
             tx = np.where(dx > 0, (half - ox) / dx, np.where(dx < 0, (-half - ox) / dx, np.inf))

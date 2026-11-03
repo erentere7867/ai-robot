@@ -26,7 +26,7 @@ import numpy as np
 class Limit:
     v: float
     w: float
-    reason: str | None = None  # "obstacle_stop" when forward/backward travel is blocked
+    reason: str | None = None  # "obstacle_stop" / "obstacle_behind" when forward / backward travel is blocked
     clearance_mm: float = math.inf
 
 
@@ -69,6 +69,7 @@ class CollisionMonitor:
         inside = (np.abs(x) <= self.hl) & (np.abs(y) <= self.hw)  # the robot's own body (mast, cables)
         x, y = x[~inside], y[~inside]
         clearance = math.inf
+        backward = v < 0
         if v != 0.0:
             sign = 1.0 if v > 0 else -1.0
             ahead = sign * x - self.hl  # distance past the front (or rear) edge
@@ -82,5 +83,6 @@ class CollisionMonitor:
             near = np.hypot(x, y) < self.radius + self.side
             if near.any():
                 w *= 0.35  # something brushes the turning circle: turn slowly
-        reason = "obstacle_stop" if clearance < self.margin + 1.0 else None
+        blocked = clearance < self.margin + 1.0
+        reason = ("obstacle_behind" if backward else "obstacle_stop") if blocked else None
         return Limit(v, w, reason, clearance)
