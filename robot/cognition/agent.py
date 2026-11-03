@@ -82,6 +82,16 @@ _ACTION_TOOLS = {"go_to", "turn_to", "turn", "move", "explore", "look_around", "
 FINISHING_TOOLS = {"go_to", "circle_around", "move", "follow", "stop", "express", "set_eye_color", "remember",
                    "explore"}
 
+# Actions whose own report is the answer: once one succeeds as the end of a request, the model is not
+# asked for a closing sentence (measured: that call was ~0.75 s of a 2-4 s request on the laptop GPU, and
+# its reply was usually the report reworded plus "What would you like to do next?").
+FAST_FINISH_TOOLS = {"go_to", "circle_around", "move", "follow", "stop", "set_eye_color"}
+
+
+def _first_sentence(text: str) -> str:
+    return re.split(r"(?<=[.!?])\s+", text.strip(), maxsplit=1)[0]
+
+
 NUDGE = ("(No tool was called, so nothing happened. The request was: \"{request}\". Every request is new, even "
          "if you did the same before. Call the tool that does it now.)")
 
@@ -363,6 +373,7 @@ class AgentLoop:
             transcript.append(messages[-1])
             stop_batch = False
             finished_part = False
+            batch: list[tuple[str, SkillResult]] = []
             for call in reply.tool_calls:
                 if stop_batch:
                     outcome = SkillResult(False, "Not executed because an earlier step failed.", status="skipped")
@@ -394,12 +405,20 @@ class AgentLoop:
                     attempts[key] = attempts.get(key, 0) + 1
                     if outcome.ok and call.name in IDEMPOTENT_TOOLS:
                         succeeded[key] = (_pose(ctx), outcome)
+                batch.append((call.name, outcome))
                 payload = outcome.to_model()
                 last_status = outcome.status
                 messages.append({"role": "tool", "tool_call_id": call.id,
                                  "content": json.dumps(payload, ensure_ascii=False)})
                 transcript.append(messages[-1])
             advance = todo is not None and todo.has_next and part_ok and finished_part
+            last_name, last_outcome = batch[-1]
+            if (self.config.fast_finish and request and part_ok and (todo is None or not todo.has_next)
+                    and last_name in FAST_FINISH_TOOLS and last_outcome.ok and last_outcome.status != "duplicate"
+                    and all(o.ok for _, o in batch)):
+                result.say = _first_sentence(last_outcome.message)
+                await self._emit("cognition.fast_finish", {"tool": last_name, "say": result.say})
+                break
             if request and (last_status != "duplicate" or todo is not None):
                 # A field of its own: merged into "result" it made the model act on it as an instruction
                 # (measured: "two_stops" went to the wrong object).

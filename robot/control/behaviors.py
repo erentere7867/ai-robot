@@ -192,7 +192,7 @@ class Turn(Behavior):
         self.last = t.pose.heading_deg
         remaining = self.angle - self.turned
         if abs(remaining) < 1.5:
-            return Done(True, f"Turned {abs(self.angle):.0f} degrees.")
+            return Done(True, f"I turned {abs(self.angle):.0f} degrees.")
         return Drive(0.0, turn_rate(remaining, gain=2.5, min_rate=20.0))
 
     def describe(self) -> str:
@@ -216,7 +216,7 @@ class Move(Behavior):
         remaining = self.distance - done
         direction = "forward" if self.distance > 0 else "backward"
         if abs(remaining) < 10.0:
-            return Done(True, f"Moved {direction} {abs(self.distance) / 10:.0f} cm.")
+            return Done(True, f"I moved {direction} {abs(self.distance) / 10:.0f} cm.")
         if t.blocked and (self.distance > 0 or t.blocked != "obstacle_stop"):
             return Done(False, f"Moved only {abs(done) / 10:.0f} of {abs(self.distance) / 10:.0f} cm: "
                                f"{REFLEX_WORDS.get(t.blocked, t.blocked)}.")
@@ -336,7 +336,7 @@ class GoToObject(Behavior):
         seen = t.now - obj.last_seen < 2.0
         note = f" I can see {self.obj_id} {dist:.1f} m away." if seen else \
             f" I can't see {self.obj_id} from here right now."
-        return Done(True, f"Arrived {place} {target}" + (" (as close as the space allows)." if self.closest else ".")
+        return Done(True, f"I'm {place} {target} now" + (" (as close as the space allows)." if self.closest else ".")
                     + note, {"target": self.obj_id, "confirmed": seen})
 
 
@@ -508,4 +508,4 @@ class Orbit(Behavior):
         if abs(err) > FACE_TOLERANCE_DEG:
             return Drive(0.0, turn_rate(err, min_rate=20.0))
         note = f" ({self.skipped} of {self.total} points were blocked, so I went past them)" if self.skipped else ""
-        return Done(True, f"Drove a loop around {self.label}{note}.")
+        return Done(True, f"I drove a loop around {self.label}{note}.")

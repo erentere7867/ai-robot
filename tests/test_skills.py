@@ -63,7 +63,7 @@ async def test_go_to_relation_ends_where_expected(sim, relation, check):
     await run(sim, "observe")
     result = await run(sim, "go_to", target="box_1", relation=relation)
     assert result.ok, result.message
-    assert result.message.startswith(f"Arrived {relation.replace('_', ' ')} box_1")
+    assert result.message.startswith(f"I'm {relation.replace('_', ' ')} box_1")
     pose, box = sim.body.pose(), sim.sandbox.get_object("cardboard_box")
     d, along, side = rel(pose, box)
     assert check(d, along, side), (relation, round(d), round(along), round(side))
@@ -123,14 +123,14 @@ async def test_go_to_start_returns_home(sim):
 async def test_turn_around_is_180_degrees_and_turn_to_faces_objects(sim):
     sim.sandbox.move_object("cardboard_box", 0.0, -1000.0)  # before turning: perception maps it on the way
     result = await run(sim, "turn", direction="around")
-    assert result.ok and result.message == "Turned around 180 degrees."
+    assert result.ok and result.message == "I turned around 180 degrees."
     assert abs(sim.body.pose().heading_deg) == pytest.approx(180, abs=2.0)
     await run(sim, "turn", direction="left")
     assert sim.body.pose().heading_deg == pytest.approx(-90, abs=2.0)
     sim.spatial_map.places["start"] = (0.0, 0.0)
     await run(sim, "observe")
     faced = await run(sim, "turn_to", target="box_1")
-    assert faced.ok and faced.message.startswith("Now facing box_1 (cardboard box)")
+    assert faced.ok and faced.message.startswith("I'm facing box_1 (cardboard box)")
     assert sim.body.pose().heading_deg == pytest.approx(-90, abs=3)
 
 
@@ -343,7 +343,7 @@ async def test_go_to_uses_the_relation_the_human_asked_for(sim):
     await run(sim, "observe")
     sim.skill_context.request = "go behind the box"
     result = await run(sim, "go_to", target="box_1", relation="near")
-    assert result.ok and result.message.startswith("Arrived behind box_1"), result.message
+    assert result.ok and result.message.startswith("I'm behind box_1"), result.message
     assert "as the human asked" in result.message
     _, along, _ = rel(sim.body.pose(), sim.sandbox.get_object("cardboard_box"))
     assert along > 0  # on the far side
@@ -355,7 +355,7 @@ async def test_go_to_between_finds_the_other_object_in_the_request(sim):
     await run(sim, "observe")
     sim.skill_context.request = "go between the red ball and the box"
     result = await run(sim, "go_to", target="ball_1", relation="near", distance_cm=10)
-    assert result.ok and result.message.startswith("Arrived between ball_1 and box_1"), result.message
+    assert result.ok and result.message.startswith("I'm between ball_1 and box_1"), result.message
     pose = sim.body.pose()
     assert math.hypot(pose.x_mm - 1000, pose.y_mm) < 250
 
@@ -389,7 +389,7 @@ async def test_come_back_goes_to_where_the_human_asked_even_if_the_call_names_an
     assert math.hypot(sim.body.pose().x_mm, sim.body.pose().y_mm) <= 120
     sim.skill_context.request = "come back to the box"
     result = await run(sim, "go_to", target="box_1")  # named in the request: the ball is the goal
-    assert result.message.startswith("Arrived near box_1"), result.message
+    assert result.message.startswith("I'm near box_1"), result.message
 
 
 async def test_a_distance_the_human_did_not_say_is_ignored(sim):

@@ -77,15 +77,48 @@ def labels_match(a: str, b: str) -> bool:
     return label_score(a, b) > 0
 
 
+def _near_miss(a: str, b: str) -> bool:
+    """One typo apart ("boz" for "box"): same first letter, one letter changed, added or dropped."""
+    if a[0] != b[0] or min(len(a), len(b)) < 3 or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    short, long = sorted((a, b), key=len)
+    return any(long[:i] + long[i + 1:] == short for i in range(len(long)))
+
+
 def label_score(a: str, b: str) -> int:
-    """2 = same kind of thing (shared noun), 1 = synonym (box~cube), 0 = different; colours must agree."""
+    """2 = same kind of thing (shared noun), 1 = synonym (box~cube) or a typo of one, 0 = different;
+    colours must agree."""
     ta, tb = _tokens(a), _tokens(b)
     if not _colors_compatible(_colors(ta), _colors(tb)):
         return 0
     na, nb = _nouns(ta), _nouns(tb)
     if na & nb:
         return 2
-    return 1 if _nouns_compatible(na, nb) else 0
+    if _nouns_compatible(na, nb):
+        return 1
+    return 1 if any(_near_miss(x, y) for x in na for y in nb) else 0
+
+
+# Referring to things by where they are or how they compare: "the thing behind you", "the closest box",
+# "whichever one is nearest". Egocentric directions are (centre bearing, half width) in degrees, + = left.
+_SECTORS = {"behind": (180.0, 65.0), "back": (180.0, 65.0), "left": (90.0, 60.0), "right": (-90.0, 60.0),
+            "front": (0.0, 45.0), "ahead": (0.0, 45.0)}
+_SUPERLATIVES = {"closest": "near", "nearest": "near", "farthest": "far", "furthest": "far", "biggest": "big",
+                 "largest": "big", "smallest": "small", "tiniest": "small"}
+_REFERRING = {"you", "me", "i", "of", "to", "in", "at", "side", "thing", "things", "one", "ones", "which",
+              "whichever", "is", "are", "over", "there", "here", "it", "stuff", "item", "whatever", "something",
+              "next", "now", "currently", "just", "right", "most"} | set(_SECTORS) | set(_SUPERLATIVES)
+
+
+def parse_reference(text: str) -> tuple[str, tuple[float, float] | None, str | None]:
+    """("box", sector, "near") for "the closest box behind you": what kind, where, which of several."""
+    words = _tokens(text)
+    sectors = [_SECTORS[w] for w in words if w in _SECTORS]
+    superlative = next((_SUPERLATIVES[w] for w in words if w in _SUPERLATIVES), None)
+    kind = " ".join(w for w in words if w not in _REFERRING and w not in FILLER)
+    return kind, sectors[0] if len(sectors) == 1 else None, superlative
 
 
 def _associates(track_label: str, det_label: str) -> bool:
@@ -369,15 +402,35 @@ class SpatialMap:
         compact = key.replace(" ", "_")
         if compact in self.objects:
             return self.objects[compact]
-        if not _nouns(_tokens(key)):
-            return None
-        scored = [(label_score(o.label, key), o) for o in self.objects.values()]
-        best = max((score for score, _ in scored), default=0)
-        candidates = [o for score, o in scored if score == best and score > 0]
+        kind, sector, superlative = parse_reference(key)
+        described = bool(_nouns(_tokens(kind)) or _colors(_tokens(kind)))
+        if not described and sector is None and superlative is None:
+            return None  # "it", "there": nothing to go on
+        candidates = list(self.objects.values())
+        if described and _nouns(_tokens(kind)):
+            scored = [(label_score(o.label, kind), o) for o in candidates]
+            best = max((score for score, _ in scored), default=0)
+            candidates = [o for score, o in scored if score == best and score > 0]
+        elif described:  # only a colour: "the red one"
+            want = _colors(_tokens(kind))
+            candidates = [o for o in candidates if _colors(_tokens(o.label))
+                          and _colors_compatible(want, _colors(_tokens(o.label)))]
+        if sector is not None and pose is not None:
+            centre, half = sector
+            candidates = [o for o in candidates
+                          if abs((o.relative(pose)[1] - centre + 180.0) % 360.0 - 180.0) <= half]
+        candidates = [o for o in candidates if o.confidence >= 0.2] or candidates
         if not candidates:
             return None
         if pose is None:
             return max(candidates, key=lambda o: (o.confidence, o.last_seen))
+        if superlative == "far":
+            return max(candidates, key=lambda o: o.relative(pose)[0])
+        if superlative in ("big", "small"):
+            pick = max if superlative == "big" else min
+            return pick(candidates, key=lambda o: o.radius_mm)
+        if superlative == "near":
+            return min(candidates, key=lambda o: o.relative(pose)[0])
         return min(candidates, key=lambda o: o.relative(pose)[0] - 300.0 * o.confidence)
 
     def describe(self, obj: TrackedObject, pose: BodyPose) -> str:

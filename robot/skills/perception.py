@@ -113,7 +113,19 @@ def _summary(ctx: SkillContext, ids: list[str]) -> list[str]:
     return [ctx.spatial_map.describe(o, pose).replace(", seen just now", "") for o in objs]
 
 
-async def observe(ctx: SkillContext) -> SkillResult:
+_TURN_FOR = {"left": "left", "right": "right", "behind": "around"}
+
+
+async def observe(ctx: SkillContext, direction: str = "front") -> SkillResult:
+    if direction in _TURN_FOR:
+        # Looking somewhere else is turning there first: "look back" / "what's on your left" in one step.
+        from robot.skills.navigation import turn  # navigation imports this module
+
+        turned = await turn(ctx, _TURN_FOR[direction])
+        if not turned.ok:
+            return turned
+        seen = await observe(ctx)
+        return SkillResult(seen.ok, f"{turned.message} {seen.message}", seen.data)
     pose = ctx.pose()
     key = (round(pose.x_mm, -1), round(pose.y_mm, -1), round(pose.heading_deg), round(pose.head_tilt_deg))
     cached = ctx.turn_cache.get("observe")
@@ -164,13 +176,7 @@ async def find(ctx: SkillContext, query: str) -> str | None:
 async def look_around(ctx: SkillContext, query: str = "") -> SkillResult:
     side = _side(query)
     if side is not None:
-        from robot.skills.navigation import turn  # navigation imports this module
-
-        turned = await turn(ctx, side)
-        if not turned.ok:
-            return turned
-        seen = await observe(ctx)
-        return SkillResult(seen.ok, f"{turned.message} {seen.message}", seen.data)
+        return await observe(ctx, {"around": "behind"}.get(side, side))
     query = _query(query)
     if _streaming(ctx) and (not query or _in_vocabulary(ctx, query)):
         started = ctx.clock.monotonic()
@@ -241,8 +247,13 @@ async def _look_around_vlm(ctx: SkillContext, query: str) -> SkillResult:
 
 def skills() -> list[Skill]:
     return [
-        Skill("observe", "Look through your head camera at what is in front of you right now, e.g. for "
-              "'what do you see?'. Returns each object with an id, direction and distance.", {}, observe),
+        Skill("observe", "Look through your head camera, e.g. for 'what do you see?'. To see another side of "
+              "yourself, give direction: you turn that way first. Returns each object with an id, direction and "
+              "distance.",
+              {"direction": {"type": "string", "enum": ["front", "left", "right", "behind"],
+                             "aliases": {"back": "behind", "around": "behind", "ahead": "front",
+                                         "forward": "front", "backward": "behind", "backwards": "behind"}}},
+              observe),
         Skill("look_around", "Turn a full circle while looking, to find things that are not in front of you "
               "or to learn what is in the room. With query, stops and faces the first match.",
               {"query": {"type": "string", "description": "optional: the thing you are searching for"}},

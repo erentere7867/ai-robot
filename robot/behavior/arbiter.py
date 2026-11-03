@@ -142,7 +142,9 @@ class BehaviorArbiter:
 
     # ---- turns -------------------------------------------------------------------------------------
     async def handle_user_turn(self, user_text: str, *, correlation_id: str | None = None,
-                               autonomous: bool = False, hint: str = "") -> TurnResult:
+                               autonomous: bool = False, hint: str = "",
+                               plan: list[tuple[str, dict[str, Any]]] | None = None) -> TurnResult:
+        """Run one turn. With `plan` (background only), run those skills directly instead of asking the model."""
         if not user_text.strip() or len(user_text) > 4096:
             raise ValueError("Message must contain 1..4096 characters")
         correlation_id = correlation_id or uuid.uuid4().hex
@@ -159,9 +161,12 @@ class BehaviorArbiter:
                                 {"reason": "autonomous_start" if autonomous else "new_turn"},
                                 priority=EventPriority.CRITICAL)
             epoch = self._epoch
-            task = asyncio.create_task(
-                self._run_turn(user_text, correlation_id=correlation_id, epoch=epoch, autonomous=autonomous,
-                               hint=hint), name="cognition:turn")
+            if plan is not None and autonomous:
+                coro = self._run_plan(user_text, plan, correlation_id=correlation_id, epoch=epoch)
+            else:
+                coro = self._run_turn(user_text, correlation_id=correlation_id, epoch=epoch, autonomous=autonomous,
+                                      hint=hint)
+            task = asyncio.create_task(coro, name="cognition:turn")
             self._active_turn = task
             self.bus.track_task(task)
         try:
@@ -260,7 +265,7 @@ class BehaviorArbiter:
         if epoch != self._epoch:
             raise asyncio.CancelledError
         if autonomous and (result.say.strip().lower() in _EMPTY_REPLIES
-                           or (self.autonomy is not None and not self.autonomy.allow_speech())):
+                           or (self.autonomy is not None and not self.autonomy.allow_speech(result.say))):
             result.say = ""
 
         self.active_goal.update(status=result.status, step=result.steps)
@@ -283,6 +288,48 @@ class BehaviorArbiter:
         if self.drives is not None:
             self.drives.on_turn(result, autonomous=autonomous)
         await self._emit_response(result, correlation_id, autonomous)
+        return result
+
+    async def _run_plan(self, reason: str, plan: list[tuple[str, dict[str, Any]]], *, correlation_id: str,
+                        epoch: int) -> TurnResult:
+        """A background behaviour chosen without the model: skills run as they would for it, cancellable."""
+        self.active_goal = {"objective": reason[:200], "status": "running", "step": 0,
+                            "correlation_id": correlation_id, "origin": "autonomous"}
+        self.world.task_state = dict(self.active_goal)
+        ctx = self.ctx
+        ctx.correlation_id = correlation_id
+        ctx.cancelled = lambda: epoch != self._epoch
+        ctx.attached_image = None
+        ctx.wake_request_s = None
+        ctx.expression = {}
+        ctx.turn_cache = {}
+        ctx.request = ""
+        result = TurnResult(say="", backend_name="autonomy_policy")
+        for name, args in plan:
+            ctx.check()
+            await self.bus.emit("skill.started", "arbiter", {"tool": name, "args": args, "origin": "autonomous"},
+                                correlation_id=correlation_id)
+            outcome = await self.agent.skills.run(name, args, ctx)
+            result.tool_log.append({"tool": name, "args": args, "ok": outcome.ok, "message": outcome.message})
+            await self.bus.emit("skill.completed", "arbiter", {"tool": name, "args": args, "ok": outcome.ok,
+                                                               "status": outcome.status, "message": outcome.message,
+                                                               "data": outcome.data}, correlation_id=correlation_id)
+            if not outcome.ok:
+                result.status = "failed"
+                break
+        if epoch != self._epoch:
+            raise asyncio.CancelledError
+        result.steps = len(result.tool_log)
+        result.expression = dict(ctx.expression)
+        self.active_goal.update(status=result.status, step=result.steps)
+        self.world.task_state = dict(self.active_goal)
+        notes = result.action_notes()
+        self.recent_activity.append((self.bus.clock.monotonic(), "on my own: " + "; ".join(notes[-3:])))
+        self.memory.log_episode(summary=f"On my own: {'; '.join(notes[-3:])}", kind="autonomous",
+                                details={"tools": [e["tool"] for e in result.tool_log], "status": result.status})
+        if self.drives is not None:
+            self.drives.on_turn(result, autonomous=True)
+        await self._emit_response(result, correlation_id, True)
         return result
 
     async def _emit_response(self, result: TurnResult, correlation_id: str | None, autonomous: bool) -> None:

@@ -87,7 +87,7 @@ def request(text: str = "do it", history: list[dict] | None = None) -> list[dict
 
 
 async def run(script, *, background=False, probe=None, ctx=None, messages=None, limit=3300, max_steps=14,
-              events=None):
+              events=None, fast_finish=False):
     probe = probe or Probe()
     backend = script if hasattr(script, "chat") else ScriptedBackend(script)
 
@@ -95,7 +95,8 @@ async def run(script, *, background=False, probe=None, ctx=None, messages=None, 
         if events is not None:
             events.append((kind, payload))
 
-    loop = AgentLoop(backend, probe.registry(), AgentConfig(max_steps=max_steps), prompt_limit_tokens=limit,
+    loop = AgentLoop(backend, probe.registry(), AgentConfig(max_steps=max_steps, fast_finish=fast_finish),
+                     prompt_limit_tokens=limit,
                      on_event=on_event)
     result = await loop.run(messages or request(), ctx or make_ctx(), background=background)
     return result, backend, probe
@@ -389,7 +390,7 @@ def exchange_transcript(k: int) -> list[dict]:
                                                                                "objects": ["a"]})}]
 
 
-def test_history_keeps_tool_calls_for_the_two_newest_turns_only(tmp_path):
+def test_history_keeps_tool_calls_and_is_append_only(tmp_path):
     prompts = PromptBuilder(soul(tmp_path), ContextBudgetConfig(recent_turns_tokens=5000, max_recent_turns=6))
     assert "Playful and kind." in prompts.system_prompt and "Ignore this section" not in prompts.system_prompt
     for k in range(4):
@@ -399,12 +400,22 @@ def test_history_keeps_tool_calls_for_the_two_newest_turns_only(tmp_path):
     assert messages[0]["role"] == "system" and messages[-1]["role"] == "user"
     assert "[Human says]\nnow" in messages[-1]["content"]
     roles = [m["role"] for m in messages[1:-1]]
-    # turns 0 and 1: text only; turns 2 and 3 keep their call and (shortened) result
-    assert roles == ["user", "assistant"] * 2 + ["user", "assistant", "tool", "assistant"] * 2
+    assert roles == ["user", "assistant", "tool", "assistant"] * 4  # every turn keeps its call and result
     assert_no_orphans(messages)
     tools = [m for m in messages if m["role"] == "tool"]
-    assert [m["tool_call_id"] for m in tools] == ["c2", "c3"]
-    assert json.loads(tools[0]["content"]) == {"ok": True, "result": "r" * 160}
+    assert [m["tool_call_id"] for m in tools] == ["c0", "c1", "c2", "c3"]
+    assert json.loads(tools[0]["content"]) == {"ok": True, "result": "r" * 120}
+    # The next turn only appends: the earlier messages (the server's cached prefix) are unchanged.
+    prompts.add_exchange("request 4", "reply 4", exchange_transcript(4))
+    again = prompts.build("next", "[Situation]", background=False)
+    assert again[:len(messages) - 1] == messages[:-1]
+
+
+def test_history_prunes_by_half_when_full(tmp_path):
+    prompts = PromptBuilder(soul(tmp_path), ContextBudgetConfig(recent_turns_tokens=5000, max_recent_turns=6))
+    for k in range(7):
+        prompts.add_exchange(f"request {k}", f"reply {k}", exchange_transcript(k))
+    assert [e[0]["content"] for e in prompts.history] == ["request 4", "request 5", "request 6"]
 
 
 def test_history_budget_and_turn_limit_are_respected_for_multibyte_input(tmp_path):
@@ -412,7 +423,7 @@ def test_history_budget_and_turn_limit_are_respected_for_multibyte_input(tmp_pat
     prompts = PromptBuilder(soul(tmp_path), budget)
     for k in range(100):
         prompts.add_exchange("世界" * 5000, "世界" * 5000, exchange_transcript(k))
-    assert len(prompts.history) == 6
+    assert 1 <= len(prompts.history) <= 6
     messages = prompts.build("hi", "[Situation]", background=False)
     history = messages[1:-1]
     cost = sum(estimate_tokens(str(m.get("content") or "")) + estimate_tokens(json.dumps(m.get("tool_calls", "")))
@@ -764,3 +775,18 @@ async def test_warm_up_reads_the_system_prompt_and_tools_once():
 
 async def test_warm_up_without_a_model_does_not_raise():
     await AgentLoop(UnavailableBackend(), Probe().registry(), AgentConfig()).warm_up("You are a robot.")
+
+
+async def test_fast_finish_speaks_the_skill_report_without_another_model_call():
+    script = [ChatResult(content="", tool_calls=[ToolCall("c1", "move", {"direction": "forward"})])]
+    result, backend, probe = await run(script, fast_finish=True)
+    assert result.say == "Moved forward 30 cm." and result.status == "completed"
+    assert len(backend.requests) == 1 and probe.ran == [("move", {"direction": "forward", "distance_cm": 30.0})]
+
+
+async def test_fast_finish_never_cuts_a_several_part_request_short():
+    script = [ChatResult(content="", tool_calls=[ToolCall("c1", "move", {"direction": "forward"})]),
+              ChatResult(content="", tool_calls=[ToolCall("c2", "move", {"direction": "backward"})])]
+    result, backend, _ = await run(script, fast_finish=True,
+                                   messages=request("move forward and then move backward"))
+    assert len(backend.requests) == 2 and result.say == "Moved backward 30 cm."

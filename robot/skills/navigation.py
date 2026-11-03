@@ -70,13 +70,18 @@ def _other_named(ctx: SkillContext, request: str, target_id: str) -> str | None:
 
 
 async def _resolve(ctx: SkillContext, target: str) -> TrackedObject:
-    """Find a target in the map, searching for it first if it is not known yet."""
-    obj = ctx.spatial_map.resolve(target, ctx.pose())
+    """Find a target in the map ("box_1", "the red ball", "the thing behind you"), searching first if needed.
+
+    Directions in a description are the robot's as it was asked: after turning round to look, "the thing
+    behind you" is still the thing that was behind.
+    """
+    asked_from = ctx.pose()
+    obj = ctx.spatial_map.resolve(target, asked_from)
     if obj is not None:
         return obj
     query = re.sub(r"_\d+$", "", target.strip().lower()).replace("_", " ")
     found = await find(ctx, query)
-    obj = (ctx.spatial_map.objects.get(found or "") or ctx.spatial_map.resolve(target, ctx.pose())
+    obj = (ctx.spatial_map.objects.get(found or "") or ctx.spatial_map.resolve(target, asked_from)
            or ctx.spatial_map.resolve(query, ctx.pose()))
     if obj is None:
         known = ", ".join(sorted(ctx.spatial_map.objects)) or "nothing"
@@ -191,7 +196,7 @@ async def face(ctx: SkillContext, target: str) -> SkillResult:
     done = await ctx.behave(Face(obj.id))
     if not done.ok:
         return SkillResult(False, done.message)
-    return SkillResult(True, f"Now facing {ctx.spatial_map.describe(obj, ctx.pose())}.")
+    return SkillResult(True, f"I'm facing {ctx.spatial_map.describe(obj, ctx.pose())}.")
 
 
 async def turn(ctx: SkillContext, direction: str, degrees: float | None = None) -> SkillResult:
@@ -204,7 +209,7 @@ async def turn(ctx: SkillContext, direction: str, degrees: float | None = None) 
     ctx.attached_image = None
     if not done.ok:
         return SkillResult(False, done.message)
-    return SkillResult(True, f"Turned {direction} {abs(angle):.0f} degrees.", in_view(ctx))
+    return SkillResult(True, f"I turned {direction} {abs(angle):.0f} degrees.", in_view(ctx))
 
 
 ALL_WORDS = {"all", "everything", "objects", "all objects", "all of the objects", "all the objects", "things",
@@ -309,9 +314,9 @@ async def explore(ctx: SkillContext) -> SkillResult:
 
 
 def skills() -> list[Skill]:
-    target = {"type": "string", "description": "a known object id such as box_1; or a description such as "
-              "'charging dock' (I search for it if it is not known yet); or start, the spot where I was "
-              "switched on"}
+    target = {"type": "string", "description": "a known object id such as box_1; or the human's description, "
+              "such as 'charging dock', 'the thing behind you' or 'the closest box' (I search for it if it is not "
+              "known yet); or start, the spot where I was switched on"}
     return [
         Skill("go_to", "Drive to a spot relative to a known object; plans a safe path around obstacles and "
               "turns to face the object at the end. 'behind' means the far side of the object from where you "
@@ -322,14 +327,15 @@ def skills() -> list[Skill]:
                                "description": "optional gap to keep from the object"}},
               go_to, ["target"]),
         Skill("turn_to", "Turn your body toward a known object without driving, e.g. for 'look at the ball'.",
-              {"target": {"type": "string", "description": "object id such as box_1"}}, face, ["target"]),
+              {"target": target}, face, ["target"]),
         Skill("turn", "Turn in place, e.g. 'look left' is left and 'turn around' is around (a half turn). "
               "For other amounts use left or right with degrees, e.g. 360 for a full spin.",
               {"direction": {"type": "string", "enum": ["left", "right", "around"]},
                "degrees": {"type": "number", "minimum": 5, "maximum": 1080}},
               turn, ["direction"]),
         Skill("circle_around", "Drive a loop around one object or around all known objects, keeping a safe "
-              "distance.", {"target": {"type": "string", "description": "object id, or all"},
+              "distance.", {"target": {"type": "string", "description": "object id or the human's description "
+                                                                        "of it, or all"},
                             "laps": {"type": "number", "minimum": 0.25, "maximum": 3},
                             "direction": {"type": "string", "enum": ["left", "right"],
                                           "description": "left = anticlockwise (default), right = clockwise"},

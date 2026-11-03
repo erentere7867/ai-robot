@@ -104,11 +104,13 @@ class FakeArbiter:
         self.follow_up = False
         self.fsm = SimpleNamespace(in_follow_up_window=lambda: self.follow_up)
         self.turns: list[str] = []
+        self.plans: list = []
         self.next_wake_s: float | None = None
 
-    async def handle_user_turn(self, text, *, autonomous=False, **_):
+    async def handle_user_turn(self, text, *, autonomous=False, plan=None, **_):
         assert autonomous
         self.turns.append(text)
+        self.plans.append(plan)
         return TurnResult(say="", next_wake_s=self.next_wake_s)
 
 
@@ -256,3 +258,33 @@ async def test_voice_mode_commands_are_answered_without_the_model():
         assert getattr(rig.ctl, attr) is value and event.payload["handled"] is True
     assert [r["backend"] for r in replies] == ["autonomy_control"] * 4
     assert rig.arbiter.turns == []
+
+
+async def test_rules_policy_acts_on_drives_without_the_model():
+    rig = Rig(policy="rules")
+    await rig.start()
+    rig.make_curious()
+    await rig.tick(25.0)
+    assert rig.arbiter.plans == [[("explore", {})]]
+    rig.drives.drives["curiosity"].level = 0.0
+    rig.drives.drives["play"].level = 0.95
+    await rig.tick(50.0)
+    assert rig.arbiter.plans[-1][0][0] == "express"
+
+
+async def test_model_policy_wakes_the_model_for_drives():
+    rig = Rig(policy="model")
+    await rig.start()
+    rig.make_curious()
+    await rig.tick(25.0)
+    assert rig.arbiter.plans == [None]
+
+
+def test_unasked_remarks_back_off_and_never_repeat():
+    rig = Rig(speak_interval_s=10.0)
+    assert rig.ctl.allow_speech("I'm feeling a little lonely right now!")
+    rig.clock.advance(11.0)
+    assert not rig.ctl.allow_speech("Something new")  # one remark unanswered: the wait doubled to 20 s
+    rig.clock.advance(10.0)
+    assert not rig.ctl.allow_speech("I'm feeling a little lonely now!")  # nearly the same words
+    assert rig.ctl.allow_speech("Ooh, a yellow duck appeared by the dock.")

@@ -127,6 +127,9 @@ class AgentConfig:
     max_actions: int = 200
     timeout_s: float = 300.0
     plan: bool = True  # hand over a request with several parts one part at a time (see cognition/planner.py)
+    # When the action a request asked for succeeds, say what the skill reports instead of asking the model
+    # for a closing sentence (one model call fewer per request).
+    fast_finish: bool = True
 
     def __post_init__(self) -> None:
         for key in ("max_steps", "max_actions"):
@@ -147,6 +150,10 @@ class AutonomyConfig:
     # Speaking up unasked at most this often; it still acts (explores, looks) in between. Every 30-40 s
     # ("I'm feeling a little lonely! Would you like...?") wore people out at a demo.
     speak_interval_s: float = 180.0
+    # "rules": drives pick a behaviour directly (explore, play, go charge) and the model is only woken for
+    # events worth words (a scene change, a requested wake, loneliness when it may speak). "model": every
+    # drive wakes the model (the old way: overnight it said one of three near-identical lines 150 times).
+    policy: str = "rules"
 
     def __post_init__(self) -> None:
         for key in ("idle_after_s", "think_interval_s", "observation_interval_s", "drive_rate_scale",
@@ -156,6 +163,8 @@ class AutonomyConfig:
                 raise ValueError(f"autonomy.{key} must be finite and at least 0.1 seconds")
         if not isinstance(self.enabled, bool):
             raise ValueError("Autonomy switches must be booleans")
+        if self.policy not in ("rules", "model"):
+            raise ValueError("autonomy.policy must be 'rules' or 'model'")
 
 
 @dataclass
