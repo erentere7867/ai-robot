@@ -2,7 +2,8 @@
 
 Each tick:
   1. perception — take the newest detection (it runs in a worker thread at whatever rate the hardware
-     manages) and fuse it into the spatial map from the pose at which its frame was captured;
+     manages) and fuse it into the spatial map from the pose at which its frame was captured. Every camera
+     of the rig is watched: the front camera every cycle, the others in turn, so the map covers all around;
   2. control — tick the active behaviour and send its speed command to the body.
 
 Keeping both in one loop (instead of separate tasks) makes timing deterministic under the test clock.
@@ -72,6 +73,8 @@ class FastLoop:
         self.clock = clock
         self.body = body
         self.camera = camera
+        self.cameras = list(getattr(camera, "cameras", [camera]))  # a CameraRig, or one camera
+        self._cycle = 0
         self.world = spatial_map
         self.planner = planner
         self.detector = detector
@@ -101,15 +104,16 @@ class FastLoop:
         self.behavior: Behavior | None = None
         self._future: asyncio.Future | None = None
         self._blocked: str | None = None
-        self._pending: tuple[Any, asyncio.Future] | None = None
+        self._pending: list[tuple[Any, asyncio.Future]] | None = None  # this cycle's frames being detected
         self._last_tick = clock.monotonic()
-        self._last_fuse = -math.inf
+        self._last_fuse: dict[str, float] = {}  # per camera
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
         self.detect_hz = 0.0
         self.tick_ms = 0.0
-        self.last_detections: list[Any] = []
+        self.last_detections: list[Any] = []  # the front camera's
         self.last_frame: Any = None
+        self.views: dict[str, tuple[Any, list[Any]]] = {}  # newest (frame, detections) per camera
         self._last_emit = -math.inf
 
     # -- lifecycle ---------------------------------------------------------------------------------
@@ -200,9 +204,9 @@ class FastLoop:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
-        if self._pending is not None:
-            self._pending[1].cancel()
-            self._pending = None
+        for _, task in self._pending or []:
+            task.cancel()
+        self._pending = None
 
     async def health(self) -> Any:
         from robot.core.service import ServiceHealth
@@ -282,59 +286,74 @@ class FastLoop:
 
     def _fuse(self, frame: Any, detections: list[Any], weight: float) -> Any:
         # A trained detector's fixed classes outrank labels remembered from an older session or detector.
+        scan = self.lidar.latest() if self.lidar is not None else None
         update = self.world.integrate_view(frame.pose, frame.model, detections, weight=weight,
-                                           relabel=hasattr(self.detector, "vocabulary"))
-        self.last_detections, self.last_frame = detections, frame
+                                           relabel=hasattr(self.detector, "vocabulary"), scan=scan,
+                                           clipped_tracks=len(self.cameras) == 1)
+        self.views[frame.model.name] = (frame, detections)
+        if frame.model.name == self.cameras[0].model.name:
+            self.last_detections, self.last_frame = detections, frame
         return update
 
-    async def perceive_now(self) -> Any:
-        """One full-weight look right now (for "what do you see?"); waits for the detector."""
+    def _next_cameras(self) -> list[Any]:
+        """This cycle's cameras: the front one every cycle, the others one at a time in turn."""
+        self._cycle += 1
+        rest = self.cameras[1:]
+        return [self.cameras[0], rest[self._cycle % len(rest)]] if rest else [self.cameras[0]]
+
+    async def perceive_now(self) -> list[tuple[Any, list[Any], Any]]:
+        """One full-weight look through every camera right now: [(frame, detections, update)]."""
         if self.detector is None:
-            return None
+            return []
         if self.threaded and hasattr(self.detector, "detect_frame"):
             return await asyncio.to_thread(self._look_now)  # off every event loop
-        return await self._look()
+        views = []
+        for cam in self.cameras:
+            frame = cam.capture()
+            detections = await self._launch(frame)
+            self._last_fuse[frame.model.name] = self.clock.monotonic()
+            views.append((frame, detections, self._fuse(frame, detections, 1.0)))
+        return views
 
-    def _look_now(self) -> Any:
-        frame = self.camera.capture()
-        detections = self.detector.detect_frame(frame)
-        self._last_fuse = self.clock.monotonic()
-        return self._fuse(frame, detections, 1.0)
-
-    async def _look(self) -> Any:
-        frame = self.camera.capture()
-        detections = await self._launch(frame)
-        self._last_fuse = self.clock.monotonic()
-        return self._fuse(frame, detections, 1.0)
+    def _look_now(self) -> list[tuple[Any, list[Any], Any]]:
+        views = []
+        for cam in self.cameras:
+            frame = cam.capture()
+            detections = self.detector.detect_frame(frame)
+            self._last_fuse[frame.model.name] = self.clock.monotonic()
+            views.append((frame, detections, self._fuse(frame, detections, 1.0)))
+        return views
 
     def _perception_step(self, now: float) -> None:
         if self.detector is None or not self.streaming:
             return
         if self._pending is None:
-            frame = self.camera.capture()
-            self._pending = (frame, self._launch(frame))
+            frames = [cam.capture() for cam in self._next_cameras()]  # the same cadence as the perception thread
+            self._pending = [(frame, self._launch(frame)) for frame in frames]
             return
-        frame, task = self._pending
-        if not task.done():
+        if not all(task.done() for _, task in self._pending):
             return
-        self._pending = None
-        try:
-            detections = task.result()
-        except Exception:
-            logger.warning("Detection failed", exc_info=True)
-            return
-        self._absorb(frame, detections, now)
+        pending, self._pending = self._pending, None
+        for frame, task in pending:
+            try:
+                detections = task.result()
+            except Exception:
+                logger.warning("Detection failed", exc_info=True)
+                continue
+            self._absorb(frame, detections, now)
 
     def _absorb(self, frame: Any, detections: list[Any], now: float) -> None:
-        """Fuse one streamed detection result, weighted by how long since the previous one."""
-        interval = now - self._last_fuse
-        self._last_fuse = now
-        if math.isfinite(interval) and interval > 0:
+        """Fuse one streamed detection result, weighted by how long since that camera's previous one."""
+        name = frame.model.name
+        interval = now - self._last_fuse.get(name, -math.inf)
+        self._last_fuse[name] = now
+        if name == self.cameras[0].model.name and math.isfinite(interval) and interval > 0:
             self.detect_hz += 0.2 * (1.0 / interval - self.detect_hz)
         update = self._fuse(frame, detections, min(1.0, interval / STREAM_WEIGHT_WINDOW_S))
         if update.seen and any(new for _, _, new in update.seen) or now - self._last_emit > 0.5:
             self._last_emit = now
             self._emit("perception.view", self.name, {
+                "camera": name,
                 "detections": [{"label": d.label, "bbox": [round(v, 3) for v in d.bbox],
                                 "score": round(getattr(d, "score", 1.0), 2)} for d in detections],
                 "seen": [o.id for o, _, _ in update.seen], "new": [o.id for o, _, new in update.seen if new],
@@ -351,8 +370,9 @@ class FastLoop:
             try:
                 self._scan_step()
                 if stream:
-                    frame = self.camera.capture()
-                    self._absorb(frame, self.detector.detect_frame(frame), self.clock.monotonic())
+                    for cam in self._next_cameras():
+                        frame = cam.capture()
+                        self._absorb(frame, self.detector.detect_frame(frame), self.clock.monotonic())
                 else:
                     time.sleep(0.02)
             except Exception:

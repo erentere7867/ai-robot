@@ -7,3 +7,6 @@ build/
 dist/
 *.egg-info/
 .claude/worktrees/
+# Benchmark and evaluation outputs (scripts write here; results worth keeping go into docs/)
+artifacts/
+runs/

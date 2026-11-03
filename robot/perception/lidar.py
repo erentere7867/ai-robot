@@ -6,7 +6,8 @@ fused into the occupancy grid by the fast loop (SpatialMap.update_scan), tagged 
 
 Sources: `SimLidar` (raycast in the sandbox) and `Ld19Lidar` (LDROBOT LD19 / LD06 on a USB-UART, the
 common ~$70 units: 230400 baud, 47-byte packets of 12 points). Mounted on the mast above the head, so it
-sees walls and furniture but not toys on the floor (the camera and the front range sensor cover those).
+sees walls, furniture and people's legs but not toys on the floor (the cameras and the front range sensor
+cover those).
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ class Scan:
     angles_deg: np.ndarray  # relative to the robot's heading, + = left
     ranges_mm: np.ndarray  # inf = no return within range
     stamp: float
+    mount_x_mm: float = -105.0  # the lidar sits this far ahead of the robot's centre (config/body.yaml)
 
 
 class SimLidar:
@@ -50,7 +52,7 @@ class SimLidar:
             return self._last
         truth = self.body.true_pose() if hasattr(self.body, "true_pose") else self.body.pose()
         ranges = self._cast(truth)
-        self._last = Scan(self.body.pose(), self.angles, ranges, now)
+        self._last = Scan(self.body.pose(), self.angles, ranges, now, self.mount_x)
         return self._last
 
     def _cast(self, pose: Any) -> np.ndarray:
@@ -63,11 +65,8 @@ class SimLidar:
             tx = np.where(dx > 0, (half - ox) / dx, np.where(dx < 0, (-half - ox) / dx, np.inf))
             ty = np.where(dy > 0, (half - oy) / dy, np.where(dy < 0, (-half - oy) / dy, np.inf))
         best = np.minimum(tx, ty)
-        for obj in getattr(self.sandbox, "_objects", {}).values():
-            if obj.height_mm + obj.z_mm < self.height:
-                continue
-            cx, cy = obj.x_mm - ox, obj.y_mm - oy
-            r = obj.radius_mm
+        for x, y, r in self.sandbox.lidar_circles(self.height):  # a person is two legs at this height
+            cx, cy = x - ox, y - oy
             along = cx * dx + cy * dy
             perp2 = (cx * cx + cy * cy) - along * along
             hit = (along > 0) & (perp2 <= r * r)

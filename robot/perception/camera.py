@@ -1,21 +1,30 @@
-"""Camera sources. Frames carry the body pose at capture so detections can be placed in the map."""
+"""Camera sources. Frames carry the body pose at capture so detections can be placed in the map.
+
+`CameraRig` holds every camera in config/body.yaml: in the simulator each is a MuJoCo render, on the robot a
+MIPI camera through the VENTUNO Q's ISP (or a USB camera). Wide lenses are rectified to the pinhole model the
+rest of the code assumes, from a calibration file (scripts/ventuno/calibrate_camera.py).
+"""
 
 from __future__ import annotations
 
 import base64
 import struct
+import threading
 import zlib
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from robot.body.hal import BodyPose
 from robot.perception.geometry import CameraModel
 
+VLM_MAX_WIDTH = 512  # the VLM reads 512-pixel tiles: a wider image only costs tokens
+
 
 def encode_png(rgb: np.ndarray) -> bytes:
-    """Fast pure-Python/zlib PNG encoder for an (H, W, 3) uint8 RGB image (~2 ms)."""
+    """Fast numpy/zlib PNG encoder for an (H, W, 3) uint8 RGB image (~2 ms)."""
     h, w, _ = rgb.shape
     filter_col = np.zeros((h, 1), dtype=np.uint8)
     scanlines = np.hstack([filter_col, np.ascontiguousarray(rgb).reshape(h, w * 3)]).tobytes()
@@ -27,6 +36,17 @@ def encode_png(rgb: np.ndarray) -> bytes:
     ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
     idat = zlib.compress(scanlines, level=1)
     return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
+
+
+def fit_width(rgb: np.ndarray, max_width: int) -> np.ndarray:
+    """Downscale (block average) so the image is at most `max_width` wide."""
+    h, w, _ = rgb.shape
+    if w <= max_width:
+        return rgb
+    nh = max(1, round(h * max_width / w))
+    ys = (np.arange(nh) * h / nh).astype(int)
+    xs = (np.arange(max_width) * w / max_width).astype(int)
+    return rgb[ys][:, xs]
 
 
 def crop_png(rgb: np.ndarray, bbox: tuple[float, float, float, float], margin: float = 0.25) -> bytes:
@@ -41,8 +61,8 @@ def crop_png(rgb: np.ndarray, bbox: tuple[float, float, float, float], margin: f
 
 @dataclass
 class Frame:
-    # PNG is encoded lazily from `rgb` when first needed: the fast detector reads raw pixels every frame,
-    # and only the occasional VLM request needs a PNG (encoding costs ~10-20 ms of a Pi core per frame).
+    # PNG is encoded lazily: the fast detector reads raw pixels every frame, and only the occasional VLM
+    # request needs a PNG (encoding costs a few milliseconds of a core per frame).
     _png: bytes | None
     pose: BodyPose
     model: CameraModel
@@ -52,9 +72,13 @@ class Frame:
     _data_url: str | None = field(default=None, init=False, repr=False)
 
     @property
+    def camera(self) -> str:
+        return self.model.name
+
+    @property
     def png_bytes(self) -> bytes:
         if self._png is None:
-            self._png = encode_png(self.rgb) if self.rgb is not None else b""
+            self._png = encode_png(fit_width(self.rgb, VLM_MAX_WIDTH)) if self.rgb is not None else b""
         return self._png
 
     @property
@@ -64,105 +88,98 @@ class Frame:
         return self._data_url
 
 
-class CameraSource(Protocol):
-    model: CameraModel
-
-    def capture(self) -> Frame: ...
-
-    def thumbnail(self) -> np.ndarray: ...
+def side_by_side(frames: list[Frame]) -> Frame:
+    """Two or more views as one image (for the VLM), left to right; boxes and geometry stay per camera."""
+    height = min(f.rgb.shape[0] for f in frames if f.rgb is not None)
+    rgb = np.hstack([f.rgb[:height] for f in frames if f.rgb is not None])
+    frame = Frame(None, frames[0].pose, frames[0].model, frames[0].captured_at, None, rgb)
+    frame._png = encode_png(fit_width(rgb, 2 * VLM_MAX_WIDTH))
+    return frame
 
 
 def _thumbnail(rgb: np.ndarray, size: tuple[int, int] = (32, 24)) -> np.ndarray:
+    """Block means (not point samples), so tiny render differences don't register as change."""
     h, w, _ = rgb.shape
     gray = rgb.astype(np.float32).mean(axis=2)
+    bh, bw = max(1, h // size[1]), max(1, w // size[0])
     ys = (np.arange(size[1]) * h / size[1]).astype(int)
     xs = (np.arange(size[0]) * w / size[0]).astype(int)
-    # Block means rather than point samples so tiny renders differences don't register.
-    bh, bw = max(1, h // size[1]), max(1, w // size[0])
     return np.array([[gray[y:y + bh, x:x + bw].mean() for x in xs] for y in ys], dtype=np.float32)
 
 
 class SimCamera:
-    """Renders the MuJoCo head camera from the body's *true* pose (what a real lens would see).
+    """One of the robot's cameras rendered in MuJoCo from the body's *true* pose (what a real lens would see).
 
-    Detections are attached to the *estimated* pose, as on hardware where only odometry is known.
+    Frames are tagged with the *estimated* pose, as on hardware where only odometry is known.
     """
 
-    def __init__(self, sandbox: Any, body: Any, clock: Any, model: CameraModel | None = None) -> None:
-        self.sandbox = sandbox
-        self.body = body
-        self.clock = clock
-        self.model = model or CameraModel(sandbox.cam_width, sandbox.cam_height)
+    def __init__(self, sandbox: Any, body: Any, clock: Any, model: CameraModel) -> None:
+        self.sandbox, self.body, self.clock, self.model = sandbox, body, clock, model
 
     def _true_pose(self) -> BodyPose:
         getter = getattr(self.body, "true_pose", None)
         return getter() if callable(getter) else self.body.pose()
 
     def capture(self) -> Frame:
-        rgb = self.sandbox.render_head_rgb(self._true_pose())
-        return Frame(None, self.body.pose(), self.model, self.clock.monotonic(), _thumbnail(rgb), rgb)
-
-    def thumbnail(self) -> np.ndarray:
-        return _thumbnail(self.sandbox.render_head_rgb(self._true_pose()))
+        pose = self.body.pose()
+        rgb = self.sandbox.render_rgb(self.model.name, self._true_pose())
+        return Frame(None, pose, self.model, self.clock.monotonic(), _thumbnail(rgb), rgb)
 
 
 class RealCamera:
-    """A physical camera: Raspberry Pi camera module (Picamera2), a MIPI camera on the VENTUNO Q (GStreamer
-    through OpenCV, `source="csi"`) or any USB camera (OpenCV).
+    """A physical camera: a MIPI camera on the VENTUNO Q (GStreamer through OpenCV, `source="csi"`) or a USB
+    camera (`source="usb"`), rectified to `model` when a calibration file exists.
 
-    Frames carry the body's pose at capture, so detections are placed where the robot was when it saw them.
     Capture runs in a background thread that keeps only the newest image, so a read never waits for the
     sensor and never returns a stale frame from a buffer queue.
     """
 
-    def __init__(self, body: Any, clock: Any, model: CameraModel, *, source: str = "picamera",
-                 device: int = 0) -> None:
-        import threading
+    def __init__(self, body: Any, clock: Any, model: CameraModel, *, source: str = "csi",
+                 calibration_dir: Path | None = None) -> None:
+        import cv2
 
-        self.body = body
-        self.clock = clock
-        self.model = model
+        self.body, self.clock, self.model = body, clock, model
         self._latest: np.ndarray | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         w, h = model.width, model.height
-        if source == "picamera":
-            from picamera2 import Picamera2  # Raspberry Pi OS: sudo apt install python3-picamera2
-
-            self._cam = Picamera2()
-            self._cam.configure(self._cam.create_video_configuration(main={"size": (w, h), "format": "RGB888"},
-                                                                     buffer_count=2))
-            self._cam.start()
-            self._read = lambda: self._cam.capture_array()[:, :, ::-1]  # RGB888 arrives as BGR in memory
+        if source == "csi":
+            # MIPI camera through the SoC's ISP: Qualcomm's camera source first, libcamera as the fallback.
+            # appsink keeps only the newest frame.
+            tail = "videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1"
+            for src in (f"qtiqmmfsrc camera={model.device} ! video/x-raw,format=NV12,width=1280,height=720,"
+                        "framerate=30/1 ! ", f"libcamerasrc camera-name={model.device} ! "):
+                self._cam = cv2.VideoCapture(src + tail, cv2.CAP_GSTREAMER)
+                if self._cam.isOpened():
+                    break
         else:
-            import cv2
+            self._cam = cv2.VideoCapture(model.device)
+            self._cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._maps = None
+        calib = (calibration_dir or Path("~/robot-runtime/calibration").expanduser()) / f"{model.name}.npz"
+        if calib.exists():
+            data = np.load(calib)
+            f = model.focal_px
+            target = np.array([[f, 0.0, w / 2.0], [0.0, f, h / 2.0], [0.0, 0.0, 1.0]])
+            size = tuple(int(v) for v in data["size"])  # the resolution it was calibrated at
+            self._maps = cv2.fisheye.initUndistortRectifyMap(data["K"], data["D"], np.eye(3), target, (w, h),
+                                                             cv2.CV_16SC2)
+            self._calib_size = size
 
-            if source == "csi":
-                # MIPI camera through the SoC's ISP: Qualcomm's camera source first, libcamera as the fallback.
-                # The ISP scales; appsink keeps only the newest frame.
-                tail = (f"video/x-raw,width={w},height={h} ! videoconvert ! video/x-raw,format=BGR ! "
-                        "appsink drop=true max-buffers=1")
-                for src in (f"qtiqmmfsrc camera={device} ! video/x-raw,format=NV12,width=1280,height=720,"
-                            "framerate=30/1 ! videoscale ! ", "libcamerasrc ! videoconvert ! videoscale ! "):
-                    self._cam = cv2.VideoCapture(src + tail, cv2.CAP_GSTREAMER)
-                    if self._cam.isOpened():
-                        break
-            else:
-                self._cam = cv2.VideoCapture(device)
-                self._cam.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-                self._cam.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-                self._cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        def read() -> np.ndarray | None:
+            ok, bgr = self._cam.read()
+            if not ok:
+                return None
+            if self._maps is not None:
+                if (bgr.shape[1], bgr.shape[0]) != self._calib_size:
+                    bgr = cv2.resize(bgr, self._calib_size, interpolation=cv2.INTER_AREA)
+                bgr = cv2.remap(bgr, *self._maps, interpolation=cv2.INTER_LINEAR)
+            elif bgr.shape[1] != w or bgr.shape[0] != h:
+                bgr = cv2.resize(bgr, (w, h), interpolation=cv2.INTER_AREA)
+            return bgr[:, :, ::-1]
 
-            def read() -> np.ndarray | None:
-                ok, bgr = self._cam.read()
-                if not ok:
-                    return None
-                if bgr.shape[1] != w or bgr.shape[0] != h:
-                    bgr = cv2.resize(bgr, (w, h), interpolation=cv2.INTER_AREA)
-                return bgr[:, :, ::-1]
-
-            self._read = read
-        self._thread = threading.Thread(target=self._pump, name="camera", daemon=True)
+        self._read = read
+        self._thread = threading.Thread(target=self._pump, name=f"camera-{model.name}", daemon=True)
         self._thread.start()
 
     def _pump(self) -> None:
@@ -181,18 +198,49 @@ class RealCamera:
                 if self._latest is not None:
                     return self._latest
             self._stop.wait(0.01)
-        raise RuntimeError("The camera is not delivering frames")
+        raise RuntimeError(f"Camera {self.model.name} is not delivering frames")
 
     def capture(self) -> Frame:
+        pose = self.body.pose()
         rgb = self._newest()
-        return Frame(None, self.body.pose(), self.model, self.clock.monotonic(), _thumbnail(rgb), rgb)
-
-    def thumbnail(self) -> np.ndarray:
-        return _thumbnail(self._newest())
+        return Frame(None, pose, self.model, self.clock.monotonic(), _thumbnail(rgb), rgb)
 
     def close(self) -> None:
         self._stop.set()
         try:
-            self._cam.stop() if hasattr(self._cam, "stop") else self._cam.release()
+            self._cam.release()
         except Exception:
             pass
+
+
+class CameraRig:
+    """All of the robot's cameras. The first is the front (head) camera: the default view."""
+
+    def __init__(self, cameras: list[Any]) -> None:
+        if not cameras:
+            raise ValueError("a camera rig needs at least one camera")
+        self.cameras = list(cameras)
+        self._by_name = {c.model.name: c for c in self.cameras}
+
+    @property
+    def model(self) -> CameraModel:
+        return self.cameras[0].model
+
+    @property
+    def models(self) -> list[CameraModel]:
+        return [c.model for c in self.cameras]
+
+    def capture(self, name: str | None = None) -> Frame:
+        return (self._by_name[name] if name else self.cameras[0]).capture()
+
+    def capture_all(self) -> list[Frame]:
+        return [c.capture() for c in self.cameras]
+
+    def thumbnail(self) -> np.ndarray:
+        return self.capture().thumbnail
+
+    def close(self) -> None:
+        for cam in self.cameras:
+            close = getattr(cam, "close", None)
+            if callable(close):
+                close()

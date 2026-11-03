@@ -1,10 +1,15 @@
-"""AudioService: coordinates SFX playback, TTS with RMS mouth sync, mic VAD/ASR, and barge-in."""
+"""AudioService: SFX playback, TTS with mouth sync, microphone VAD/ASR, barge-in, and where a voice came from.
+
+With a microphone array (config/body.yaml) every channel is captured: voice activity and speech recognition
+use their mean, and the direction of each utterance (robot/audio/doa.py) rides on the message it produced,
+so "come here" knows where "here" is."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -16,6 +21,7 @@ except (ImportError, OSError):  # pragma: no cover
     sd = None  # type: ignore[assignment]
 
 from robot.audio.asr import SpeechRecognizer
+from robot.audio.doa import MicArray, srp_phat
 from robot.audio.sfx import PetSoundSynthesizer
 from robot.audio.tts import RobotTTSEngine, SynthesizedSpeech
 from robot.audio.vad import VoiceActivityDetector
@@ -47,8 +53,12 @@ class AudioService:
         tts_mode: str = "auto",
         asr_mode: str = "auto",
         realtime_sync: bool | None = None,
+        mic_array: MicArray | None = None,
     ) -> None:
         self.bus = bus
+        self.mic_array = mic_array
+        self._mc_preroll: deque[np.ndarray] = deque(maxlen=12)  # multi-channel frames before speech starts
+        self._mc_utterance: list[np.ndarray] | None = None
         self.face_bridge = face_bridge
         self.enable_speaker = enable_speaker
         self.enable_mic = enable_mic
@@ -270,8 +280,12 @@ class AudioService:
             )
         return speech
 
-    async def process_mic_frame(self, frame: np.ndarray) -> list[dict[str, Any]]:
-        """Feed a 16 kHz mono audio frame into VAD; handle barge-in and transcribe completed utterances."""
+    async def process_mic_frame(self, frame: np.ndarray, channels: np.ndarray | None = None) -> list[dict[str, Any]]:
+        """Feed a 16 kHz mono audio frame into VAD; handle barge-in and transcribe completed utterances.
+
+        `channels` is the same frame from every microphone of the array (samples, mics), for the direction."""
+        if channels is not None:
+            (self._mc_utterance if self._mc_utterance is not None else self._mc_preroll).append(channels)
         vad_events = self.vad.process_frame(frame, robot_is_speaking=self.is_speaking)
         results: list[dict[str, Any]] = []
 
@@ -288,6 +302,7 @@ class AudioService:
 
             elif ev.kind == "speech_start":
                 self._mic_generation += 1
+                self._mc_utterance = list(self._mc_preroll) if channels is not None else None
                 await self.bus.emit(
                     "speech.detected",
                     source="microphone",
@@ -297,6 +312,8 @@ class AudioService:
                 results.append({"kind": "speech_start"})
 
             elif ev.kind == "speech_end" and ev.audio_samples is not None:
+                multi = np.concatenate(self._mc_utterance, axis=0).T if self._mc_utterance else None
+                self._mc_utterance = None
                 await self.bus.emit(
                     "speech.detected",
                     source="microphone",
@@ -306,7 +323,7 @@ class AudioService:
                 if self._asr_queue.full():
                     self._asr_queue.get_nowait()
                     self._asr_queue.task_done()
-                self._asr_queue.put_nowait((ev, self._mic_generation))
+                self._asr_queue.put_nowait((ev, self._mic_generation, multi))
                 if self._asr_task is None or self._asr_task.done():
                     self._asr_task = asyncio.create_task(self._recognition_loop(), name="audio:asr")
                 results.append({"kind": "speech_end", "pending": True})
@@ -316,7 +333,7 @@ class AudioService:
     async def _recognition_loop(self) -> None:
         """One active utterance plus one latest pending utterance; VAD never waits for ASR."""
         while self._running:
-            event, generation = await self._asr_queue.get()
+            event, generation, multi = await self._asr_queue.get()
             try:
                 if self._asr_future is not None and not self._asr_future.done():
                     await asyncio.shield(self._asr_future)
@@ -339,12 +356,12 @@ class AudioService:
                     },
                 )
                 if result.confidence >= 0.55 and self.last_asr_text.strip():
-                    await self.bus.emit(
-                        "input.user_message",
-                        "microphone",
-                        {"text": self.last_asr_text.strip(), "direct": False},
-                        priority=EventPriority.HIGH,
-                    )
+                    payload: dict[str, Any] = {"text": self.last_asr_text.strip(), "direct": False}
+                    if multi is not None and self.mic_array is not None and multi.shape[1] >= 1024:
+                        bearing, confidence = await asyncio.to_thread(srp_phat, multi, event.sample_rate,
+                                                                      self.mic_array)
+                        payload["voice"] = {"bearing_deg": round(bearing, 1), "confidence": round(confidence, 2)}
+                    await self.bus.emit("input.user_message", "microphone", payload, priority=EventPriority.HIGH)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -385,20 +402,22 @@ class AudioService:
         q: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=16)
         loop = asyncio.get_running_loop()
 
-        def enqueue(mono: np.ndarray) -> None:
+        channels = self.mic_array.n if self.mic_array is not None else 1
+
+        def enqueue(block: np.ndarray) -> None:
             if q.full():
                 q.get_nowait()
-            q.put_nowait(mono)
+            q.put_nowait(block)
 
         def _callback(indata: np.ndarray, _frames: int, _time_info: Any, _status: Any) -> None:
             try:
-                loop.call_soon_threadsafe(enqueue, indata[:, 0].copy())
+                loop.call_soon_threadsafe(enqueue, indata.copy())
             except RuntimeError:
                 pass  # The loop closed while PortAudio was still delivering a block.
 
         def _open() -> Any:
             stream = sd.InputStream(
-                samplerate=sr, channels=1, dtype="float32", blocksize=blocksize, callback=_callback
+                samplerate=sr, channels=channels, dtype="float32", blocksize=blocksize, callback=_callback
             )
             try:
                 stream.start()
@@ -428,7 +447,7 @@ class AudioService:
                 except TimeoutError:
                     raise OSError("Microphone stream delivered no audio") from None
                 self._mic_retry_s = MIC_RETRY_INITIAL_S  # A working stream earns a fast retry next time.
-                await self.process_mic_frame(frame)
+                await self.process_mic_frame(frame.mean(axis=1), frame if channels > 1 else None)
         finally:
             try:
                 await asyncio.shield(loop.run_in_executor(self._device_pool, stream.close))

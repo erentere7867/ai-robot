@@ -1,8 +1,8 @@
-"""Looking: the fast detector keeps the map current; these tools read it, look fresh, or search.
+"""Looking: the fast detector keeps the map current from every camera; these tools read it, look fresh, or search.
 
-With a streaming detector (YOLO in the fast layer) a search is one smooth turn while every frame is
-checked. Things outside the detector's classes ("my keys") fall back to the VLM: it is slower but can
-recognise anything, so the robot stays general.
+The cameras see all around, so "what's behind you?" needs no turn. A search for something not in view yet
+is one smooth turn while every frame is checked (the front camera sees smaller things farther away). Things
+outside the detector's classes ("my keys") fall back to the VLM: slower, but it recognises anything.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ import re
 from typing import Any
 
 from robot.control.behaviors import Scan, Search
-from robot.perception.camera import crop_png
+from robot.perception.camera import crop_png, side_by_side
+from robot.perception.geometry import camera_for
 from robot.skills.base import Skill, SkillContext, SkillResult
 from robot.world.spatial_map import direction_words, label_score
 
@@ -113,49 +114,90 @@ def _summary(ctx: SkillContext, ids: list[str]) -> list[str]:
     return [ctx.spatial_map.describe(o, pose).replace(", seen just now", "") for o in objs]
 
 
-_TURN_FOR = {"left": "left", "right": "right", "behind": "around"}
+# Where each direction is (relative to my heading) and how wide "on my left" is.
+DIRECTIONS = {"front": 0.0, "left": 90.0, "right": -90.0, "behind": 180.0}
+SECTOR_HALF_DEG = 65.0
 
 
-async def observe(ctx: SkillContext, direction: str = "front") -> SkillResult:
-    if direction in _TURN_FOR:
-        # Looking somewhere else is turning there first: "look back" / "what's on your left" in one step.
-        from robot.skills.navigation import turn  # navigation imports this module
+def _in_sector(ctx: SkillContext, obj_id: str, direction: str) -> bool:
+    if direction not in DIRECTIONS:
+        return True
+    obj = ctx.spatial_map.objects.get(obj_id)
+    if obj is None:
+        return False
+    off = (obj.relative(ctx.pose())[1] - DIRECTIONS[direction] + 180.0) % 360.0 - 180.0
+    return abs(off) <= SECTOR_HALF_DEG
 
-        turned = await turn(ctx, _TURN_FOR[direction])
-        if not turned.ok:
-            return turned
-        seen = await observe(ctx)
-        return SkillResult(seen.ok, f"{turned.message} {seen.message}", seen.data)
+
+def _image_for(views: list[Any], direction: str) -> Any:
+    """The view to show the model: the camera facing that way; behind me, both rear cameras side by side."""
+    frames = [frame for frame, _, _ in views if frame is not None]
+    if not frames:
+        return None
+    if direction in ("around", "front") or len(frames) == 1:
+        return frames[0]
+    centre = DIRECTIONS[direction]
+    facing = [f for f in frames if f.model.covers(centre, 10.0)]
+    if direction == "behind" and len(facing) >= 2:
+        return side_by_side(sorted(facing, key=lambda f: f.model.yaw_deg)[:2])
+    return min(frames, key=lambda f: abs((centre - f.model.yaw_deg + 180.0) % 360.0 - 180.0))
+
+
+_LOOK_AT_ME = re.compile(r"\b(?:look|turn)(?: right| over)? (?:at|to|towards?) me\b|\bface me\b", re.I)
+
+
+async def observe(ctx: SkillContext, direction: str = "around") -> SkillResult:
+    """Look through every camera at once: what is around me (or only in one direction), without turning."""
+    if ctx.request and _LOOK_AT_ME.search(ctx.request) and ctx.spatial_map.speaker is not None:
+        # "Look at me" is turning to face the human (measured: the 2B model read "look" as observe).
+        from robot.skills.navigation import face  # navigation imports this module
+
+        return await face(ctx, "me")
     pose = ctx.pose()
-    key = (round(pose.x_mm, -1), round(pose.y_mm, -1), round(pose.heading_deg), round(pose.head_tilt_deg))
+    key = (round(pose.x_mm, -1), round(pose.y_mm, -1), round(pose.heading_deg), round(pose.head_tilt_deg),
+           direction)
     cached = ctx.turn_cache.get("observe")
     if cached is not None and cached[0] == key:
         # Looking again from the same spot shows the same thing; a small model sometimes loops here.
         return SkillResult(True, "You already looked from here and nothing moved; use what you saw.",
                            cached[1])
     if _streaming(ctx):
-        update = await ctx.fast.perceive_now()
-        frame = ctx.fast.last_frame
-        view = await _view_result(ctx, frame, ctx.fast.last_detections, update, None)
-        await _name_unknown(ctx, frame, view["pairs"])
-        ctx.attached_image = frame
+        views = await ctx.fast.perceive_now()
+        results = [await _view_result(ctx, frame, dets, update, None) for frame, dets, update in views]
+        for (frame, _, _), view in zip(views, results, strict=True):
+            await _name_unknown(ctx, frame, view["pairs"])
     else:
-        view = await perceive(ctx, None)
-    seen = _summary(ctx, view["seen"])
+        centre = DIRECTIONS.get(direction, 0.0)
+        name = camera_for(ctx.camera.models, centre).name if hasattr(ctx.camera, "models") else None
+        frame = ctx.camera.capture(name) if name else ctx.camera.capture()
+        results = [await _fuse(ctx, frame, await ctx.detector.detect(frame, None), None)]
+        views = [(frame, None, None)]
+    ctx.attached_image = _image_for(views, direction)
+    seen_ids = [i for view in results for i in view["seen"]]
+    here = [i for i in seen_ids if _in_sector(ctx, i, direction)]
+    seen = _summary(ctx, here)
     data: dict[str, Any] = {"objects": seen}
-    if view["unplaced"]:
-        data["also_visible"] = view["unplaced"]
-    if view["lost"]:
-        data["no_longer_there"] = view["lost"]
+    elsewhere = _summary(ctx, [i for i in seen_ids if i not in here])
+    if elsewhere:
+        data["elsewhere_around_me"] = elsewhere
+    unplaced = [u for view in results for u in view["unplaced"]]
+    if unplaced:
+        data["also_visible"] = unplaced
+    lost = [i for view in results for i in view["lost"]]
+    if lost:
+        data["no_longer_there"] = lost
     ctx.turn_cache["observe"] = (key, data)
     # Looking again from exactly where I last looked (an earlier turn) shows the same view. A small model
     # sometimes answers "now look right" by looking again without turning; saying so lets it correct that.
     same_spot = ctx.last_look == key
     ctx.last_look = key
-    note = " I have not moved since I last looked; to look somewhere else, I must turn first." if same_spot else ""
-    if not seen and not view["unplaced"]:
-        return SkillResult(True, "I see no distinct objects in front of me." + note, data)
-    return SkillResult(True, f"I can see {len(seen) + len(view['unplaced'])} thing(s)." + note, data)
+    note = " I have not moved since I last looked." if same_spot else ""
+    where = "around me" if direction == "around" else ("in front of me" if direction == "front"
+                                                        else "behind me" if direction == "behind"
+                                                        else f"on my {direction}")
+    if not seen and not unplaced:
+        return SkillResult(True, f"I see no distinct objects {where}." + note, data)
+    return SkillResult(True, f"I can see {len(seen) + len(unplaced)} thing(s) {where}." + note, data)
 
 
 def in_view(ctx: SkillContext) -> dict[str, Any]:
@@ -176,7 +218,7 @@ async def find(ctx: SkillContext, query: str) -> str | None:
 async def look_around(ctx: SkillContext, query: str = "") -> SkillResult:
     side = _side(query)
     if side is not None:
-        return await observe(ctx, {"around": "behind"}.get(side, side))
+        return await observe(ctx, {"around": "behind"}.get(side, side))  # the cameras already look there
     query = _query(query)
     if _streaming(ctx) and (not query or _in_vocabulary(ctx, query)):
         started = ctx.clock.monotonic()
@@ -245,36 +287,15 @@ async def _look_around_vlm(ctx: SkillContext, query: str) -> SkillResult:
     return SkillResult(True, f"I looked all around and know of {len(objects)} object(s).", {"objects": objects})
 
 
-ASK_PROMPT = "Answer in one short sentence from what you see in this camera view. Question: {question}"
-
-
-async def ask_camera(ctx: SkillContext, question: str) -> SkillResult:
-    """Put a question about the current view to the vision model (for a decision model that cannot see)."""
-    ctx.check()
-    vlm = getattr(ctx.detector, "backend", None)
-    if vlm is None:
-        return SkillResult(False, "I have no way to look closely right now.")
-    frame = ctx.camera.capture()
-    reply = await vlm.chat([{"role": "user", "content": [{"type": "image_url", "image_url": {"url": frame.data_url}},
-                                                         {"type": "text", "text": ASK_PROMPT.format(question=question)}]}],
-                           max_tokens=60)
-    ctx.check()
-    answer = reply.content.strip()
-    return SkillResult(bool(answer), answer or "I couldn't make it out.")
-
-
-def skills(*, ask: bool = False) -> list[Skill]:
-    extra = [Skill("ask_camera", "Ask your camera a question about what is in front of you now, when the object "
-                   "list from observe does not answer it (colours, what something looks like, text, whether "
-                   "something is open). Turn first if it is elsewhere.",
-                   {"question": {"type": "string"}}, ask_camera, ["question"])] if ask else []
-    return [*extra,
-        Skill("observe", "Look through your head camera, e.g. for 'what do you see?'. To see another side of "
-              "yourself, give direction: you turn that way first. Returns each object with an id, direction and "
-              "distance.",
-              {"direction": {"type": "string", "enum": ["front", "left", "right", "behind"],
-                             "aliases": {"back": "behind", "around": "behind", "ahead": "front",
-                                         "forward": "front", "backward": "behind", "backwards": "behind"}}},
+def skills() -> list[Skill]:
+    return [
+        Skill("observe", "Look through your cameras, which see all around you at once, e.g. for 'what do you "
+              "see?' or 'what's behind you?' (direction behind; no need to turn). Returns each object with an id, "
+              "direction and distance.",
+              {"direction": {"type": "string", "enum": ["around", "front", "left", "right", "behind"],
+                             "aliases": {"back": "behind", "ahead": "front", "forward": "front",
+                                         "backward": "behind", "backwards": "behind", "all": "around",
+                                         "everywhere": "around", "all_around": "around"}}},
               observe),
         Skill("look_around", "Turn a full circle while looking, to find things that are not in front of you "
               "or to learn what is in the room. With query, stops and faces the first match.",

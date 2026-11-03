@@ -1,282 +1,155 @@
-# How Sprocket thinks and moves
+# How Sprocket works
 
-Two layers, like most robots that react in real time:
+Three layers, the way robots that react in real time are built:
 
 * a **real-time controller** (the VENTUNO Q's STM32H5, 200 Hz): wheel loops, odometry, braking envelope,
-  reflexes and watchdog, never waiting for Linux (`firmware/ventuno_mcu`, see docs/ventuno_q.md);
-* a **fast layer** (50 Hz, in its own real-time thread, perception in another) that sees and steers: a
-  small detector on every camera frame and a 360-degree lidar keep a live
-  map of the room, and closed-loop behaviours (go somewhere, follow, search, turn) steer the wheels
-  from it, re-planning as things move;
-* a **slow layer** (LFM3-VL-2B, about once a second or on events) that understands requests, picks
-  goals and talks. It never steers: it starts behaviours and hears how they ended.
+  reflexes and watchdog. It never waits for Linux (`firmware/ventuno_mcu`, see [ventuno_q.md](ventuno_q.md));
+* a **fast layer** (50 Hz control thread, a perception thread) that sees and steers: three cameras and a
+  360-degree lidar keep a live map of the room and the people in it, and closed-loop behaviours (go
+  somewhere, follow, search, circle, turn) steer the wheels from it, re-planning as things move;
+* a **slow layer** (LFM3-VL-2B through llama.cpp, on events) that understands requests, picks skills and
+  talks. It never steers: it starts behaviours and hears how they ended.
 
-Nothing is a task script. "Go behind that box" is the model choosing `go_to(box_1, behind)`; the
-behaviour then works out *where* behind is from the live map, plans around obstacles, and keeps
-correcting while it drives.
+Nothing is a task script. "Do a full circle around the box behind you" is the model calling
+`circle_around(target="the box behind you")`; the map resolves which box that is (behind the robot *as it was
+asked*), and the behaviour drives the loop around it, skipping blocked points. "Come here" is
+`go_to(target="me")`; the map knows who spoke and from where.
 
 ```
- human text / speech ──► stop reflex ("stop", "freeze": halts at once, before the model reads it)
-          │                                      ┌── drives (curiosity, social, play, energy)
-          ▼                                      ▼
-    BehaviorArbiter ◄── behaviour events ── AutonomyController
-          │ situation: live map, memories, recent activity
-          ▼
-      AgentLoop ── tools ──► LFM3-VL-2B (llama.cpp)             SLOW LAYER  ~1 Hz / on events
-          │ go_to · follow · stop · turn · move · circle_around · observe · look_around · express …
- ─────────┼──────────────────────────────────────────────────────────────────────────────────
-          ▼                                                     FAST LAYER  50 Hz (control thread)
-      FastLoop  ── every tick ──►  1. newest detection ─► SpatialMap (objects, ToF occupancy)
-          │                         2. active behaviour ─► speed command
-          ▼                                   ▲
-   YOLO11n (NCNN, worker thread)              │ GoToObject · Follow · Search · Scan · Turn · Move
-   camera frames + pose at capture            │ Orbit · Face · GoToPoint      (control/behaviors.py)
-          │                                   │
-          ▼                                   ▼
-   Body: set_velocity / update_motion ──► motors      REFLEXES  (microcontroller on the robot)
-   SimBody · PhysicsBody · SerialBody                 range stop, bumper, cliff, e-stop, watchdog
+ voice ─► mic array ─► direction ─┐        ┌─ "stop" reflex: halts at once, before the model reads anything
+ text / speech ───────────────────┼────────┤
+                                  ▼        ▼
+                         SpatialMap.hear_voice      BehaviorArbiter ◄── drives (curiosity, social, play, energy)
+                         (who spoke: a person seen,       │ situation: live map, the speaker, memories
+                          the lidar, or a guess)          ▼
+                                                    AgentLoop ── tools ──► LFM3-VL-2B        SLOW  on events
+                                                          │ go_to · follow · circle_around · observe · turn …
+ ─────────────────────────────────────────────────────────┼────────────────────────────────────────────────
+  perception thread                                        ▼                                   FAST  50 Hz
+  front + rear cameras ─► YOLO11n (NCNN, GPU) ─┐    control thread: behaviour tick ─► collision monitor
+  lidar scans ─► occupancy, localization ──────┼──► SpatialMap ◄──── GoToObject · Follow · Orbit · Search …
+                                                │                          │ v, w
+ ───────────────────────────────────────────────┴──────────────────────────┼─────────────────────────────
+  STM32H5: wheel PI loops, odometry, braking envelope, bumper / cliff / e-stop, 300 ms watchdog   200 Hz
 ```
 
-## Layers
+## Senses
 
-| Layer | Rate | Where | Job |
-|---|---|---|---|
-| Reflexes | 100 Hz | `firmware/base_controller` (sim: `body/*_body.py`) | forward stop at the range sensor, bumper, cliff, e-stop, 300 ms watchdog |
-| Fast loop | 50 Hz | `control/fast_loop.py` (own thread, absolute deadlines) | tick the behaviour, collision monitor, send speeds |
-| Perception | camera / 10 Hz lidar | `control/fast_loop.py` (perception thread) | detections and scans into the map, scan-to-map localization |
-| Collision monitor | every tick | `control/safety.py` | cap speed to what still stops in time (lidar + range sensor) |
-| Detector | as fast as it runs (60 fps laptop CPU) | `perception/fast_detector.py` | YOLO11n trained on this robot's objects; unknown things come out as "object" |
-| Behaviours | every tick while active | `control/behaviors.py` | pure pursuit on A* paths, live goals (moving targets), honest failure reasons |
-| Deliberation | on events | `cognition/agent.py` | pick behaviours and arguments, judge results, answer |
-| Drives | 1 Hz, numbers only | `behavior/drives.py` | the pet's own reasons to act when idle |
+| Sensor | Where | What it gives |
+|---|---|---|
+| Front camera, 90°, 640x480 | tilting head | detail ahead: the detector's range (a 10 cm toy at 2.5 m), the VLM's eye |
+| Two rear cameras, 140°, 640x360 | sensor mast, facing ±115° | the rest of the circle: people, furniture, anything behind |
+| 2D lidar (LD19), 360°, 10 Hz | mast top, 330 mm | walls, furniture, people's legs; localization; ranges people for the cameras |
+| 4-mic array | head top | the direction a voice came from |
+| Front ToF, bumpers, cliff sensors, IMU, encoders | base, on the MCU | reflexes and odometry |
 
-What the split buys, measured in the simulator: going to the ball takes 4-9 s instead of 10-16 s,
-a search is one smooth turn (6 s) instead of six stop-and-look views (11 s), the robot follows a
-rolling ball at a steady distance, and "stop" halts it mid-motion.
+The cameras are "fovea and periphery": the front camera sees far and small; the wide rear cameras cover the
+remaining 270° at lower resolution. Together every bearing is covered (`test_the_rig_sees_all_around`), so
+"what's behind you?" needs no turn and the map keeps objects behind the robot current while it drives.
+`config/body.yaml` (`sensors.cameras`) is the single description of the rig: the perception geometry reads it,
+and the simulator builds its MuJoCo cameras from it (their poses agree to 0.5 mm, checked by a test).
 
-### Behaviours
+## Perception
 
-* `GoToObject(target, relation)`: the goal (near, behind, left of, between, on) is recomputed every tick
-  from the live map, so a target that moves, or whose position sharpens as the robot approaches, is
-  followed. A blocked exact spot falls back to spots along the same line ("behind" stays behind).
-  Arrival is confirmed by seeing the target; if not, the skill searches and goes again or says so.
-* `Follow(target, distance)`: persistent: it keeps running after the reply, so the robot can chat while
-  following. Losing the target ends it and gives the robot a background turn to react.
-* `Search(query)` / `Scan()`: one smooth turn while every frame is checked; things outside the detector's
-  classes ("my keys") fall back to the VLM's stop-and-look scan, so the robot stays general.
-* `Turn`, `Move`, `Face`, `Orbit`, `GoToPoint`.
+1. Every camera hands out frames tagged with the body's pose at capture (`CameraRig`; `SimCamera` renders
+   MuJoCo from the true pose, `RealCamera` reads a MIPI camera through the ISP and rectifies wide lenses from
+   a calibration file). PNG encoding is lazy and capped at 512 px wide for the VLM.
+2. The **fast detector** is YOLO11n trained on this robot's objects and people (`scripts/train_detector.py`:
+   renders labelled frames from all three cameras in randomized rooms with a person in random clothes,
+   random lighting, shadows and reflections; exact boxes from a segmentation render). It runs as an NCNN
+   export, on the GPU through Vulkan when there is one. On freshly generated rooms: front camera recall 0.96 /
+   precision 0.99, rear cameras 0.90 / 0.96, people 0.99 recall; 9 ms per frame on the laptop GPU, 25 ms on its CPU.
+3. The perception thread runs the front camera every cycle and the rear cameras in turn.
+4. `CameraModel.locate_box` puts each box on the floor: bottom centre → floor ray → pushed back to the
+   object's centre. Width comes from the floor points under the box's bottom corners, which is exact even at
+   the edge of a 140° lens (pixels × distance / focal length is off by 4x there). Error from true boxes:
+   ~30 mm median on every camera.
+5. **Lidar ranges what the cameras see.** A box whose span holds lidar returns at about the camera's
+   distance (a person's legs, furniture) is placed at the centre of that cluster of returns, with
+   centimetre variance, instead of the monocular guess.
+6. `SpatialMap.integrate_view` fuses detections into tracks (label + distance gate, colour-aware synonyms,
+   Kalman-style, time-weighted: a frame from a continuous stream counts for less than a deliberate look).
+   A sighting's noise scales with distance over focal length, so the wide cameras' sightings and size
+   estimates count for less than the front camera's. People get a motion model (constant velocity learned
+   from whole, well-placed sightings, uncertainty growing while unseen), so a walking person's track keeps up
+   instead of lagging until a new track splits off. A box cut off at an image side confirms a track in that
+   direction but never starts one unless the lidar ranges it (someone on the seam between two cameras is cut
+   off in both). Objects that should be visible but are not fade out.
+   A trained detector's labels outrank remembered ones (a track it keeps calling something else is renamed).
+7. The VLM stays the open-vocabulary eye: it names what the detector only knows as "object", answers
+   questions about the view, and searches for things outside the detector's classes ("my keys").
 
-The planner (`navigation/planner.py`) uses the real footprint (181 mm circumscribed radius) with a 60 mm
-margin around objects placed from camera boxes, padded to cover a square's corners; walls and measured
-range hits get a tighter margin. Leaving a blocked start is limited to 350 mm (it could otherwise "escape"
-straight through an obstacle whose padding touches the robot's).
+## People and the voice
 
-### What the model is protected from
+When a message arrives with a voice direction (`audio/doa.py`: SRP-PHAT on the array's channels, delays applied
+in the frequency domain because the 64 mm array spans only three samples at 16 kHz; median error 1-4° with room
+echoes), `SpatialMap.hear_voice` decides who spoke: the person track in that direction; if nobody is seen
+there yet, it notes where they probably are (the nearest solid thing the lidar sees along the voice, else a point
+1.5 m along it) and binds the speaker to the first person the cameras place in that direction. It never invents
+a person track for the voice: a made-up track drew stray sightings to it, and following then lost its target
+(measured). The speaker is "me" for the model and is marked in the prompt ("person_1 (person, the human talking
+to me)"). `go_to(me)` stops at a comfortable distance facing them and follows them if they move on the way (or
+heads for the voice when they are not seen yet); `follow(me)` keeps following; `turn_to(me)` faces them; "the
+cup next to me" means next to the human.
 
-The 2B model's choices are checked against the human's own words where that is unambiguous:
-`go_to(..., near)` for "go *behind* the box" is repaired to `behind` (and for "between A and B" the other
-object is found from the request); `on` for "go to the red ball" becomes `near` (driving *onto* a ball
-rams it); `stop` without the human asking to stop is refused (the model confuses "start" and "stop").
+In the simulator a typed message is the simulated person speaking: `SimVoice` renders their voice on the
+simulated array (direct path, four wall reflections, noise), so the same estimate runs in sim and on the robot.
 
-## Perception (works the same on a real camera)
+## Behaviours (`control/behaviors.py`)
 
-1. The camera (`SimCamera` in the simulator, `RealCamera` on the robot: Pi camera module or USB) hands
-   out frames tagged with the body's pose at capture. PNG encoding is lazy: the detector reads raw pixels,
-   and only the occasional VLM request pays for a PNG.
-2. The **fast detector** (`perception/fast_detector.py`) is YOLO11n, trained on this robot's objects:
-   `scripts/train_detector.py` renders 6,800 labelled frames from the simulator (randomised layouts,
-   lighting, pose, head tilt, unlabelled-colour distractors; exact boxes from a segmentation render,
-   occlusion included) and trains in ~40 minutes on the laptop GPU. It runs as an NCNN model with no
-   PyTorch (`NcnnDetector`), the same code on the laptop and the Pi: 16 ms per frame on the laptop CPU.
-   Validation mAP50 0.988; on freshly generated scenes 0.90 precision / 0.91 recall at IoU 0.5.
-   Off-the-shelf open-vocabulary detectors (YOLO-World, YOLOE) found 50-75% of these objects.
-3. The VLM stays the open-vocabulary eye: it names things the detector only knows as "object", and
-   searches for things outside the detector's classes.
-4. `CameraModel.locate_box` puts each box on the floor: bottom-centre of the box → floor ray → one
-   radius further along the ray. Measured error on the default scene: 11–37 mm.
-5. `SpatialMap.integrate_view` associates detections with tracked objects (label + distance gate,
-   colour-aware synonyms), applies negative evidence to objects that should be visible but are not, and
-   marks camera coverage. Forward ToF readings build an occupancy grid, so walls are discovered.
-6. Fusion is Kalman-style and time-weighted. A sighting's variance grows with range (close looks
-   outweigh distant ones); frames from a continuous stream each count for less (`weight`), so detector
-   flicker neither creates nor deletes objects; a box cut off by the image's edge is weak evidence.
-7. The trained detector's labels outrank remembered ones: a track it keeps calling something else (about
-   one full view's worth of sightings) is renamed, with a new id if the old one names the old kind
-   ("box_2" -> "cube_1"; the old id still finds it). Found in a real session: a map restored from an
-   older detector held the blue cube as "box" and the red ball as "pink ball", and the model answered
-   from those names. The catch-all "object" never renames a named track, and an "object" box lying over
-   a named one is dropped (the same thing seen twice, which put phantom objects next to real ones).
+* `GoToObject(target, relation)`: near, behind, in front of, left/right of, between, on. The goal is recomputed
+  every tick from the live map. "Near" is approached from wherever the robot is; the other sides keep the view
+  from where the task began, unless the object turns out to be somewhere else entirely. A blocked spot falls back
+  to spots along the same side. Arrival is confirmed by seeing the target.
+* `Follow(target, distance)`: persistent, keeps running after the reply; losing the target ends it.
+* `Search(query)` / `Scan()`: one smooth turn while every frame of every camera is checked.
+* `Orbit`, `Turn`, `Move`, `Face`, `GoToPoint`.
 
-The simulator's ground truth (`sandbox.detect_objects`, `render_head_labels`) is used for training data,
-the dashboard's debug view and the evaluation graders, never by the robot while it runs.
+The planner (`navigation/planner.py`) is A* on the lidar occupancy grid plus tracked objects, with the robot's
+footprint (181 mm circumscribed radius) and margins. Every speed command passes the collision monitor
+(`control/safety.py`): speed capped to what still stops in time, given lidar points all around and the front ToF.
+
+## Making a small model reliable
+
+A 2B model chooses well among few, clear tools, and badly at the edges. The harness guards those edges in code,
+each measured against the simulator before it went in:
+
+- Few, semantic tools listed in a deliberate order; examples written in words, not code.
+- The request's own words repair a call that drops what the human said: the relation ("go *behind*"), "come
+  back" (where the robot was asked), "come here" (the human), "on" only when they said on/dock.
+- A request with several parts is cut at sequencing words ("... and come back") and handed over one part at a
+  time (`cognition/planner.py`); a part ends when its main action succeeds.
+- Loop guards (the same call three times, four failures), repeated idempotent calls answered from the first
+  result, calls written as text or markup recovered, claims of actions no tool performed sent back once.
+- Past turns are kept as real tool-call messages (a small model copies the shape of its history), and the
+  system prompt and tools are read once at start so the first request is fast.
+- `scripts/eval_decisions.py` measures the first decision in ~20 situations in a minute;
+  `scripts/eval_scenarios.py` runs whole tasks in the simulator and grades them from ground truth.
 
 ## Memory
 
 | Kind | Where | In the prompt |
 |---|---|---|
-| Working | `PromptBuilder.history` (last turns incl. tool calls), `arbiter.recent_activity` | always, budgeted |
-| Spatial | `SpatialMap` (saved to `spatial_map.json`; restored objects are marked stale) | "Known objects", "Places" |
-| Semantic | `MemoryStore` SQLite + FTS5 facts, versioned, tombstones for "forget" | core facts always; related facts by search |
-| Episodic | `MemoryStore` episodes | via `recall` |
+| Working | the last turns (tool calls included), recent activity | always, budgeted |
+| Spatial | `SpatialMap`: objects, people, the speaker, places; saved on shutdown, restored as stale | "Known objects", "Places" |
+| Semantic | `MemoryStore`: SQLite + FTS5 facts, versioned, tombstones for "forget" | core facts always; related facts by search |
+| Episodic | `MemoryStore` episodes, compressed into daily summaries | via `recall` |
 
-A small model copies the shape of its history. Past turns are therefore kept as real tool-call
-messages, never as text summaries of actions, or it starts *writing* actions instead of calling them.
+## Threads and timing
 
-## Making a 2B model reliable
+| Thread | Rate | Job |
+|---|---|---|
+| control | 50 Hz, absolute deadlines, SCHED_FIFO on a fast core (robot) | behaviour tick, collision monitor, speed command |
+| perception | as fast as frames and the detector allow | cameras → detector → map; lidar → occupancy, localization |
+| main event loop | on events | cognition, speech, memory, dashboard |
+| llama-server | own process, own cores | the language and vision model |
 
-- Few, semantic tools (`turn(direction=around)` instead of degrees), observe listed last, examples
-  written in words (code-like examples make it print calls as text).
-- `recover_text_tool_calls` accepts a reply that is *only* a call written as text.
-- Loop guards: the same call three times, or four failures, ends the turn with an honest message;
-  a second `observe` from the same pose returns the cached view, object list included (it used to say
-  only "I can see 4 things", and with the first list trimmed from an over-long prompt the model answered
-  "I don't see a cardboard box" with one in view). Trimmed results keep the names of what was seen.
-- A successful idempotent call (`go_to`, `turn_to`, `look_around`, ...) repeated from the same spot is
-  not run again: the model is told it is already done and its next answer must be a reply
-  (`tool_choice: none`). A small model otherwise re-issues the call after success until the loop guard
-  stops it with a misleading "I keep trying".
-- The last tool result of each step carries a `next` hint built from the human's words ("If that
-  finishes ..., answer the human now"). Merged into the result text instead, the hint was obeyed as an
-  instruction and made things worse (measured).
-- A to-do list for requests with several parts (`cognition/planner.py`): "go to that ball and come back"
-  is cut into "go to that ball" | "come back" at sequencing words ("then", "after that", "and" + an action
-  verb), in the human's own words, and the model gets one part at a time. A part ends when its main
-  action succeeds (`go_to`, `circle_around`, `move`, `express`, ...; looking and turning are steps
-  towards it), or, for a spoken part ("tell me what you see"), when the model answers; then the next part
-  is handed over with a fresh view of where things are. Only the answers are spoken, questions in between
-  are dropped. Tried first and dropped: letting the model write the plan. As tool steps or as parts, the
-  2B model left parts out, paraphrased them wrongly ("back up a little" -> "stop") and invented new ones
-  ("hi!" -> two parts); writing a one-line plan before its first call made that call worse
-  (23/27 -> 18/27 right first calls). Ending a part on the model's own "done" failed too: it kept calling
-  tools ("I'm at the ball. Let me come back now." + `go_to` the ball).
-- Arguments are checked against the current part's words, not the whole request: `go_to` relations
-  (below), and "come back" / "return": the robot remembers where it was when the human asked
-  (`where_asked`), and a "come back" part that calls `go_to` on something it does not name goes there
-  instead (the 2B model called `go_to(ball_1)` for "come back", with the place listed and an example).
-- Calls written as markup (`<tool_call><function=go_to>...`) are recovered as real calls and never spoken.
-- `look_around(query="behind me")` turns that way and looks instead of searching for a "behind me".
-- `go_to` checks its arguments against the request: if the human named exactly one relation
-  ("between", "behind", "left of", ...) and the call says `near`, it is rejected with the relation to use.
-- Only `observe` puts a camera image in the model's context. The views skills take for their own checks
-  (arriving somewhere) update the map but are not shown: an extra image made the model describe or
-  visit what it saw instead of answering (go to the ball: 25 s with detours -> 8 s).
-- Skills return outcomes the model can reason about ("box_1 is now between me and where I was").
-- `scripts/eval_decisions.py` measures the first decision for 21 situations in about a minute; use
-  it after any prompt or tool change. `scripts/eval_scenarios.py` runs whole tasks in the simulator
-  and grades them from ground truth.
-
-## Running
-
-```bash
-python -m robot                                   # console + dashboard (starts llama-server if needed)
-python scripts/try_robot.py "what do you see?" "go behind that box"
-python scripts/try_robot.py --physics "go to the red ball"   # MuJoCo dynamics: slip, odometry drift
-python scripts/try_autonomy.py --seconds 180 --speed 20      # leave it alone and watch
-python scripts/train_detector.py                  # render the dataset, train YOLO11n, export NCNN
-python scripts/bench_pi.py                        # detector / fast loop / decision speed on this machine
-python scripts/eval_decisions.py                  # needs llama-server running
-python scripts/eval_scenarios.py --no-server-start --seeds 2            # every scenario
-python scripts/eval_scenarios.py --scenarios realtime --no-server-start # follow, stop, interrupt, rolling ball
-python scripts/probe_latency.py --pin             # where inference time goes (server timings)
-python -m pytest -q                               # 397 tests, no model needed
-```
-
-The dashboard (http://127.0.0.1:8090) shows the robot's own spatial map (with an optional
-"sim truth" overlay), every model call and skill result with the camera frame and detection boxes it
-saw, and the drives that wake it when idle.
-
-Bodies: `SimBody` (kinematic, the default), `PhysicsBody` (`runtime.body_backend: physics`: MuJoCo
-dynamics, wheel slip, noisy encoder/IMU odometry, a contact bumper) and `SerialBody`
-(`runtime.body_backend: serial`: a USB motor board) and `McuBody` (`mcu`: the VENTUNO Q's STM32H5, see
-`docs/ventuno_q.md`).
-All three take speed set points (`set_velocity`, watchdog included) and discrete actions (`execute`).
-
-`llama-server` runs with the vision projector, `--jinja` and two slots (`-np 2 -c 16384`). Decisions
-use slot 0 and camera requests slot 1 (`id_slot`), so a VLM look never evicts the decision prefix.
-
-## Measured on the laptop (LFM3-VL-2B Q4_K_M on a GTX 1650; detector on the CPU via NCNN)
-
-- Simulator tasks (`eval_scenarios.py`, graded from ground truth, two room layouts each), two-layer
-  architecture vs. the previous version: core 28/28 in 170 s (was 28/28 in 224 s); harder 22/24 in
-  224 s (was 22/24 in 357 s); real-time 8/8 (new: follow a rolling ball, stop while following, stop
-  part-way when interrupted, go to a ball that rolls during the approach). 58/60 overall
-  (`artifacts/eval/v23-realtime-all.json`). Per task: go to the ball 9 → 4 s, go behind the box 23 → 12 s,
-  find the duck and go to it 41 → 8 s, come back to the start 15 → 9 s, look around and report 4.4 → 2.7 s.
-- Reaction time, request to wheels moving: median 0.84 s, 90th percentile 2.3 s (it includes the model's
-  decision; "stop" bypasses the model and halts within one control tick).
-- Several-part tasks in a person's own words (`--scenarios tasks`, 7 tasks x 3 layouts, added with the
-  to-do list): 20/21 (`v27-tasks-plan.json`, and `v28-back-plan.json` for "go to that ball and come back"
-  after its scene was fixed). "Go to that ball and come back": 3/3 with the to-do list, 0/3 without it
-  (the robot stayed at the ball). Circling the box (unseen first, clockwise, "the thing behind you"),
-  "do you see a cardboard box?" and "look behind you and tell me what you see": all 3/3. The other sets on
-  the same code (`v26-all.json`): core 28/28, harder 22/22 with `back_up` 2/2, real-time 8/8.
-- Decision benchmark (`eval_decisions.py`, first tool call in 21 situations): 90% at 0.8 s per decision
-  with the F16 vision projector (re-measured 2026-11-01; 95% at 0.5 s in an earlier run). With
-  LFM3-VL-2B-QAD-Q4_0 (the November download): 71%, and no faster on this GPU.
-- Quantization sweep (2026-11-01, `eval_vision.py` 30 random rooms + `eval_decisions.py`, GTX 1650):
-
-  | model + vision projector | objects found | "is there a ...?" in view / not | decisions | query s | VRAM |
-  |---|---|---|---|---|---|
-  | Q4_K_M + F16 | 31/49 | 21/23 / 27/30 | 19/21 | 2.5 | 2.27 GB |
-  | Q4_K_M + Q8_0 | 30/49 | 21/23 / 27/30 | 19/21 | 1.8 | 2.10 GB |
-  | Q5_K_M + F16 | 30/49 | 20/23 / 28/30 | 19/21 | 2.5 | 2.42 GB |
-  | Q6_K + F16 | 32/49 | 19/23 / 28/30 | 19/21 | 2.4 | 2.58 GB |
-  | Q6_K + Q8_0 | 32/49 | 18/23 / 28/30 | 18/21 | 1.8 | 2.41 GB |
-  | Q8_0 + F16 | 32/49 | 19/23 / 28/30 | 18/21 | 2.6 | 2.98 GB |
-  | QAD-Q4_0 + F16 | 32/49 | 19/23 / 28/30 | 15/21 | 2.2 | 2.22 GB |
-
-  All within one or two objects of each other: even the near-lossless Q8_0 sees no better, so
-  quantization is not what limits it. (Most "misses" in this first table were the mug named a "cylinder"
-  and the duck a "sphere", which is what the simulator draws; the grader now accepts those names.)
-- By distance (`eval_vision.py --frames 60 --min-pixels 40`, objects down to a few pixels), share of
-  objects found, VLM with F16 / Q8_0 projector, then the fast detector:
-
-  | distance | VLM + F16 | VLM + Q8_0 | fast detector (YOLO11n NCNN) |
-  |---|---|---|---|
-  | under 1 m | 20/24 | 20/24 | 23/24 |
-  | 1-2 m | 39/49 | 38/49 | 47/49 |
-  | over 2 m | 17/21 | 16/21 | 21/21 |
-
-  The robot drives on the fast detector, which finds nearly everything at every distance in the
-  simulator. Driving with each projector (`v29-proj-f16.json`, `v29-proj-q8.json`, all 37 scenarios x 2
-  layouts) gave the same stopping distances (ball 33-38 cm, dock 6-8 cm, between two objects 3-7 cm off)
-  and the same times; the projector only matters when the VLM itself looks.
-- First request after start: the server read the 2.5k-token system prompt and tools cold in 6.9 s, and
-  the next decisions took 0.5-1.6 s. The robot now reads them once at start (`AgentLoop.warm_up`), so
-  the first request answers in 0.5 s; this made follow-the-ball pass from a fresh start (real-time 8/8,
-  `v30-realtime-warmup.json`), which it had failed as the first scenario after a server start.
-- Fast detector: 16 ms per frame with NCNN on the laptop CPU (4 threads), 12 ms with PyTorch CUDA;
-  validation mAP50 0.988; on fresh scenes 0.90 precision / 0.91 recall at IoU 0.5. Map fusion 0.5 ms.
-- Autonomy (`try_autonomy.py`): left alone, the curiosity drive woke it, it explored, found new
-  objects and covered 99% of the area around it in 2.5 minutes (drives accelerated 30x).
-
-Known limitations:
-
-- The detector is trained on the simulator's objects. On the real robot, add camera frames of your room
-  and objects (and a `person` class) and retrain; the pipeline is the same.
-- The remaining eval misses come from the 2B model's choices: an odd tool now and then (a half turn for
-  "back up a little"), circling the object in front for "the thing behind you" once, parking 8 cm too
-  far once. "Come back" works through the request check in `go_to`, not because the model maps it to the
-  right place.
-- The robot cannot see people yet and does not know who spoke, so "follow me" does not work: that needs a
-  `person` class in the detector and a direction-of-arrival microphone array; not built yet.
-- The general "what is here" detection sometimes invents objects (a "laptop", a "banner") from walls
-  or the dock's base. Searches for a specific thing are confirmed on a crop with a yes/no question;
-  the general inventory is not, to keep it to one model call per view.
-- The 2B model occasionally adds a step nobody asked for or confuses similar words; guards stop loops
-  and the skills report honestly, but replies can still be slightly off.
-- The same object can be listed twice when the VLM boxes it twice in one view.
-
-## Arduino VENTUNO Q
-
-See `docs/ventuno_q.md`: layers and rates, the core plan, measured control timing, localization,
-safety layers, bring-up.
-In short: hard real time on the microcontroller; on Linux the control thread is pinned to a fast A78
-core at SCHED_FIFO, perception to another, llama-server to two more, everything else to the A55s.
+Measured on the laptop simulator (three cameras rendered in MuJoCo, detector on the GPU): front camera fused at
+~16 Hz with a rear camera each cycle, control loop at 50 Hz with 0.5 ms median and 8 ms p99 lateness. On the robot
+the cameras need no rendering; `scripts/bench_control.py` measures the same numbers there.
 
 ## Hands later
 
-Add an arm to `body.yaml`/the HAL, then a `pick(target)` skill that uses the same detection →
-floor-geometry pipeline to approach and a visual-servo grasp primitive. Fine manipulation is a good
-fit for a learned policy (LeRobot-style, trained from demonstrations collected in MuJoCo with
-`runtime.body_backend: physics`), invoked by the VLM as just another skill.
+Add an arm to `body.yaml` and the HAL, then a `pick(target)` skill that uses the same detection → floor
+geometry to approach and a visual-servo grasp primitive (a learned policy trained from demonstrations in
+MuJoCo with `runtime.body_backend: physics` fits well), called by the model as one more skill.

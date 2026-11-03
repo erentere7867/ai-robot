@@ -59,8 +59,9 @@ context_budget:
 
 perception:
   fast_detector: "auto"        # the trained YOLO11n (scripts/train_detector.py); "off" = VLM only
-  prefer_ncnn: true            # same runtime as the Raspberry Pi (no PyTorch)
-  imgsz: 320
+  prefer_ncnn: true            # the robot's runtime (no PyTorch), so the simulator runs the same code
+  imgsz: 416
+  detector_gpu: true           # NCNN on the GPU through Vulkan (falls back to the CPU without one)
   confidence: 0.4
   loop_hz: 50.0
   # Real-time layout: the control loop and perception each get a thread of their own (robot/control/fast_loop.py)

@@ -19,7 +19,7 @@ echo "== system packages"
 sudo apt-get update
 sudo apt-get install -y git cmake build-essential python3-venv python3-dev curl libopenblas-dev \
     gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good python3-opencv \
-    portaudio19-dev v4l-utils
+    portaudio19-dev v4l-utils libvulkan1 vulkan-tools mesa-vulkan-drivers
 if [ "$BACKEND" = "opencl" ]; then
     sudo apt-get install -y ocl-icd-opencl-dev opencl-headers clinfo || true
 fi
@@ -91,4 +91,10 @@ done
 sudo systemctl daemon-reload
 sudo systemctl enable sprocket-llm.service sprocket.service
 
-echo "Done. Next: flash firmware/ventuno_mcu, then run scripts/ventuno/mcu_check.py and scripts/bench_control.py."
+echo "== checks"
+"$RT/venv/bin/python" -c "import ncnn; print('   Vulkan GPUs for the detector:', ncnn.get_gpu_count())" || true
+ls /dev/video* 2>/dev/null | sed 's/^/   camera device: /' || echo "   WARNING: no cameras found"
+arecord -l 2>/dev/null | grep -i card | sed 's/^/   capture: /' || true
+
+echo "Done. Next: flash firmware/ventuno_mcu, run scripts/ventuno/mcu_check.py, calibrate each camera with"
+echo "scripts/ventuno/calibrate_camera.py <name>, then scripts/bench_control.py."

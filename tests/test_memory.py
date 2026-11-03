@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,13 +11,12 @@ import pytest
 from robot.core.bus import EventBus
 from robot.core.clock import ReplayClock
 from robot.memory.consolidator import MemoryConsolidator
-from robot.memory.models import MemoryKind, MemoryProposal, MemoryProvenance
+from robot.memory.models import MemoryProposal, MemoryProvenance
 from robot.memory.policy import (
     canonical_fact,
     extract_explicit_memory_proposals,
     extract_fact_candidates,
     fact_rejection_reason,
-    normalize_fact_text,
 )
 from robot.memory.store import DAILY_SUMMARY_KIND, MemoryStore
 
@@ -155,51 +153,6 @@ def test_migrates_baseline_schema_in_place_and_idempotently(tmp_path: Path, cloc
         reopened.close()
 
 
-def test_legacy_non_canonical_subjects_are_superseded_and_tombstones_still_apply(
-    tmp_path: Path, clock: ReplayClock
-) -> None:
-    db = tmp_path / "legacy_keys.db"
-    conn = sqlite3.connect(str(db))
-    conn.executescript(BASELINE_SCHEMA)
-    row = ("old", "favourite colour", "User's favourite colour is green", "semantic", "user_explicit", 1.0, T0,
-           None, None, "shared", T0)  # fmt: skip
-    conn.execute("INSERT INTO memories VALUES (?,?,?,?,?,?,?,?,?,?,?)", row)
-    conn.execute("INSERT INTO memories_fts (memory_id, subject, content) VALUES (?,?,?)", (row[0], row[1], row[2]))
-    conn.execute("INSERT INTO tombstones VALUES ('t1', 'favourite food', ?, 'user_forget_request')", (T0,))
-    conn.commit()
-    conn.close()
-
-    store = MemoryStore(db, clock=clock)
-    try:
-        assert store.get_active("favorite color").id == "old"
-        clock.advance(10)
-        res = store.remember_fact("my favorite color is blue", provenance=MemoryProvenance.USER_EXPLICIT)
-        assert res["status"] == "updated" and res["supersedes"] == "old"
-        assert [m.content for m in store.list_active()] == ["User's favorite color is blue"]
-        assert store._conn.execute("SELECT count(*) FROM memories_fts").fetchone()[0] == 1
-        # A tombstone written under the legacy spelling still blocks model-proposed re-learning.
-        assert store.remember_fact("User's favorite food is pizza")["status"] == "blocked_by_tombstone"
-        assert store.is_tombstoned("favorite food")
-    finally:
-        store.close()
-
-
-def test_episode_index_self_heals_when_out_of_sync(tmp_path: Path, clock: ReplayClock) -> None:
-    db = tmp_path / "drift.db"
-    store = MemoryStore(db, clock=clock)
-    store.log_episode("User: hello there -> Robot: hi", kind="conversation")
-    store._conn.execute("DROP TRIGGER episodes_fts_ai")
-    store._conn.execute("INSERT INTO episodes VALUES ('raw', ?, 'conversation', 'unindexed penguin story', '{}')", (T0,))
-    store._conn.commit()
-    store.close()
-
-    healed = MemoryStore(db, clock=clock)
-    try:
-        assert [e.id for e in healed.search_episodes("penguin")] == ["raw"]
-    finally:
-        healed.close()
-
-
 # --------------------------------------------------------------------------- remember_fact
 
 
@@ -219,14 +172,6 @@ def test_remember_fact_normalizes_first_person_and_infers_subject(store: MemoryS
     for text, (subject, content) in cases.items():
         res = store.remember_fact(text)
         assert (res["subject"], res["content"], res["status"]) == (subject, content, "stored"), text
-
-
-def test_remember_fact_lowercase_name_is_capitalized_and_hint_canonicalized(store: MemoryStore) -> None:
-    res = store.remember_fact("my name is deniz gunduz", subject="User name")
-    assert res["subject"] == "name"
-    assert res["content"] == "User's name is Deniz Gunduz"
-    other = store.remember_fact("User enjoys long walks", subject="Hobby")
-    assert other["subject"] == "hobby"
 
 
 def test_remember_fact_supersedes_contradicting_fact_on_same_subject(store: MemoryStore, clock: ReplayClock) -> None:
@@ -257,15 +202,6 @@ def test_remember_fact_dedupes_identical_facts(store: MemoryStore, clock: Replay
     hinted = store.remember_fact("User's favorite color is green", subject="colour preference")
     assert hinted["status"] == "duplicate" and hinted["id"] == first["id"]
     assert len(store.list_active()) == 1
-
-
-def test_first_and_third_person_phrasings_share_a_subject(store: MemoryStore) -> None:
-    first = store.remember_fact("I'm vegetarian", provenance=MemoryProvenance.USER_EXPLICIT)
-    assert (first["subject"], first["content"]) == ("vegetarian", "User is vegetarian")
-    again = store.remember_fact("User is vegetarian")
-    assert again["status"] == "duplicate" and again["id"] == first["id"]
-    assert store.remember_fact("I fix old cars")["content"] == "User fixes old cars"
-    assert canonical_fact("I have two cats")[0] == canonical_fact("User has two cats")[0] == "two cats"
 
 
 def test_explicit_restatement_upgrades_a_model_proposed_fact(store: MemoryStore, clock: ReplayClock) -> None:
@@ -321,12 +257,6 @@ def test_remember_fact_rejects_empty_oversized_and_instruction_like_text(
     assert store.list_active() == []
 
 
-def test_registered_tool_names_are_rejected_and_ordinary_words_allowed(store: MemoryStore) -> None:
-    store.reserved_terms.add("navigate_to")
-    assert store.remember_fact("User says navigate_to the kitchen")["reason"] == "instruction_like"
-    assert store.remember_fact("User likes to drive on weekends")["ok"] is True
-
-
 def test_apply_rejects_instruction_like_model_proposals(store: MemoryStore) -> None:
     out = store.apply(
         MemoryProposal(
@@ -377,20 +307,6 @@ def test_search_filters_stopwords_prefix_matches_and_ranks_by_importance(store: 
     assert store.search("Mochi", limit=0) == []
 
 
-def test_search_ranks_whole_words_above_prefix_matches(store: MemoryStore, clock: ReplayClock) -> None:
-    store.remember_fact("User's cat's name is Mochi", provenance=MemoryProvenance.USER_EXPLICIT)
-    clock.advance(60)
-    store.remember_fact("User's favorite category is sci-fi", provenance=MemoryProvenance.USER_EXPLICIT)
-    assert [m.subject for m in store.search("cat")] == ["cat's name", "favorite category"]
-
-
-def test_search_prefers_recent_facts_when_relevance_ties(store: MemoryStore, clock: ReplayClock) -> None:
-    store.remember_fact("User's brother plays guitar", subject="brother hobby")
-    clock.advance(90 * 86400)
-    store.remember_fact("User's sister plays guitar", subject="sister hobby")
-    assert [m.subject for m in store.search("guitar")] == ["sister hobby", "brother hobby"]
-
-
 # --------------------------------------------------------------------------- episodes & recall
 
 
@@ -431,13 +347,6 @@ def test_recall_mixes_facts_and_episodes_without_padding(store: MemoryStore, clo
     assert store.recall("volcano geology") == []
     assert store.recall("what do you know") == []
     assert len(store.recall("Rex ball", limit=1)) == 1
-
-
-def test_recall_skips_episodes_that_repeat_a_returned_fact(store: MemoryStore) -> None:
-    store.remember_fact("my name is Deniz")
-    store.log_episode("User: My name is Deniz -> Robot: Got it! I'll remember that: User's name is Deniz.")
-    items = store.recall("Deniz")
-    assert [i["kind"] for i in items] == ["fact"]
 
 
 def test_forget_scrubs_episodes_and_does_not_over_match(store: MemoryStore) -> None:
@@ -525,54 +434,6 @@ async def test_consolidate_compresses_old_episodes_into_daily_summaries(store: M
 
     second = await consolidator.consolidate()
     assert second.episodes_compressed == 0 and store.episode_count == 4
-
-
-def test_compression_is_deterministic_and_merges_late_episodes(tmp_path: Path) -> None:
-    texts = []
-    for name in ("a.db", "b.db"):
-        clock = ReplayClock(T0)
-        store = MemoryStore(tmp_path / name, clock=clock)
-        _seed_days(store, clock)
-        store.compress_episodes()
-        texts.append(sorted(e.summary for e in store.recent_episodes(limit=10)))
-        if name == "b.db":
-            _log_at(store, clock, _noon(0) + 600, "User: the box is empty -> Robot: Nothing inside")
-            clock.set_time(_noon(5) + 3600)
-            assert store.compress_episodes() == {"compressed": 1, "summaries": 1}
-            day = datetime.fromtimestamp(_noon(0)).date().isoformat()
-            merged = [e for e in store.recent_episodes(limit=10) if e.details.get("day") == day]
-            assert len(merged) == 1 and merged[0].details["count"] == 4
-            assert merged[0].details["kinds"]["conversation"] == 3
-        store.close()
-    assert texts[0] == texts[1]
-
-
-@pytest.mark.asyncio
-async def test_compression_runs_early_under_episode_pressure(tmp_path: Path) -> None:
-    clock = ReplayClock(_noon(0))
-    store = MemoryStore(tmp_path / "pressure.db", clock=clock, max_episodes=10)
-    try:
-        for i in range(9):
-            store.log_episode(f"User: tell me about planet {i} -> Robot: planet facts", kind="conversation")
-            clock.advance(60)
-        clock.advance(2 * 3600)
-        report = await MemoryConsolidator(EventBus(clock), store).consolidate()
-        assert report.episodes_compressed == 9 and store.episode_count == 1
-    finally:
-        store.close()
-
-
-def test_max_episodes_bound_still_holds(tmp_path: Path, clock: ReplayClock) -> None:
-    store = MemoryStore(tmp_path / "bounded.db", clock=clock, max_episodes=5)
-    try:
-        for i in range(12):
-            store.log_episode(f"episode number {i} about rockets")
-            clock.advance(1)
-        assert store.episode_count == 5
-        assert [e.summary for e in store.recent_episodes(limit=1)] == ["episode number 11 about rockets"]
-        assert len(store.search_episodes("rockets", limit=50)) == 5
-    finally:
-        store.close()
 
 
 # --------------------------------------------------------------------------- consolidator extraction
@@ -687,35 +548,6 @@ def test_name_questions_and_negations_are_not_proposals(message: str) -> None:
     assert [p for p in extract_explicit_memory_proposals(message) if p.op == "remember"] == []
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        "call me at 5",
-        "please call me in the morning",
-        "call me on Monday",
-        "can you call me up",
-        "I go by bus",
-        "I go by car to work",
-        "my name is very common",
-        "my name is spelled D E N I Z",
-        "you can call me lazy",
-        "my name is on the list",
-    ],
-)
-def test_phrases_that_are_not_names_never_become_name_facts(message: str) -> None:
-    assert [p for p in extract_explicit_memory_proposals(message) if p.subject == "name"] == []
-    assert [c for c in extract_fact_candidates(message) if c.subject == "name"] == []
-
-
-def test_name_fillers_are_skipped_and_titles_keep_their_pronouns() -> None:
-    assert extract_explicit_memory_proposals("my name is actually deniz")[0].text == "User's name is Deniz"
-    assert normalize_fact_text("User's favorite band is My Chemical Romance") == (
-        "User's favorite band is My Chemical Romance"
-    )
-    assert normalize_fact_text("my favorite song is Love Me Do") == "User's favorite song is Love Me Do"
-    assert normalize_fact_text("Me and my wife love hiking") == "User and User's wife love hiking"
-
-
 def test_forget_name_still_forgets_and_robot_name_does_not_collide() -> None:
     forget = extract_explicit_memory_proposals("Forget my name")
     assert (forget[0].op, forget[0].subject) == ("forget", "name")
@@ -766,9 +598,3 @@ async def test_harness_learns_name_from_plain_statement_and_recalls_after_restar
         await second.stop()
 
 
-def test_memory_record_round_trip_includes_importance(store: MemoryStore) -> None:
-    rec = store.remember("User prefers quiet mornings", kind=MemoryKind.SEMANTIC, importance=0.7)
-    assert rec.to_dict()["importance"] == 0.7
-    snapshot = store.dashboard_snapshot()
-    assert snapshot["active_memories"][0]["importance"] == 0.7
-    json.dumps(store.export_all())

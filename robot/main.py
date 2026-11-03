@@ -12,6 +12,7 @@ from pathlib import Path
 from robot.actions.executor import ActionExecutor
 from robot.actions.registry import CapabilityRegistry
 from robot.audio.asr import SpeechRecognizer
+from robot.audio.doa import MicArray, SimVoice
 from robot.audio.service import AudioService
 from robot.behavior.arbiter import BehaviorArbiter
 from robot.behavior.attention import AttentionManager
@@ -41,9 +42,9 @@ from robot.interfaces.dashboard import DashboardServer
 from robot.memory.consolidator import MemoryConsolidator
 from robot.memory.store import MemoryStore
 from robot.navigation.planner import GridPlanner
-from robot.perception.camera import SimCamera
+from robot.perception.camera import CameraRig, SimCamera
 from robot.perception.detector import VLMDetector
-from robot.perception.geometry import CameraModel
+from robot.perception.geometry import default_rig, load_rig
 from robot.skills import SkillContext, build_default_registry
 from robot.world.localization import LocalizedBody, Localizer
 from robot.world.sandbox import SimulationSandbox
@@ -86,11 +87,12 @@ class RobotHarness:
         )
         self.registry = CapabilityRegistry(self.capabilities)
         self.body = self._make_body()
-        self.sandbox = SimulationSandbox(self.bus)
+        self.rig = load_rig(self.config.body_config_path) if self.config.body_config_path.exists() else default_rig()
+        self.sandbox = SimulationSandbox(self.bus, rig=self.rig)
         self.executor = ActionExecutor(self.bus, self.body, self.registry)
         self.memory = MemoryStore(self.config.database_path, clock=self.clock)
         self.consolidator = MemoryConsolidator(self.bus, self.memory)
-        self.world = WorldState(self.bus, clock=self.clock, sandbox=self.sandbox)
+        self.world = WorldState(self.bus, clock=self.clock)
         self.spatial_map = SpatialMap(self.clock)
         # Lidar localization: everything downstream reads the corrected (map-frame) pose.
         self.localizer: Localizer | None = None
@@ -98,13 +100,19 @@ class RobotHarness:
             self.localizer = Localizer(self.spatial_map)
             self.body = LocalizedBody(self.body, self.localizer)
         self.planner = GridPlanner(room_half_extent_mm=self.spatial_map.half, resolution_mm=50.0)
-        camera_model = CameraModel(self.sandbox.cam_width, self.sandbox.cam_height)
         if self.config.camera == "sim":
-            self.camera = SimCamera(self.sandbox, self.body, self.clock, camera_model)
+            cams = [SimCamera(self.sandbox, self.body, self.clock, m) for m in self.rig]
         else:
             from robot.perception.camera import RealCamera
 
-            self.camera = RealCamera(self.body, self.clock, camera_model, source=self.config.camera)
+            cams = [RealCamera(self.body, self.clock, m, source=self.config.camera) for m in self.rig]
+        self.camera = CameraRig(cams)
+        self.mic_array = (MicArray.from_body_config(self.config.body_config_path)
+                          if self.config.body_config_path.exists() else None)
+        # In the simulator a typed message is the simulated person speaking: their voice reaches the simulated
+        # microphone array from where they stand, and the robot finds them the way it would on hardware.
+        self.voice = (SimVoice(self.sandbox, self.body, self.mic_array)
+                      if self.mic_array is not None and self.config.body_backend != "ventuno" else None)
         self.face_bridge = FaceProcessBridge(
             self.bus,
             spawn_window=spawn_face_window,
@@ -118,6 +126,7 @@ class RobotHarness:
             tts_mode=tts_mode,
             asr_mode=asr_mode,
             realtime_sync=realtime_audio_sync,
+            mic_array=self.mic_array,
         )
         self.audio.asr = SpeechRecognizer(
             mode=self.config.asr_mode if asr_mode == "auto" else asr_mode,
@@ -155,15 +164,8 @@ class RobotHarness:
             self._llama_client = LlamaCppBackend(self.config.llm)
             self.backend = AutoBackend(self._llama_client)
 
-        # The eye: the decision model itself, or a separate vision model when the decision model is text-only.
-        self._vision_client: LlamaCppBackend | None = None
-        self.vision_backend: InferenceBackend = self.backend
-        if backend is None and self.config.vision_llm is not None and self.config.llm.backend != "null":
-            self._vision_client = LlamaCppBackend(self.config.vision_llm)
-            self.vision_backend = AutoBackend(self._vision_client)
-        self.detector = VLMDetector(self.vision_backend)
-        sees = self.config.llm.vision or self.config.vision_llm is None
-        self.skills = build_default_registry(sorted(EYE_COLOR_THEMES), ask_camera=not sees)
+        self.detector = VLMDetector(self.backend)  # the open-vocabulary eye: the decision model itself
+        self.skills = build_default_registry(sorted(EYE_COLOR_THEMES))
         self.skill_context = SkillContext(
             bus=self.bus, executor=self.executor, body=self.body, camera=self.camera, detector=self.detector,
             spatial_map=self.spatial_map, planner=self.planner, memory=self.memory, emotion=self.emotion,
@@ -192,7 +194,7 @@ class RobotHarness:
         budget = self.config.context_budget
         self.agent = AgentLoop(self.backend, self.skills, self.config.agent,
                                prompt_limit_tokens=budget.total_tokens - budget.response_reserve_tokens,
-                               on_event=self._emit_skill_event, robot_name=self.config.name, sees_images=sees)
+                               on_event=self._emit_skill_event, robot_name=self.config.name)
         self.arbiter = BehaviorArbiter(
             bus=self.bus, fsm=self.fsm, emotion=self.emotion, prompts=self.prompts, agent=self.agent,
             skill_context=self.skill_context, memory=self.memory, world=self.world,
@@ -239,7 +241,8 @@ class RobotHarness:
         detector = None
         for models_dir in (self.config.runtime_dir / "models", Path(__file__).resolve().parents[1] / "models"):
             detector = FastDetector.load_default(models_dir, prefer_ncnn=cfg.prefer_ncnn, imgsz=cfg.imgsz,
-                                                 conf=cfg.confidence)
+                                                 conf=cfg.confidence, gpu=cfg.detector_gpu,
+                                                 threads=cfg.detector_threads)
             if detector is not None:
                 break
         if detector is None:
@@ -261,14 +264,10 @@ class RobotHarness:
 
     def _make_body(self):
         tick = 1.0 / self.config.sim_tick_hz
-        if self.config.body_backend == "serial":
-            from robot.body.serial_body import SerialBody
+        if self.config.body_backend == "ventuno":
+            from robot.body.ventuno_body import VentunoBody
 
-            return SerialBody(self.bus, self.capabilities, port=self.config.serial_port)
-        if self.config.body_backend == "mcu":
-            from robot.body.mcu_body import McuBody
-
-            return McuBody(self.bus, self.capabilities)
+            return VentunoBody(self.bus, self.capabilities)
         if self.config.body_backend == "physics":
             from robot.body.physics_body import PhysicsBody
 
@@ -292,6 +291,18 @@ class RobotHarness:
         except (KeyError, TypeError, ValueError):
             return
 
+    def _on_voice(self, event: Event) -> None:
+        """A message that came with a voice direction: find who said it (before the turn reads the map)."""
+        voice = event.payload.get("voice")
+        if not isinstance(voice, dict) or "bearing_deg" not in voice:
+            return
+        try:
+            scan = self.lidar.latest() if self.lidar is not None else None
+            self.spatial_map.hear_voice(self.body.pose(), float(voice["bearing_deg"]), scan=scan,
+                                        origin_mm=self.mic_array.center_x_mm if self.mic_array else 25.0)
+        except (TypeError, ValueError):
+            logging.getLogger(__name__).warning("Bad voice direction %r", voice)
+
     def validate_user_text(self, text: str) -> None:
         if not text.strip() or len(text) > 4096:
             raise ValueError("Message must contain 1..4096 characters")
@@ -310,11 +321,14 @@ class RobotHarness:
         request_id = uuid.uuid4().hex
         future = asyncio.get_running_loop().create_future()
         self._requests[request_id] = future
+        payload: dict = {"text": text, "direct": direct}
+        if self.voice is not None and (voice := await asyncio.to_thread(self.voice.locate)) is not None:
+            payload["voice"] = voice
         try:
             await self.bus.emit(
                 "input.user_message",
                 source,
-                {"text": text, "direct": direct},
+                payload,
                 priority=EventPriority.HIGH,
                 correlation_id=request_id,
             )
@@ -357,16 +371,16 @@ class RobotHarness:
         try:
             if self.recorder is not None:
                 self.recorder.open()
-            if self._vision_client is not None:
-                await self._vision_client.ensure_server_started()
             if self._llama_client is not None and await self._llama_client.ensure_server_started():
                 await self.agent.warm_up(self.prompts.system_prompt)
-            if self.config.body_backend not in ("serial", "mcu"):
+            if self.config.body_backend != "ventuno":
                 self.sandbox.bind(getattr(self.body, "raw", self.body))  # simulated sensors; a real body has its own
             self.spatial_map.load(self.config.spatial_map_path)
             start = self.body.pose()
             self.spatial_map.places["start"] = (start.x_mm, start.y_mm)
             self._request_subs.append(self.bus.subscribe("body.pose", self._on_pose_for_map, immediate=True))
+            # Before attention binds: the speaker is placed before anything reacts to the words.
+            self._request_subs.append(self.bus.subscribe("input.user_message", self._on_voice, immediate=True))
             self.world.bind()
             self.autonomy.bind()
             self.attention.bind()
@@ -417,8 +431,6 @@ class RobotHarness:
         await self.bus.stop()
         if self._llama_client is not None:
             await self._llama_client.close()
-        if self._vision_client is not None:
-            await self._vision_client.close()
         if self.recorder is not None:
             await asyncio.to_thread(self.recorder.close)
         self.memory.close()

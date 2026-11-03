@@ -73,9 +73,12 @@ def strip_reasoning(content: str) -> tuple[str, bool]:
 _CLAIM = re.compile(
     r"\b(?:i've|i have|i'm|i am|i just|i'll|i will|let me|let's|now i|i turned|i moved|i went|i drove|i spun)\b"
     r"[^.!?]{0,40}?\b(?:turn|spin|spun|mov|go|went|head|driv|drove|circl|look|explor|danc|search|find|found|"
-    r"approach|park|rotat|sweep)", re.I)
+    r"approach|park|rotat|sweep|com(?:e|ing)\b|follow|fac(?:e|ing)\b)", re.I)
 _ACTION_TOOLS = {"go_to", "turn_to", "turn", "move", "explore", "look_around", "observe", "express", "tilt_head",
-                 "circle_around"}
+                 "circle_around", "follow"}
+# Calls that start a behaviour which keeps running after the reply: anything after one in the same turn would
+# replace it (measured: "follow me" + look_around in one batch, and the search ended the following).
+PERSISTENT_TOOLS = {"follow"}
 # Actions that are the point of a part rather than a step towards it (looking, turning first). When one
 # succeeds, that part of a several-part request is done and the next part is handed over. The model is
 # not trusted to say so: it kept calling tools ("I'm at the ball. Let me come back now." + go_to the ball).
@@ -109,8 +112,27 @@ _REFUSAL = re.compile(
     r"spin|mov|go|look|smile|nod|wiggle|express|show|circl|drive|explor|find|search|eyes?)", re.I)
 
 
+# A request that is a plain command to move or look ("look at me", "come here", "turn around"). Answered with no
+# tool at all, nothing happened (measured: "look at me" -> "I see you!").
+_COMMAND = re.compile(r"^\s*(?:please\s+|(?:can|could|would) you\s+)?(?:go|come|turn|look|move|drive|spin|back|"
+                      r"park|circle|follow|face|return|head|roll|get|walk|run|explore|find|search|fetch|bring)\b",
+                      re.I)
+
+
+def ignores_command(request: str, tool_log: list[dict[str, Any]]) -> bool:
+    return bool(request and _COMMAND.match(request)) and not tool_log
+
+
+_FOLLOW_CLAIM = re.compile(r"\bi(?:'m| am) following\b|\bi(?:'ll| will) (?:keep )?follow", re.I)
+
+
 def claims_unperformed_action(say: str, tool_log: list[dict[str, Any]]) -> bool:
-    """True when the reply claims an action no tool performed, or refuses one the robot has a tool for."""
+    """True when the reply claims an action no tool performed, or refuses one the robot has a tool for.
+
+    Following is checked on its own: it is a promise the human relies on, and a search before it is not it
+    (measured: look_around, then "I'm following the red ball!" with the robot standing still)."""
+    if _FOLLOW_CLAIM.search(say or "") and not any(e["tool"] == "follow" and e["ok"] for e in tool_log):
+        return True
     if any(e["tool"] in _ACTION_TOOLS for e in tool_log):
         return False
     return bool(_CLAIM.search(say or "") or _REFUSAL.search(say or ""))
@@ -250,9 +272,8 @@ def _shorten(payload: dict[str, Any]) -> str:
 class AgentLoop:
     def __init__(self, backend: InferenceBackend, skills: SkillRegistry, config: AgentConfig,
                  *, prompt_limit_tokens: int = 3300, on_event: Callable[[str, dict[str, Any]], Awaitable[None]]
-                 | None = None, robot_name: str = "", sees_images: bool = True) -> None:
+                 | None = None, robot_name: str = "") -> None:
         self.backend = backend
-        self.sees_images = sees_images  # False: a text-only model; views reach it as object lists only
         self.robot_name = robot_name
         self.skills = skills
         self.config = config
@@ -266,7 +287,7 @@ class AgentLoop:
 
         Measured: the first decision after the server starts took 6.9 s (2.5k prompt tokens read cold on the
         laptop GPU), the next ones 0.5-1.6 s. Without this the human's first request pays that, and the
-        robot set off late enough to lose a rolling ball. On the Pi the cold read is longer still.
+        robot set off late enough to lose a rolling ball. On the robot's CPU the cold read is longer still.
         """
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": "Hello."}]
         try:
@@ -352,7 +373,8 @@ class AgentLoop:
                     result.say = ""
                     continue
                 # Only this part's tools count: "now I'll head back" after part 1's go_to is still a claim.
-                if not nudged and claims_unperformed_action(result.say, result.tool_log[part_start:]):
+                if not nudged and (claims_unperformed_action(result.say, result.tool_log[part_start:])
+                                   or ignores_command(ctx.request, result.tool_log[part_start:])):
                     # The model narrated (or refused) an action instead of doing it, often by copying an
                     # earlier reply. Ask once more and make the next answer a tool call.
                     nudged = force_tool = True
@@ -374,9 +396,12 @@ class AgentLoop:
             transcript.append(messages[-1])
             stop_batch = False
             finished_part = False
+            persistent: SkillResult | None = None  # a behaviour that keeps running started in this batch
             batch: list[tuple[str, SkillResult]] = []
             for call in reply.tool_calls:
-                if stop_batch:
+                if stop_batch and persistent:
+                    outcome = SkillResult(False, "Not executed: it would stop what you just started.", status="skipped")
+                elif stop_batch:
                     outcome = SkillResult(False, "Not executed because an earlier step failed.", status="skipped")
                 elif call.invalid_arguments:
                     outcome = SkillResult(False, "The arguments were not valid JSON.", status="rejected")
@@ -400,6 +425,8 @@ class AgentLoop:
                     result.tool_log.append({"tool": call.name, "args": call.arguments, "ok": outcome.ok,
                                             "message": outcome.message})
                     stop_batch = not outcome.ok
+                    if outcome.ok and call.name in PERSISTENT_TOOLS:
+                        persistent, stop_batch = outcome, True
                     part_ok = part_ok and outcome.ok
                     finished_part = finished_part or (outcome.ok and call.name in FINISHING_TOOLS)
                     failures += 0 if outcome.ok else 1
@@ -413,6 +440,10 @@ class AgentLoop:
                                  "content": json.dumps(payload, ensure_ascii=False)})
                 transcript.append(messages[-1])
             advance = todo is not None and todo.has_next and part_ok and finished_part
+            if persistent is not None and (todo is None or not todo.has_next):
+                result.say = _first_sentence(persistent.message)  # it keeps going; the turn is over
+                await self._emit("cognition.fast_finish", {"tool": "follow", "say": result.say})
+                break
             last_name, last_outcome = batch[-1]
             if (self.config.fast_finish and request and part_ok and (todo is None or not todo.has_next)
                     and last_name in FAST_FINISH_TOOLS and last_outcome.ok and last_outcome.status != "duplicate"
@@ -427,8 +458,6 @@ class AgentLoop:
                 last["next"] = (f"Part {todo.index + 1} (\"{todo.current}\") is done." if advance and todo
                                 else todo.hint() if todo is not None else hint.format(request=request))
                 messages[-1]["content"] = json.dumps(last, ensure_ascii=False)
-            if ctx.attached_image is not None and not self.sees_images:
-                ctx.attached_image = None
             if ctx.attached_image is not None:
                 self._attach_image(messages, ctx.attached_image.data_url, reply.tool_calls[-1].name)
                 ctx.attached_image = None

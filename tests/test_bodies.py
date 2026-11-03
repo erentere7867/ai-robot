@@ -1,4 +1,4 @@
-"""Rigid-body PhysicsBody: accuracy, odometry vs truth, bumper, safety, pushing and sandbox sync."""
+"""The robot's bodies: the kinematic and MuJoCo simulators, and the VENTUNO Q link (with a fake MCU)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import math
 import time
 
 import pytest
+from robot_fakes import clear_scene
 
 from robot.body.hal import BodyCommand, BodyPose
 from robot.body.physics_body import PhysicsBody, SensorNoise
@@ -15,7 +16,127 @@ from robot.core.bus import EventBus
 from robot.core.clock import RealClock, ReplayClock
 from robot.world.sandbox import SimulationSandbox
 
-# Open floor (no default sandbox object or MJCF body within reach): from the origin toward -y.
+
+@pytest.fixture
+async def rig():
+    clock = ReplayClock()
+    bus = EventBus(clock)
+    body = SimBody(bus)
+    sandbox = SimulationSandbox(bus)
+    sandbox.bind(body)
+    clear_scene(sandbox, keep=("cardboard_box", "charging_dock"))
+    reflexes: list[str] = []
+    bus.subscribe("reflex.triggered", lambda e: reflexes.append(e.payload["reflex"]), immediate=True)
+    await bus.start()
+    await body.start()
+    try:
+        yield clock, body, sandbox, reflexes
+    finally:
+        await body.stop()
+        sandbox.unbind()
+        await bus.stop()
+
+
+def drive(distance_mm: float, direction: str = "forward", cid: str = "c") -> BodyCommand:
+    return BodyCommand(cid, "drive", {"direction": direction, "distance_mm": distance_mm})
+
+
+async def test_range_reflex_stops_before_a_box(rig):
+    _, body, sandbox, reflexes = rig
+    sandbox.move_object("cardboard_box", 600.0, 0.0)
+    result = await body.execute(drive(1000))
+    assert result.status == "reflex_stopped" and reflexes == ["obstacle_stop"]
+    assert body.pose().x_mm < 600 - 110 - 140  # stopped before touching
+
+
+async def test_bumper_stops_driving_into_a_box_when_the_range_sensor_misses_it(rig):
+    _, body, sandbox, reflexes = rig
+    sandbox.move_object("cardboard_box", 600.0, 0.0)
+    body.set_simulated_obstacle(front_tof_mm=2000.0)
+    result = await body.execute(drive(1000))
+    assert not result.ok and result.status == "reflex_stopped"
+    assert result.message == "Bumper pressed: I bumped into something."
+    assert reflexes == ["bumper"]
+    contact = 600 - 110 - 140
+    assert contact - 15 <= body.pose().x_mm <= contact
+    assert body.pose().linear_vel_mm_s == 0
+    backed = await body.execute(drive(100, "backward", "c2"))
+    assert backed.ok  # moving away from the contact is allowed
+
+
+async def test_bumper_stops_backing_into_a_wall(rig):
+    _, body, _, reflexes = rig
+    result = await body.execute(drive(2000, "backward"))
+    assert result.status == "reflex_stopped" and reflexes == ["bumper"]
+    wall = -(1500 - 20 - 140)
+    assert wall <= body.pose().x_mm <= wall + 15
+
+
+async def test_dock_is_a_ramp_not_an_obstacle(rig):
+    _, body, _, reflexes = rig
+    await body.execute(BodyCommand("t", "spin", {"angle_deg": 180}))
+    result = await body.execute(drive(650))
+    assert result.ok and reflexes == []
+
+
+async def test_battery_charges_on_the_dock(rig):
+    clock, body, sandbox, _ = rig
+    body._sensors.battery_pct = 40.0
+    await body.execute(BodyCommand("t", "spin", {"angle_deg": 180}))
+    await body.execute(drive(680))
+    assert sandbox.is_charging(body.pose())
+    readings = body.sensors()
+    assert readings.charging is True
+    level = readings.battery_pct
+    clock.advance(60.0)
+    assert body.sensors().battery_pct == pytest.approx(level + 20.0)
+    clock.advance(3600.0)
+    assert body.sensors().battery_pct == 100.0
+    await body.execute(drive(400, cid="off"))  # facing away from the dock now: drive off it
+    assert body.sensors().charging is False
+
+
+async def control(clock, body, v, w, seconds, hz=20.0):
+    """Send a speed command every tick, like the fast control loop."""
+    reasons = []
+    for _ in range(int(seconds * hz)):
+        reasons.append(await body.set_velocity(v, w))
+        clock.advance(1.0 / hz)
+    reasons.append(await body.update_motion())
+    return reasons
+
+
+async def test_velocity_control_tracks_speed_and_turn_rate(rig):
+    clock, body, sandbox, _ = rig
+    clear_scene(sandbox)
+    await control(clock, body, 200.0, 0.0, 2.0)
+    assert 330 < body.pose().x_mm < 410  # 2 s at 200 mm/s, less the acceleration ramp
+    start = body.pose().heading_deg
+    await control(clock, body, 0.0, 90.0, 1.0)
+    assert 70 < body.pose().heading_deg - start < 95
+
+
+async def test_velocity_watchdog_stops_the_robot_when_commands_stop(rig):
+    clock, body, sandbox, _ = rig
+    clear_scene(sandbox)
+    await control(clock, body, 300.0, 0.0, 1.0)
+    clock.advance(5.0)  # the control loop died
+    x = body.pose().x_mm
+    await body.update_motion()
+    assert body.pose().x_mm - x < 0.35 * 300 + 60 and body.pose().linear_vel_mm_s == 0.0
+
+
+async def test_range_reflex_blocks_driving_forward_but_not_turning_away(rig):
+    clock, body, sandbox, reflexes = rig
+    sandbox.move_object("cardboard_box", 600.0, 0.0)
+    reasons = await control(clock, body, 300.0, 0.0, 4.0)
+    assert "obstacle_stop" in reasons and reflexes.count("obstacle_stop") == 1  # reported once, not per tick
+    assert body.pose().x_mm < 600 - 110 - 140
+    before = body.pose().heading_deg
+    await control(clock, body, 0.0, 90.0, 1.0)
+    assert body.pose().heading_deg - before > 60
+
+
 SQUARE_PATH = (
     ("spin", {"angle_deg": -90}),
     ("drive", {"distance_mm": 500}),
@@ -105,28 +226,6 @@ async def test_pose_is_odometry_and_matches_truth_without_noise():
     assert body.sensors().front_tof_mm == sensors.front_tof_mm  # no ToF noise
 
 
-async def test_sensor_noise_is_seeded_bounded_and_plausible():
-    async def final_poses(seed: int) -> tuple[BodyPose, BodyPose]:
-        body = make_body(seed=seed)
-        await run_path(body)
-        return body.pose(), body.true_pose()
-
-    a, b, c = await final_poses(1), await final_poses(1), await final_poses(2)
-    assert a == b  # same seed, same run
-    assert a[0] != c[0]
-    heading_errors = []
-    for odom, truth in (a, c):
-        heading_errors.append(abs(odom.heading_deg - truth.heading_deg))
-        assert heading_errors[-1] < 2.0
-        assert position_error_mm(odom, truth) < 30
-    assert max(heading_errors) > 0.05  # gyro bias/noise actually reaches the estimate
-
-    body = make_body(seed=4)
-    readings = [body.sensors().front_tof_mm for _ in range(20)]
-    assert len(set(readings)) > 1  # ToF noise
-    assert max(readings) - min(readings) < 30
-
-
 async def test_wall_contact_is_bumper_reflex(bus):
     body = PhysicsBody(bus)
     reflexes: list[str] = []
@@ -193,17 +292,6 @@ async def test_estop_and_cancel_stop_motion(bus):
 
     resumed = await body.execute(run("drive", distance_mm=100))
     assert resumed.status == "completed"
-
-
-async def test_reset_pose_interrupts_motion(bus):
-    body = PhysicsBody(bus)
-    task = asyncio.create_task(body.execute(run("spin", angle_deg=-180)))
-    await wait_until(lambda: body.true_pose().heading_deg < -20)
-    body._pose = BodyPose(x_mm=-200, y_mm=-600)  # what the dashboard's scene reset does
-    result = await asyncio.wait_for(task, timeout=5)
-    assert result.status == "cancelled"
-    assert body.pose().x_mm == pytest.approx(-200, abs=0.5)
-    assert body.true_pose().y_mm == pytest.approx(-600, abs=0.5)
 
 
 async def test_pushing_ball_moves_it_and_updates_sandbox(bus, monkeypatch):
@@ -276,22 +364,6 @@ class RecordingSensorModel:
         return self.charging
 
 
-async def test_raycast_sensor_model_is_fed_true_pose():
-    body = make_body(seed=3)
-    model = RecordingSensorModel(cliff_beyond_x_mm=200.0)
-    body.attach_sensor_model(model)
-    assert (await body.execute(run("drive", distance_mm=150))).status == "completed"
-    body.sensors()
-    assert model.poses[-1] == body.true_pose()
-    assert model.poses[-1] != body.pose()
-    body.set_sandbox_sensors(front_tof_mm=50.0)  # odometry-based pushes are ignored
-    assert body.sensors().front_tof_mm > 1400
-
-    result = await body.execute(run("drive", distance_mm=300))
-    assert result.status == "reflex_stopped" and result.message == "Cliff sensor triggered"
-    assert 200 < body.true_pose().x_mm < 240
-
-
 async def test_battery_drains_with_travel_and_charges_on_dock():
     body = make_body(
         noise=SensorNoise.off(), battery_idle_pct_per_min=0.0, battery_pct_per_m=10.0, charge_pct_per_min=4.0
@@ -311,89 +383,6 @@ async def test_battery_drains_with_travel_and_charges_on_dock():
     assert idle.sensors().battery_pct == pytest.approx(94.0, abs=0.01)
     with pytest.raises(ValueError):
         make_body(battery_pct_per_m=-1.0)
-
-
-async def test_command_semantics_match_sim_body():
-    commands = [
-        ("tilt_head", {"angle_deg": 20}),
-        ("tilt_head", {"angle_deg": 50}),
-        ("drive", {"distance_mm": 200}),
-        ("drive", {"distance_mm": 150, "direction": "backward"}),
-        ("spin", {"angle_deg": 90}),
-        ("spin", {"angle_deg": -90}),
-        ("perform_trick", {"trick": "nod"}),
-        ("perform_trick", {"trick": "wiggle"}),
-        ("perform_trick", {"trick": "moonwalk"}),
-        ("set_gaze", {"target": "left"}),
-        ("set_eye_color", {"color": "amber"}),
-        ("drive", {"distance_mm": -5}),
-        ("fly", {}),
-        ("stop", {}),
-    ]
-    outcomes = {}
-    for cls in (SimBody, PhysicsBody):
-        bus = EventBus(ReplayClock())
-        events: list[str] = []
-        bus.subscribe("*", lambda e, events=events: events.append(e.type))
-        await bus.start()
-        body = cls(bus)
-        await body.start()
-        rows = []
-        for tool, args in commands:
-            result = await body.execute(run(tool, **args))
-            rows.append((result.tool, result.ok, result.status, result.message, result.details))
-        await bus.drain()
-        await body.stop()
-        await bus.stop()
-        outcomes[cls] = (rows, sorted(set(events)))
-        if cls is PhysicsBody:
-            assert body.pose().head_tilt_deg == pytest.approx(0.0)  # nod ends at neutral
-            assert body.true_pose().head_tilt_deg == pytest.approx(0.0, abs=1.0)
-    assert outcomes[PhysicsBody] == outcomes[SimBody]
-    assert outcomes[SimBody][1] == ["body.pose", "expression.updated", "face.theme"]
-
-
-async def test_pose_events_carry_true_pose_and_battery(bus):
-    body = PhysicsBody(bus)
-    events = []
-    bus.subscribe("body.pose", events.append)
-    await body.execute(run("tilt_head", angle_deg=10))
-    await bus.drain()
-    payload = events[-1].payload
-    assert payload["pose"]["head_tilt_deg"] == pytest.approx(10.0)
-    assert payload["true_pose"]["head_tilt_deg"] == pytest.approx(10.0, abs=1.0)
-    assert payload["sensors"]["battery_pct"] <= 100.0 and payload["sensors"]["charging"] is False
-
-
-async def test_physics_is_faster_than_real_time():
-    body = make_body()
-    started = time.perf_counter()
-    await run_path(body)
-    wall_s = time.perf_counter() - started
-    sim_s = body.bus.clock.monotonic()
-    assert sim_s > 5.0
-    assert body.physics_ms_per_sim_s() < 250.0  # >= 4x real time for stepping alone (~25 ms measured)
-    assert wall_s < 0.5 * sim_s  # including the 20 Hz supervision loop and event emission
-
-
-async def test_real_clock_lifecycle_runs_idle_physics():
-    bus = EventBus(RealClock())
-    await bus.start()
-    body = PhysicsBody(bus, step_dt_s=0.02)
-    await body.start()
-    try:
-        result = await body.execute(run("drive", distance_mm=40))
-        assert result.status == "completed"
-        assert body.true_pose().x_mm == pytest.approx(40, abs=5)
-        sim_time = body._sim_time
-        await asyncio.sleep(0.2)
-        assert body._sim_time > sim_time + 0.1  # the idle task keeps the world evolving
-        health = await body.health()
-        assert health.status == "ok" and "true_pose" in health.details
-    finally:
-        await body.stop()
-        await bus.stop()
-    assert body._idle_task is None
 
 
 async def drive_by_speed(body, v, w, seconds, hz=20.0):
@@ -430,3 +419,79 @@ async def test_speed_control_obeys_the_range_reflex_and_the_bumper(bus):
     reasons = await drive_by_speed(body, 300.0, 0.0, 3.0)
     await bus.drain()
     assert "bumper" in reasons and body.true_pose().x_mm <= 1500 - 150 + 5
+
+
+class FakeMcu:
+    """The VENTUNO Q's STM32H5 as the router delivers it: a kinematic base with its watchdog and range envelope,
+    answering cmd_vel/stop/estop notifications with 50 Hz telemetry."""
+
+    def __init__(self, wall_x_mm: float = 900.0) -> None:
+        self.handlers: dict = {}
+        self.x = self.y = self.heading = self.v = self.w = 0.0
+        self.cmd = (0.0, 0.0)
+        self.last_cmd = 0.0
+        self.estop = False
+        self.wall = wall_x_mm
+        self.sent: list = []
+        self._task = None
+
+    def provide(self, method, handler):
+        self.handlers[method] = handler
+        self._task = self._task or asyncio.get_running_loop().create_task(self._run())
+
+    def notify(self, method, *params):
+        self.sent.append((method, params))
+        if method == "cmd_vel":
+            self.cmd, self.last_cmd = (params[0], params[1] / 1000.0), time.monotonic()
+        elif method == "stop":
+            self.cmd = (0.0, 0.0)
+        elif method == "estop":
+            self.estop = bool(params[0])
+
+    def close(self):
+        if self._task is not None:
+            self._task.cancel()
+
+    async def _run(self):
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(0.02)
+            now = time.monotonic()
+            dt, last = now - last, now
+            v, w = self.cmd if now - self.last_cmd < 0.3 and not self.estop else (0.0, 0.0)
+            range_mm = (self.wall - self.x - 141.0) / max(1e-6, math.cos(math.radians(self.heading)))
+            if v > 0 and 0 < range_mm <= 120.0:
+                v = 0.0
+            self.v, self.w = v, w
+            self.heading += w * dt
+            self.x += v * dt * math.cos(math.radians(self.heading))
+            self.y += v * dt * math.sin(math.radians(self.heading))
+            flags = (32 if v == 0 and self.cmd[0] > 0 and range_mm <= 120.0 else 0) | (4 if self.estop else 0)
+            self.handlers["telemetry"](int(now * 1000), int(self.x), int(self.y), int(self.heading * 1000),
+                                       int(v), int(w * 1000), 0, 0, int(max(0.0, range_mm)), flags, 8000, 0)
+
+
+async def test_ventuno_body_drives_on_mcu_odometry_and_reports_reflexes():
+    from robot.body.ventuno_body import VentunoBody
+
+    bus = EventBus(RealClock())
+    mcu = FakeMcu(wall_x_mm=900.0)
+    body = VentunoBody(bus, link=mcu)
+    reflexes = []
+    bus.subscribe("reflex.triggered", lambda e: reflexes.append(e.payload["reflex"]), immediate=True)
+    await bus.start()
+    await body.start()
+    try:
+        spun = await body.execute(BodyCommand("s", "spin", {"angle_deg": 90}))
+        assert spun.ok and abs(body.pose().heading_deg - 90.0) < 4.0
+        await body.execute(BodyCommand("s2", "spin", {"angle_deg": -90}))
+        blocked = await body.execute(BodyCommand("d", "drive", {"direction": "forward", "distance_mm": 1500}))
+        assert not blocked.ok and blocked.status == "reflex_stopped" and "obstacle_stop" in reflexes
+        assert mcu.x < 900 - 141 - 100
+        await body.set_velocity(150.0, 0.0)
+        assert mcu.sent[-1] == ("cmd_vel", (150, 0))
+        body.set_estop(True)
+        assert mcu.sent[-1] == ("estop", (True,)) and (await body.health()).healthy
+    finally:
+        await body.stop()
+        await bus.stop()

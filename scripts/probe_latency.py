@@ -24,7 +24,7 @@ from robot.cognition.prompts import PromptBuilder  # noqa: E402
 from robot.core.clock import RealClock  # noqa: E402
 from robot.core.config import RobotConfig  # noqa: E402
 from robot.face.animator import EYE_COLOR_THEMES  # noqa: E402
-from robot.perception.camera import encode_png  # noqa: E402
+from robot.perception.camera import VLM_MAX_WIDTH, encode_png, fit_width  # noqa: E402
 from robot.perception.detector import DETECT_ALL_PROMPT  # noqa: E402
 from robot.skills import build_default_registry  # noqa: E402
 from robot.world.sandbox import SimulationSandbox  # noqa: E402
@@ -54,7 +54,7 @@ async def main() -> None:
 
     def image(heading: float) -> str:
         # A new view every time, as when the robot turns: nothing about the image can come from cache.
-        rgb = sandbox.render_head_rgb(BodyPose(heading_deg=heading))
+        rgb = fit_width(sandbox.render_rgb("front", BodyPose(heading_deg=heading)), VLM_MAX_WIDTH)
         if args.size:
             h, w, _ = rgb.shape
             rgb = rgb[[int(y * h / args.size[1]) for y in range(args.size[1])]][

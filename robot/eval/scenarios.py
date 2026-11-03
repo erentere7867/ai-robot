@@ -14,6 +14,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from robot.perception.geometry import CameraModel
+
 Pose = Mapping[str, float]
 SceneObject = Mapping[str, Any]
 
@@ -158,81 +160,26 @@ def reflex_obstacle_id(pose: Pose, objects: Iterable[SceneObject], *, max_gap_mm
 # --------------------------------------------------------------------------- camera ground truth
 
 
-@dataclass(frozen=True)
-class CameraModel:
-    """Head-camera geometry mirrored from the simulator so graders can decide what was in view."""
+def default_cameras() -> tuple[CameraModel, ...]:
+    from robot.perception.geometry import default_rig
 
-    hfov_deg: float = 65.0
-    vfov_deg: float = 52.0
-    range_mm: float = 2600.0
-    image_w: int = 320
-    image_h: int = 240
-    mast_pivot_x_mm: float = 25.0
-    mast_pivot_z_mm: float = 210.0
-    cam_forward_mm: float = 42.0
-    cam_up_mm: float = 76.0
-    base_pitch_deg: float = -9.0
-
-    @classmethod
-    def from_sandbox(cls, sandbox: Any) -> CameraModel:
-        d = cls()
-        return cls(
-            hfov_deg=float(getattr(sandbox, "HFOV_DEG", d.hfov_deg)),
-            vfov_deg=float(getattr(sandbox, "VFOV_DEG", d.vfov_deg)),
-            range_mm=float(getattr(sandbox, "DETECTION_RANGE_MM", d.range_mm)),
-            image_w=int(getattr(sandbox, "cam_width", d.image_w)),
-            image_h=int(getattr(sandbox, "cam_height", d.image_h)),
-            mast_pivot_x_mm=float(getattr(sandbox, "MAST_PIVOT_X_MM", d.mast_pivot_x_mm)),
-            mast_pivot_z_mm=float(getattr(sandbox, "MAST_PIVOT_Z_MM", d.mast_pivot_z_mm)),
-            cam_forward_mm=float(getattr(sandbox, "CAM_OFFSET_FORWARD_MM", d.cam_forward_mm)),
-            cam_up_mm=float(getattr(sandbox, "CAM_OFFSET_UP_MM", d.cam_up_mm)),
-        )
-
-    def to_dict(self) -> dict[str, float]:
-        return {k: getattr(self, k) for k in self.__dataclass_fields__}
+    return default_rig()
 
 
-def visible_object_ids(pose: Pose, objects: Sequence[SceneObject], camera: CameraModel | None = None) -> set[str]:
-    """Ids of objects inside the head-camera frustum and range, not occluded by a taller nearer object."""
-    cam = camera or CameraModel()
-    body_yaw = math.radians(float(pose["heading_deg"]))
-    tilt = math.radians(float(pose.get("head_tilt_deg", 0.0)))
-    local_fwd = cam.mast_pivot_x_mm + cam.cam_forward_mm * math.cos(tilt) - cam.cam_up_mm * math.sin(tilt)
-    # Rounding mirrors the simulator's detector so both agree at frame edges.
-    cam_x = round(float(pose["x_mm"]) + local_fwd * math.cos(body_yaw), 1)
-    cam_y = round(float(pose["y_mm"]) + local_fwd * math.sin(body_yaw), 1)
-    cam_z = round(cam.mast_pivot_z_mm + cam.cam_forward_mm * math.sin(tilt) + cam.cam_up_mm * math.cos(tilt), 1)
-    yaw = math.radians(round(float(pose["heading_deg"]), 1))
-    pitch = math.radians(round(float(pose.get("head_tilt_deg", 0.0)), 1) + cam.base_pitch_deg)
-    fx = 0.5 * cam.image_w / math.tan(math.radians(0.5 * cam.hfov_deg))
-    fy = 0.5 * cam.image_h / math.tan(math.radians(0.5 * cam.vfov_deg))
-    cos_y, sin_y, cos_p, sin_p = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)
+def visible_object_ids(pose: Pose, objects: Sequence[SceneObject],
+                       cameras: Sequence[CameraModel] | None = None) -> set[str]:
+    """Ids of objects some camera of the rig sees, by the simulator's own ground truth (projected 3D extents,
+    each camera's range, occlusion by taller nearer objects)."""
+    from robot.body.hal import BodyPose
+    from robot.world.sandbox import SandboxObject, visible_in
 
-    visible: set[str] = set()
-    for obj in objects:
-        dx, dy = float(obj["x_mm"]) - cam_x, float(obj["y_mm"]) - cam_y
-        height = float(obj.get("height_mm", 100.0))
-        dz = float(obj.get("z_mm", 0.0)) + 0.5 * height - cam_z
-        rx = dx * cos_y + dy * sin_y
-        ry = -dx * sin_y + dy * cos_y
-        fwd = rx * cos_p + dz * sin_p
-        up = -rx * sin_p + dz * cos_p
-        if fwd <= 40.0 or math.hypot(dx, dy) > cam.range_mm:
-            continue
-        u = 0.5 * cam.image_w + fx * (-ry / fwd)
-        v = 0.5 * cam.image_h - fy * (up / fwd)
-        proj_w = max(8, round(fx * float(obj.get("width_mm", 100.0)) / fwd))
-        proj_h = max(8, round(fy * height / fwd))
-        if (
-            round(u + 0.5 * proj_w) < 0
-            or round(u - 0.5 * proj_w) >= cam.image_w
-            or round(v + 0.5 * proj_h) < 0
-            or round(v - 0.5 * proj_h) >= cam.image_h
-        ):
-            continue
-        if not _occluded(obj, objects, cam_x, cam_y):
-            visible.add(str(obj["id"]))
-    return visible
+    p = BodyPose(float(pose["x_mm"]), float(pose["y_mm"]), float(pose["heading_deg"]),
+                 float(pose.get("head_tilt_deg", 0.0)))
+    things = [SandboxObject(str(o["id"]), str(o.get("label", o["id"])), str(o.get("shape", "box")),
+                            float(o["x_mm"]), float(o["y_mm"]), float(o.get("z_mm", 0.0)),
+                            float(o.get("width_mm", 100.0)), float(o.get("depth_mm", o.get("width_mm", 100.0))),
+                            float(o.get("height_mm", 100.0))) for o in objects]
+    return {d.id for cam in cameras or default_cameras() for d in visible_in(things, p, cam)}
 
 
 def _occluded(target: SceneObject, objects: Sequence[SceneObject], cam_x: float, cam_y: float) -> bool:
@@ -256,7 +203,8 @@ def _occluded(target: SceneObject, objects: Sequence[SceneObject], cam_x: float,
     return False
 
 
-def visible_families(poses: Iterable[Pose], objects: Sequence[SceneObject], camera: CameraModel | None = None) -> set[str]:
+def visible_families(poses: Iterable[Pose], objects: Sequence[SceneObject],
+                     camera: Sequence[CameraModel] | None = None) -> set[str]:
     by_id = {str(o["id"]): o for o in objects}
     seen: set[str] = set()
     for pose in poses:
@@ -375,7 +323,7 @@ class ScenarioRun:
     turns: list[TurnRecord]
     objects_start: list[dict[str, Any]]
     objects_end: list[dict[str, Any]]
-    camera: CameraModel = field(default_factory=CameraModel)
+    camera: tuple[CameraModel, ...] = field(default_factory=default_cameras)
 
     @property
     def objects(self) -> list[dict[str, Any]]:
@@ -696,14 +644,32 @@ def grade_sees_box(run: ScenarioRun) -> Grade:
     return _verdict([(yes, "said yes" if yes else f"did not say yes: {say[:70]!r}")], {})
 
 
+def _behind(pose: Pose, objects: Sequence[SceneObject]) -> set[str]:
+    """Families of the objects behind the robot (more than 100 degrees off its heading)."""
+    return {f for o in objects
+            if abs(relative_bearing_deg(pose, float(o["x_mm"]), float(o["y_mm"]))) > 100.0 and (f := family_of(o))}
+
+
 def grade_look_back_and_tell(run: ScenarioRun) -> Grade:
+    """Says what is behind it: turning round to look is fine, and so is looking with the rear cameras."""
     turn = run.turns[-1]
-    turned = abs(heading_change_deg(turn.pose_before, turn.pose_after))
-    behind = visible_families([turn.pose_after], run.objects, run.camera)
+    behind = _behind(turn.pose_before, run.objects)
     named = mentioned_families(turn.say) & behind
-    return _verdict([(turned >= 140.0, f"turned {turned:.0f} deg"),
-                     (bool(named), f"named {sorted(named)} of {sorted(behind)} now in view")],
-                    {"turned_deg": round(turned, 1), "in_view": sorted(behind), "named": sorted(named)})
+    return _verdict([(bool(named), f"named {sorted(named)} of {sorted(behind)} behind it")],
+                    {"turned_deg": round(heading_change_deg(turn.pose_before, turn.pose_after), 1),
+                     "behind": sorted(behind), "named": sorted(named)})
+
+
+def grade_check_left(run: ScenarioRun) -> Grade:
+    """'Check what's on your left': turn left, or say what is there (the cameras see it without turning)."""
+    turn = run.turns[-1]
+    change = heading_change_deg(turn.pose_before, turn.pose_after)
+    left = {f for o in run.objects if 30.0 < relative_bearing_deg(turn.pose_before, float(o["x_mm"]), float(o["y_mm"]))
+            < 150.0 and (f := family_of(o))}
+    named = mentioned_families(turn.say) & left
+    ok = abs(wrap_deg(change - 90.0)) <= 35.0 or bool(named)
+    return _verdict([(ok, f"turned {change:+.0f} deg, named {sorted(named)} of {sorted(left)} on its left")],
+                    {"heading_change_deg": round(change, 1), "left": sorted(left), "named": sorted(named)})
 
 
 def _near_grader(obj_id: str, limit_mm: float) -> Callable[[ScenarioRun], Grade]:
@@ -792,6 +758,7 @@ class Scenario:
     realtime: bool = False  # moving objects, following, interruptions
     paraphrase: bool = False  # held-out rewordings of the other sets (see PARAPHRASE_SCENARIOS)
     session: bool = False  # requests that failed in a real session
+    people: bool = False  # a person in the room: hearing and seeing them, "come here", "follow me"
     # Per utterance index: seconds to keep watching after the reply (persistent behaviours, moving scenes).
     hold_s: tuple[float, ...] = ()
     # Per utterance index: send it this many seconds after the previous one, without waiting for its reply.
@@ -923,7 +890,8 @@ REALTIME_SCENARIOS: tuple[Scenario, ...] = (
              realtime=True, hold_s=(4.0, 4.0), motions=(("red_ball", 0, (0.0, 85.0), 12.0),)),
     Scenario("interrupt_go", "Stop part-way to the dock when told to, while still driving",
              ("go to your charging dock", "stop"), grade_interrupted, realtime=True, hold_s=(0.0, 3.0),
-             interrupt_after_s=(None, 5.0)),
+             # The rear cameras already see the dock behind: the robot drives straight there, so stop it early.
+             interrupt_after_s=(None, 2.5)),
     Scenario("rolling_ball", "Go to a ball that is rolling away", ("go to the red ball",), grade_go_to_ball,
              SceneSetup(overrides={"red_ball": (800.0, 0.0), "blue_cube": (-700.0, 900.0),
                                    "green_mug": (-900.0, -900.0), "cardboard_box": (1000.0, 1000.0),
@@ -998,8 +966,8 @@ TASK_SCENARIOS: tuple[Scenario, ...] = (
 PARAPHRASE_SCENARIOS: tuple[Scenario, ...] = (
     Scenario("p_face_away", "Face the other way", ("face the other way",), _turn_grader(180.0, 30.0),
              paraphrase=True),
-    Scenario("p_check_left", "Turn to see what is on the left", ("check what's on your left side",),
-             _turn_grader(90.0, 35.0), paraphrase=True),
+    Scenario("p_check_left", "Turn to see what is on the left, or say what is there", ("check what's on your left side",),
+             grade_check_left, paraphrase=True),
     Scenario("p_scoot", "Small forward move", ("scoot forward a bit",), grade_move_forward, paraphrase=True),
     Scenario("p_head_ball", "Go to the ball", ("head over to the red ball please",), grade_go_to_ball,
              paraphrase=True),
@@ -1060,18 +1028,89 @@ SESSION_SCENARIOS: tuple[Scenario, ...] = (
     Scenario("s_typo_box", "Typo in a yes/no question", ("do you see a cardboard boz",), grade_sees_box,
              session=True),
 )
+
+
+def grade_come_here(run: ScenarioRun) -> Grade:
+    """Came to the person who spoke: within reach, not in their face, facing them, touching nothing."""
+    person = run.object("person")
+    if person is None:
+        return _missing("person")
+    end = run.turns[-1].pose_after
+    dist = distance_mm(end, person)
+    facing = abs(relative_bearing_deg(end, float(person["x_mm"]), float(person["y_mm"])))
+    start_dist = distance_mm(run.turns[-1].pose_before, person)
+    hits = [h for o in run.objects if (h := _collisions(run, o)["contacts"])]
+    return _verdict([(dist <= 1000.0, f"ended {dist:.0f} mm from the person (started {start_dist:.0f})"),
+                     (dist >= 380.0, f"kept {dist:.0f} mm away"),
+                     (facing <= 35.0, f"facing {facing:.0f} deg off them"),
+                     (not hits, f"{sum(hits)} contact poses")],
+                    {"distance_mm": round(dist, 1), "start_distance_mm": round(start_dist, 1),
+                     "facing_off_deg": round(facing, 1)})
+
+
+def grade_look_at_me(run: ScenarioRun) -> Grade:
+    person = run.object("person")
+    if person is None:
+        return _missing("person")
+    off = abs(relative_bearing_deg(run.turns[-1].pose_after, float(person["x_mm"]), float(person["y_mm"])))
+    return _verdict([(off <= 20.0, f"facing {off:.0f} deg off the person")], {"facing_off_deg": round(off, 1)})
+
+
+def grade_follow_person(run: ScenarioRun) -> Grade:
+    """While the person walks away, the robot keeps within a comfortable distance of them."""
+    turn = run.turns[-1]
+    gaps = [g for g in (_robot_gap(s, "person") for s in turn.snapshots[len(turn.snapshots) // 3:]) if g]
+    person = run.object("person")
+    if not gaps or person is None:
+        return Grade(False, "no snapshots of the person", {})
+    within = sum(400.0 <= g <= 1600.0 for g in gaps) / len(gaps)
+    travelled = distance_mm(turn.pose_before, turn.pose_after)
+    hits = _collisions(run, person)
+    return _verdict([(within >= 0.8, f"{100 * within:.0f}% of the time 40-160 cm from the person"),
+                     (travelled >= 400.0, f"moved {travelled:.0f} mm with them"),
+                     (not hits["contacts"], f"{hits['contacts']} contact poses")],
+                    {"within": round(within, 2), "travelled_mm": round(travelled, 1), "gaps": [round(g) for g in gaps]})
+
+
+# The person stands somewhere around the robot; the robot only hears and sees them.
+_PERSON_FRONT_LEFT = {"person": (900.0, 900.0)}
+_PERSON_BEHIND = {"person": (-1000.0, -500.0), "charging_dock": (-700.0, 700.0)}
+_PERSON_RIGHT = {"person": (-200.0, -1150.0)}
+PEOPLE_SCENARIOS: tuple[Scenario, ...] = (
+    Scenario("come_here", "Come to the person who spoke (ahead, to the left)", ("come here",), grade_come_here,
+             SceneSetup(overrides=_PERSON_FRONT_LEFT, jitter_mm=80.0), people=True),
+    Scenario("come_here_behind", "Come to the person who spoke from behind", ("come here",), grade_come_here,
+             SceneSetup(overrides=_PERSON_BEHIND, jitter_mm=80.0), people=True),
+    Scenario("come_to_me", "Come to the person, in other words", ("can you come over to me?",), grade_come_here,
+             SceneSetup(overrides=_PERSON_RIGHT, jitter_mm=80.0), people=True),
+    Scenario("look_at_me", "Turn to face the person who spoke", ("look at me",), grade_look_at_me,
+             SceneSetup(overrides=_PERSON_BEHIND, jitter_mm=80.0), people=True),
+    # The person walks away across the room (passing the robot at its following distance would need no driving).
+    Scenario("follow_me", "Follow the person as they walk away across the room", ("follow me",), grade_follow_person,
+             SceneSetup(overrides={"person": (300.0, 800.0), "red_ball": (800.0, -300.0), "yellow_duck": (1000.0, 200.0),
+                                   "blue_cube": (-700.0, -900.0), "green_mug": (1000.0, -800.0),
+                                   "cardboard_box": (1050.0, 1050.0), "charging_dock": (-700.0, -350.0)},
+                        jitter_mm=40.0),
+             people=True, hold_s=(14.0,), motions=(("person", 0, (-180.0, 0.0), 9.0),)),
+    Scenario("circle_box_behind", "Do a full circle around the box behind you", (
+        "do a full circle around the box behind you",), grade_circle_box,
+        SceneSetup(overrides=_BOX_BEHIND, jitter_mm=40.0), people=True),
+    Scenario("whats_behind", "Say what is behind, without needing to turn", ("what's behind you?",),
+             grade_look_back_and_tell, SceneSetup(overrides=_BOX_BEHIND, jitter_mm=40.0), people=True),
+)
 SCENARIO_LIST = (SCENARIO_LIST + HARD_SCENARIOS + REALTIME_SCENARIOS + TASK_SCENARIOS + PARAPHRASE_SCENARIOS
-                 + SESSION_SCENARIOS)
+                 + SESSION_SCENARIOS + PEOPLE_SCENARIOS)
 SCENARIOS: dict[str, Scenario] = {s.name: s for s in SCENARIO_LIST}
 
 
 def select_scenarios(spec: str) -> list[Scenario]:
-    """Parse `all`, `core` (the original set), `hard`, `realtime`, `tasks`, or comma-separated names."""
+    """Parse `all`, `core`, `hard`, `realtime`, `tasks`, `people`, `paraphrase`, `session`, `dev`, or names."""
     names = [n.strip() for n in (spec or "all").split(",") if n.strip()]
     if not names or names == ["all"]:
         return list(SCENARIO_LIST)
     if names == ["core"]:
-        return [s for s in SCENARIO_LIST if not (s.hard or s.realtime or s.tasks or s.paraphrase or s.session)]
+        return [s for s in SCENARIO_LIST
+                if not (s.hard or s.realtime or s.tasks or s.paraphrase or s.session or s.people)]
     if names == ["paraphrase"]:
         return [s for s in SCENARIO_LIST if s.paraphrase]
     if names == ["session"]:
@@ -1084,6 +1123,8 @@ def select_scenarios(spec: str) -> list[Scenario]:
         return [s for s in SCENARIO_LIST if s.realtime]
     if names == ["tasks"]:
         return [s for s in SCENARIO_LIST if s.tasks]
+    if names == ["people"]:
+        return [s for s in SCENARIO_LIST if s.people]
     unknown = [n for n in names if n not in SCENARIOS]
     if unknown:
         raise ValueError(f"Unknown scenario(s): {', '.join(unknown)}; choose from {', '.join(SCENARIOS)}")

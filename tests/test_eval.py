@@ -13,7 +13,6 @@ import pytest
 from robot.eval.scenarios import (
     SCENARIO_LIST,
     SCENARIOS,
-    CameraModel,
     Grade,
     ScenarioRun,
     SceneSetup,
@@ -37,8 +36,10 @@ from robot.eval.scenarios import (
     select_scenarios,
     visible_object_ids,
 )
+from robot.perception.geometry import default_rig
 
 ROOT = Path(__file__).resolve().parents[1]
+RIG = default_rig()
 
 
 def pose(x=0.0, y=0.0, h=0.0, tilt=0.0):
@@ -93,12 +94,17 @@ def test_family_synonyms_plurals_and_no_partial_words():
 
 def test_camera_ground_truth_frustum_range_and_occlusion():
     objects = [obj("ahead", "Red Ball", "sphere", 800, 0), obj("behind", "Blue Cube", "box", -800, 0),
-               obj("far", "Green Mug", "cylinder", 2900, 0), obj("left", "Yellow Duck", "sphere", 0, 900)]
-    assert visible_object_ids(pose(), objects) == {"ahead"}
-    assert visible_object_ids(pose(h=90), objects) == {"left"}
-    assert visible_object_ids(pose(h=180), objects) == {"behind"}
+               obj("far", "Green Mug", "cylinder", 2900, 300), obj("left", "Yellow Duck", "sphere", 0, 900)]
+    front = RIG[:1]
+    assert visible_object_ids(pose(), objects, front) == {"ahead", "far"}
+    assert visible_object_ids(pose(h=90), objects, front) == {"left"}
+    assert visible_object_ids(pose(h=180), objects, front) == {"behind"}
+    # The whole rig sees all around; the rear cameras' range is shorter.
+    assert visible_object_ids(pose(), objects) == {"ahead", "far", "behind", "left"}
+    assert "far" in visible_object_ids(pose(-400, h=0), objects)  # 3.3 m: inside the front camera's range
+    assert "far" not in visible_object_ids(pose(-400, h=180), objects)  # beyond the rear cameras' 3 m
     hidden = [obj("small", "Red Ball", "sphere", 1200, 0, 90), obj("wall", "Cardboard Box", "box", 600, 0, 260)]
-    assert visible_object_ids(pose(), hidden) == {"wall"}
+    assert visible_object_ids(pose(), hidden, front) == {"wall"}
 
 
 def test_camera_ground_truth_matches_simulator_detector():
@@ -108,17 +114,12 @@ def test_camera_ground_truth_matches_simulator_detector():
     from robot.world.sandbox import SimulationSandbox
 
     sandbox = SimulationSandbox(None)
-    if not hasattr(sandbox, "detect_objects"):
-        pytest.skip("sandbox has no geometric detector to compare against")
-    camera = CameraModel.from_sandbox(sandbox)
     rng = random.Random(7)
-    agree = 0
-    for _ in range(500):
+    for _ in range(100):
         p = BodyPose(x_mm=rng.uniform(-1300, 1300), y_mm=rng.uniform(-1300, 1300),
                      heading_deg=rng.uniform(-180, 180), head_tilt_deg=rng.uniform(-25, 35))
-        truth = {d.id for d in sandbox.detect_objects(p)}
-        agree += truth == visible_object_ids(vars(p), sandbox.list_objects(), camera)
-    assert agree >= 490
+        truth = {d.id for cam in RIG for d in sandbox.detect_objects(p, cam)}
+        assert truth == visible_object_ids(vars(p), sandbox.list_objects())
 
 
 def test_footprint_contact_and_reflex_attribution():
@@ -206,8 +207,11 @@ def test_describe_counts_only_families_in_view():
     assert grade_describe(run(turn(say="I see a red ball and a green mug."))).passed
     only_one = grade_describe(run(turn(say="A ball!")))
     assert not only_one.passed and only_one.details["correct"] == ["ball"]
-    behind = grade_describe(run(turn(say="I see the charging dock and a duck.")))
-    assert not behind.passed and "dock" in behind.details["unseen_mentions"]
+    # The dock behind the robot is in view of the rear cameras.
+    assert grade_describe(run(turn(say="I see the charging dock and a duck."))).passed
+    no_dock = [o for o in scene() if o["id"] != "charging_dock"]
+    made_up = grade_describe(run(turn(say="I see the charging dock and a duck."), objects=no_dock))
+    assert not made_up.passed and "dock" in made_up.details["hallucinated"]
 
 
 def test_look_around_report_needs_four_real_families():
@@ -249,11 +253,13 @@ def test_find_hidden_facing_or_seen_and_located():
     objects = scene(yellow_duck=(-800, 350))
     bearing = math.degrees(math.atan2(350, -800))
     assert grade_find_hidden(run(turn(after=pose(h=bearing + 30)), objects=objects)).passed
+    # Behind the robot is in view of the rear cameras: saying where it is counts as finding it.
     claim = "The yellow duck is behind me, near the dock."
-    assert not grade_find_hidden(run(turn(say=claim, after=pose()), objects=objects)).passed
-    looked = [pose(h=bearing)]
-    assert grade_find_hidden(run(turn(say=claim, after=pose(), trajectory=looked), objects=objects)).passed
-    assert not grade_find_hidden(run(turn(say="Found it!", after=pose(), trajectory=looked), objects=objects)).passed
+    assert grade_find_hidden(run(turn(say=claim, after=pose()), objects=objects)).passed
+    assert not grade_find_hidden(run(turn(say="Found it!", after=pose()), objects=objects)).passed
+    # Hidden behind the box: not seen, so a claim about it is a guess.
+    hidden = scene(yellow_duck=(-900, 0), cardboard_box=(-600, 0))
+    assert not grade_find_hidden(run(turn(say=claim, after=pose()), objects=hidden)).passed
 
 
 def test_memory_recall_requires_restart_and_answer():

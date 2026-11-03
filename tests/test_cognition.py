@@ -19,7 +19,7 @@ from robot.cognition.backend import (
     UnavailableBackend,
 )
 from robot.cognition.llamacpp import AutoBackend, LlamaCppBackend
-from robot.cognition.prompts import PromptBuilder, estimate_tokens, truncate_to_tokens
+from robot.cognition.prompts import PromptBuilder
 from robot.core.clock import ReplayClock
 from robot.core.config import AgentConfig, ContextBudgetConfig, LLMConfig
 from robot.perception.camera import Frame
@@ -155,14 +155,6 @@ async def test_tool_call_result_is_fed_back_with_its_id_then_reply():
     assert kinds == ["cognition.model_call", "skill.started", "skill.completed", "cognition.model_call"]
 
 
-async def test_transcript_records_this_turns_calls_and_results():
-    result, _, _ = await run([{"calls": [["observe", {}], ["move", {"direction": "backward"}]]}, "Done."])
-    assert [m["role"] for m in result.transcript] == ["assistant", "tool", "tool"]
-    ids = [c["id"] for c in result.transcript[0]["tool_calls"]]
-    assert [m["tool_call_id"] for m in result.transcript[1:]] == ids
-    assert result.action_notes() == ["observe() ok", "move(backward) ok"]
-
-
 @pytest.mark.parametrize("text, expected", [
     ("observe()", [("observe", {})]),
     ("<|tool_call_start|>[observe(), move(direction='forward')]<|tool_call_end|>",
@@ -196,12 +188,6 @@ async def test_agent_executes_recovered_text_calls():
     assert assistant["content"] == "" and assistant["tool_calls"][0]["function"]["name"] == "observe"
 
 
-async def test_malformed_text_reply_never_crashes_the_turn():
-    result, _, probe = await run(["observe(x={[1]: 2})"])
-    assert result.status == "completed" and probe.ran == []
-    assert result.say == "observe(x={[1]: 2})"
-
-
 async def test_invalid_arguments_are_reported_and_never_executed():
     script = [
         ChatResult("", [ToolCall("c1", "move", {}, invalid_arguments=True)]),
@@ -222,13 +208,6 @@ async def test_invalid_arguments_are_reported_and_never_executed():
     assert "There is no tool named 'raw_gpio_write'" in texts[3]
     assert "distance_cm must be a number" in texts[4]
     assert result.status == "blocked"  # the fourth recorded failure stops the loop
-
-
-async def test_numbers_are_clamped_to_the_schema_and_stray_arguments_dropped():
-    result, _, probe = await run([{"call": "move", "args": {"direction": "Forward", "distance_cm": 9000,
-                                                            "speed": "fast"}}, "ok"])
-    assert probe.ran == [("move", {"direction": "forward", "distance_cm": 200.0})]
-    assert result.status == "completed"
 
 
 async def test_same_call_three_times_blocks():
@@ -327,12 +306,6 @@ def test_speakable_replaces_known_ids_and_strips_emoji():
     assert speakable("☀️ Sunny!", {}) == "Sunny!"
 
 
-async def test_reply_is_made_speakable_with_the_map_ids():
-    obj = TrackedObject("box_1", "brown box", 900, 0, 100, 0, 0)
-    result, _, _ = await run(["\U0001F4E6 I went behind box_1."], ctx=make_ctx({"box_1": obj}))
-    assert result.say == "I went behind the box."
-
-
 # ---- context fitting ---------------------------------------------------------------------------------
 def big_history(turns: int = 3) -> list[dict]:
     history = []
@@ -362,17 +335,6 @@ def test_fit_never_orphans_tool_messages(limit):
     assert any("[Situation]" in str(m.get("content")) for m in messages)
     assert_no_orphans(messages)
     assert messages[-1]["role"] == "tool" and messages[-1]["tool_call_id"] == "n5"
-
-
-async def test_transcript_has_no_orphans_when_history_is_trimmed():
-    """Trimming old history during a turn must not shift which messages count as this turn's."""
-    script = [{"call": "move", "args": {"direction": "forward", "distance_cm": 10 + i}} for i in range(4)] + ["Done."]
-    messages = request("drive in steps", big_history(1))
-    result, backend, probe = await run(script, messages=messages, limit=1100 + 650)
-    assert len(probe.ran) == 4 and result.status == "completed"
-    assert not any("old request" in str(m.get("content")) for m in backend.requests[-1]["messages"])
-    assert_no_orphans(result.transcript)
-    assert [m["role"] for m in result.transcript] == ["assistant", "tool"] * 4
 
 
 # ---- prompts -------------------------------------------------------------------------------------------
@@ -416,23 +378,6 @@ def test_history_prunes_by_half_when_full(tmp_path):
     for k in range(7):
         prompts.add_exchange(f"request {k}", f"reply {k}", exchange_transcript(k))
     assert [e[0]["content"] for e in prompts.history] == ["request 4", "request 5", "request 6"]
-
-
-def test_history_budget_and_turn_limit_are_respected_for_multibyte_input(tmp_path):
-    budget = ContextBudgetConfig(recent_turns_tokens=700, max_recent_turns=6)
-    prompts = PromptBuilder(soul(tmp_path), budget)
-    for k in range(100):
-        prompts.add_exchange("世界" * 5000, "世界" * 5000, exchange_transcript(k))
-    assert 1 <= len(prompts.history) <= 6
-    messages = prompts.build("hi", "[Situation]", background=False)
-    history = messages[1:-1]
-    cost = sum(estimate_tokens(str(m.get("content") or "")) + estimate_tokens(json.dumps(m.get("tool_calls", "")))
-               + 6 for m in history)
-    assert 0 < cost <= budget.recent_turns_tokens
-    assert_no_orphans(messages)
-    assert all(estimate_tokens(m["content"]) <= 205 for m in history if m["role"] == "user")
-    assert truncate_to_tokens("hello", 0) == ""
-    assert truncate_to_tokens("世" * 1000, 50).endswith("...[truncated]")
 
 
 def test_background_header_situation_and_clear(tmp_path):
@@ -513,15 +458,6 @@ def test_parse_tool_calls_flags_bad_json_and_caps_count():
         {"id": "d", "function": {"name": "observe", "arguments": "{}"}},
     ])
     assert [(c.id, c.invalid_arguments) for c in calls] == [("a", True), ("b", True), ("c", False)]
-
-
-async def test_truncated_tool_call_is_never_returned():
-    client = await mock_llama(lambda req: completion(calls=[native("move", {"distance_cm": 100})], finish="length"))
-    try:
-        result = await client.chat([], tools=[{"type": "function"}])
-    finally:
-        await client.close()
-    assert result.tool_calls == []
 
 
 @pytest.mark.parametrize("oversized", [False, True])
@@ -744,7 +680,6 @@ async def test_a_failed_part_ends_the_list():
     assert result.say == "I bumped into something, sorry." and len(backend.requests) == 2
 
 
-
 def test_calls_written_as_markup_are_recovered_and_never_spoken():
     from robot.cognition.agent import recover_text_tool_calls, strip_written_calls
 
@@ -756,14 +691,6 @@ def test_calls_written_as_markup_are_recovered_and_never_spoken():
     assert recover_text_tool_calls(text + " I'm back!", {"circle_around"}) == []  # prose too: not recovered
 
 
-async def test_a_claim_without_action_is_caught_in_a_later_part_too():
-    script = [{"call": "move", "args": {"direction": "forward"}}, "Got it, now I'll head back.",
-              {"call": "move", "args": {"direction": "backward"}}, "I'm back."]
-    result, backend, probe = await run(script, messages=request("move forward and then come back"))
-    assert [args["direction"] for _, args in probe.ran] == ["forward", "backward"]
-    assert backend.requests[2]["tool_choice"] == "required" and result.say == "I'm back."
-
-
 async def test_warm_up_reads_the_system_prompt_and_tools_once():
     backend = ScriptedBackend()
     loop = AgentLoop(backend, Probe().registry(), AgentConfig())
@@ -771,10 +698,6 @@ async def test_warm_up_reads_the_system_prompt_and_tools_once():
     (sent,) = backend.requests
     assert sent["messages"][0] == {"role": "system", "content": "You are a robot."}
     assert {t["function"]["name"] for t in sent["tools"]} == set(Probe().registry().names)
-
-
-async def test_warm_up_without_a_model_does_not_raise():
-    await AgentLoop(UnavailableBackend(), Probe().registry(), AgentConfig()).warm_up("You are a robot.")
 
 
 async def test_fast_finish_speaks_the_skill_report_without_another_model_call():

@@ -246,12 +246,31 @@ class Face(Behavior):
 
 @dataclass
 class Relation:
-    """Where to stand relative to an object; "behind"/"left of" are as seen from where the task began."""
+    """Where to stand relative to an object; "behind"/"left of" are as seen from where the task began.
+
+    "near" is approached from wherever I am now. The other sides keep the view from the start, unless the
+    object turns out to be somewhere else entirely (the map corrected a wrong guess): then the view is taken
+    afresh from where I am.
+    """
 
     kind: str  # near | in_front_of | behind | left_of | right_of | between | on
     gap_mm: float = ROBOT_CLEARANCE_MM
     other_id: str | None = None
     view: tuple[float, float] = (1.0, 0.0)  # unit vector from the robot to the object at the start
+    anchor: tuple[float, float] | None = None  # where the object was believed to be at the start
+
+    REANCHOR_MM = 600.0
+
+    def update_view(self, pose: BodyPose, obj: TrackedObject) -> None:
+        moved = self.anchor is not None and math.hypot(obj.x_mm - self.anchor[0],
+                                                       obj.y_mm - self.anchor[1]) > self.REANCHOR_MM
+        if self.kind == "near" or moved:
+            dx, dy = obj.x_mm - pose.x_mm, obj.y_mm - pose.y_mm
+            norm = math.hypot(dx, dy)
+            if norm > 1.0:
+                self.view = (dx / norm, dy / norm)
+            if moved:
+                self.anchor = (obj.x_mm, obj.y_mm)
 
     def goal(self, world: SpatialMap, obj: TrackedObject, gap_mm: float | None = None, swing_deg: float = 0.0
              ) -> tuple[float, float] | None:
@@ -302,6 +321,8 @@ class GoToObject(Behavior):
                 return Done(False, f"I lost track of {self.obj_id}")
             return Drive(0.0, 0.0)
         self.missing_since = None
+        if self.phase == "drive":
+            self.relation.update_view(t.pose, obj)
         goal = self.relation.goal(t.world, obj)
         if goal is None:
             return Done(False, f"I lost track of {self.relation.other_id}")

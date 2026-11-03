@@ -13,7 +13,7 @@ The fast detector (the trained YOLO the robot drives with) runs on the same fram
 distance, so far-away objects get their own numbers. The simulator's duck is a yellow sphere and its mug a
 green cylinder, so those names count as right.
 
-Run against a llama-server that is already up (see scripts/start_llm.ps1):
+Run against a llama-server that is already up (`python -m robot` starts one):
     python scripts/eval_vision.py --frames 30
 """
 
@@ -29,10 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from robot.body.hal import BodyPose  # noqa: E402
 from robot.cognition.llamacpp import LlamaCppBackend  # noqa: E402
 from robot.core.config import RobotConfig  # noqa: E402
-from robot.eval.scenarios import CameraModel  # noqa: E402
 from robot.perception.camera import Frame  # noqa: E402
 from robot.perception.datagen import OBJECT_CLASS, SceneRandomizer  # noqa: E402
 from robot.perception.detector import VLMDetector, _iou  # noqa: E402
@@ -41,13 +39,14 @@ from robot.world.sandbox import SimulationSandbox  # noqa: E402
 from robot.world.spatial_map import head_noun  # noqa: E402
 
 NAMES = {"red_ball": "red ball", "blue_cube": "blue cube", "yellow_duck": "yellow duck", "green_mug": "green mug",
-         "cardboard_box": "cardboard box", "charging_dock": "charging dock"}
+         "cardboard_box": "cardboard box", "charging_dock": "charging dock", "person": "person"}
 # Nouns a person would accept for each object, and the colour words that are right for it.
 NOUNS = {"red_ball": {"ball", "sphere"}, "blue_cube": {"cube", "block", "box"},
          "yellow_duck": {"duck", "duckie", "sphere", "ball"}, "green_mug": {"mug", "cup", "cylinder", "can"}, "cardboard_box": {"box", "carton", "cardboard"},
-         "charging_dock": {"dock", "charger", "pad", "station", "base", "platform", "mat"}}
+         "charging_dock": {"dock", "charger", "pad", "station", "base", "platform", "mat"},
+         "person": {"person", "man", "woman", "human", "people", "child"}}
 COLOURS = {"red_ball": {"red"}, "blue_cube": {"blue"}, "yellow_duck": {"yellow"}, "green_mug": {"green"},
-           "cardboard_box": {"brown", "tan", "beige", "cardboard", "orange"}, "charging_dock": set()}
+           "cardboard_box": {"brown", "tan", "beige", "cardboard", "orange"}, "charging_dock": set(), "person": set()}
 BANDS = ((0.0, 1000.0, "under 1 m"), (1000.0, 2000.0, "1-2 m"), (2000.0, 1e9, "over 2 m"))
 
 
@@ -77,7 +76,6 @@ async def main() -> int:
         return 2
     sandbox = SimulationSandbox()
     randomizer = SceneRandomizer(sandbox, args.seed)
-    camera = CameraModel.from_sandbox(sandbox)
     detector = VLMDetector(backend)
     fast = None
     for models_dir in (cfg.runtime_dir / "models", Path(__file__).resolve().parents[1] / "models"):
@@ -93,10 +91,10 @@ async def main() -> int:
     query_s: list[float] = []
     try:
         for i in range(args.frames):
-            pose: BodyPose = randomizer.randomize()
-            rgb, labels = sandbox.render_head_labels(pose)
+            name, pose = randomizer.randomize()
+            rgb, labels = sandbox.render_labels(name, pose)
             h, w, _ = rgb.shape
-            frame = Frame(None, pose, camera, 0.0, None, rgb)
+            frame = Frame(None, pose, sandbox.cameras[name], 0.0, None, rgb)
             truth = {oid: _box(lab, w, h) for oid, lab in labels.items() if lab["pixels"] >= args.min_pixels}
             every = {oid: _box(lab, w, h) for oid, lab in labels.items() if lab["pixels"] > 0}
 

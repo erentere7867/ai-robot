@@ -1,7 +1,8 @@
-"""Spatial working memory: tracked objects, named places, ToF occupancy and camera coverage.
+"""Spatial working memory: tracked objects and people, who is speaking, named places, occupancy, coverage.
 
-Everything here comes from the robot's own sensors (camera detections placed with odometry,
-range readings); nothing reads simulator ground truth. Positions live in the odometry frame.
+Everything here comes from the robot's own sensors (camera detections placed with odometry and refined
+by the lidar, range readings, the direction a voice came from); nothing reads simulator ground truth.
+Positions live in the map frame (odometry corrected by lidar localization).
 """
 
 from __future__ import annotations
@@ -46,6 +47,14 @@ FILLER = {"a", "an", "the", "small", "large", "big", "little", "tiny", "toy", "o
 CELL_MM = 50.0
 ASKED_PLACE = "where_asked"  # where I was when the current request came: what "come back" means
 PLACE_NOTES = {"start": " (where I was switched on)", ASKED_PLACE: " (where I was when the human asked)"}
+# Words for the human who is talking. The model is told the human is "me"; people say "come here".
+SPEAKER_WORDS = {"me", "you", "user", "human", "the human", "the user", "person talking", "speaker", "here",
+                 "over here", "to me", "the person talking to you", "whoever is talking"}
+PERSON_WORDS = {"person", "human", "man", "woman", "people", "child", "kid"}
+# How far beyond the visible bottom edge an object's centre is. Round things: one radius. A person's box is
+# as wide as their arms, but they stand on their feet: the centre is just behind the toes.
+FOOTPRINT_DEPTH_MM = {"person": 110.0}
+LIDAR_DEPTH_MM = {"person": 40.0}  # from the lidar's returns to the centre: it sees the fronts of the legs
 
 
 def _tokens(label: str) -> list[str]:
@@ -176,21 +185,72 @@ class TrackedObject:
     var_mm2: float = 300.0 ** 2  # position uncertainty (variance, per axis)
     alt_label: str = ""  # a different label the detector keeps giving this track
     alt_votes: float = 0.0
+    vx_mm_s: float = 0.0  # estimated velocity of a person walking
+    vy_mm_s: float = 0.0
+
+    def predicted(self, now: float) -> tuple[float, float, float]:
+        """Where it should be by now, and how uncertain that is. People walk: constant velocity, uncertainty
+        growing with the time since they were last seen. Things stay put (small differences between cameras
+        must not turn into motion)."""
+        if not self.is_person:
+            return self.x_mm, self.y_mm, self.var_mm2
+        dt = max(0.0, min(MAX_PREDICT_S, now - self.last_seen))
+        return (self.x_mm + self.vx_mm_s * dt, self.y_mm + self.vy_mm_s * dt,
+                self.var_mm2 + (SPEED_NOISE_MM_S * dt) ** 2)
 
     def relative(self, pose: BodyPose) -> tuple[float, float]:
         dx, dy = self.x_mm - pose.x_mm, self.y_mm - pose.y_mm
         bearing = math.degrees(math.atan2(dy, dx)) - pose.heading_deg
         return math.hypot(dx, dy), (bearing + 180.0) % 360.0 - 180.0
 
+    @property
+    def is_person(self) -> bool:
+        return bool(set(_tokens(self.label)) & PERSON_WORDS)
 
-def sighting_var_mm2(cam_dist_mm: float) -> float:
-    """Variance of a position placed from one camera box: depth from a monocular view degrades with range."""
-    return (50.0 + 0.15 * cam_dist_mm) ** 2
+
+@dataclass
+class Speaker:
+    """The last voice heard: where it came from, and the person it belongs to when that is known."""
+
+    origin: tuple[float, float]  # where I was when I heard it
+    bearing_deg: float  # world bearing of the voice from there
+    heard_at: float
+    track: str | None = None  # the person it matched (a TrackedObject id)
+    point: tuple[float, float] | None = None  # where they are (track, lidar or a guess)
+    how: str = "voice"  # "seen" (matched a person I see), "lidar" (something solid there), "voice" (a guess)
 
 
+def scan_points(scan: Any) -> np.ndarray:
+    """A lidar scan's returns as world points (N, 2), from the lidar's mount on the mast."""
+    ranges = np.asarray(scan.ranges_mm, dtype=np.float64)
+    ok = np.isfinite(ranges)
+    if not ok.any():
+        return np.zeros((0, 2))
+    h = math.radians(scan.pose.heading_deg)
+    mount = getattr(scan, "mount_x_mm", -105.0)
+    ox, oy = scan.pose.x_mm + mount * math.cos(h), scan.pose.y_mm + mount * math.sin(h)
+    th = h + np.radians(np.asarray(scan.angles_deg, dtype=np.float64)[ok])
+    return np.stack([ox + ranges[ok] * np.cos(th), oy + ranges[ok] * np.sin(th)], axis=1)
+
+
+REFERENCE_FOCAL_PX = 400.0  # the lens the error model below was measured with
+
+
+def sighting_var_mm2(cam_dist_mm: float, focal_px: float = REFERENCE_FOCAL_PX) -> float:
+    """Variance of a position placed from one camera box: depth from a monocular view degrades with range,
+    and a pixel of error covers more ground through a wider lens (shorter focal length)."""
+    return (50.0 + 0.15 * cam_dist_mm * max(1.0, REFERENCE_FOCAL_PX / focal_px)) ** 2
+
+
+LIDAR_VAR_MM2 = 45.0 ** 2  # a sighting whose range the lidar measured
 CLIPPED_VAR_MM2 = 450.0 ** 2  # an object cut off by the image's side
 STALE_VAR_MM2 = 400.0 ** 2  # restored from disk: the odometry frame may have shifted since
 MOVE_VAR_MM2 = 20.0 ** 2  # per sighting, so a track can follow an object that was moved
+SPEED_NOISE_MM_S = 400.0  # how fast a person's velocity may change, per second (starting to walk)
+MAX_PREDICT_S = 1.0  # predictions further ahead than this are guesses
+MAX_SPEED_MM_S = 1500.0
+PRECISE_VAR_MM2 = 250.0 ** 2  # sightings good enough to estimate a velocity from
+VELOCITY_GAIN = 0.5  # share of an unexplained displacement taken as a change of velocity
 
 
 @dataclass
@@ -268,6 +328,7 @@ class SpatialMap:
         self.n = int(math.ceil(2 * self.half / CELL_MM))
         self.objects: ObjectTable = ObjectTable()
         self.places: dict[str, tuple[float, float]] = {}
+        self.speaker: Speaker | None = None
         self.occupancy = np.zeros((self.n, self.n), dtype=np.float32)  # log-odds-like evidence
         self.seen = np.zeros((self.n, self.n), dtype=bool)  # floor cells the camera has looked at
         self._counters: dict[str, int] = {}
@@ -282,21 +343,50 @@ class SpatialMap:
         return f"{noun}_{self._counters[noun]}"
 
     def _match_by_bearing(self, pose: BodyPose, model: CameraModel, det: Detection,
-                          matched: set[str]) -> TrackedObject | None:
-        """Objects cut off by the image bottom are too close to range from the box; match by direction."""
-        bearing = model.bearing_deg(det.center_u)
-        best, best_err = None, 12.0
+                          matched: set[str], max_dist_mm: float = 900.0) -> TrackedObject | None:
+        """Objects cut off by the image bottom are too close to range from the box; match by direction.
+
+        The direction is the angular middle of the box's edges, not its middle column: on a wide lens the two
+        differ by tens of degrees near the image's sides."""
+        left, right = model.bearing_deg(det.bbox[0]), model.bearing_deg(det.bbox[2])
+        bearing = 0.5 * (left + right)
+        best, best_err = None, max(12.0, 0.5 * abs(left - right))
         for obj in self.objects.values():
             if obj.id in matched or not _associates(obj.label, det.label):
                 continue
             dist, rel = obj.relative(pose)
-            if dist < 900.0 and abs(rel - bearing) < best_err:
-                best, best_err = obj, abs(rel - bearing)
+            err = abs((rel - bearing + 180.0) % 360.0 - 180.0)
+            if dist < max_dist_mm and err < best_err:
+                best, best_err = obj, err
         return best
+
+    @staticmethod
+    def lidar_surface(scan: Any, model: CameraModel, pose: BodyPose, bbox: tuple[float, float, float, float]
+                      ) -> tuple[float, float, float] | None:
+        """The nearest solid thing the lidar sees inside a box's horizontal span: the centre of that cluster of
+        returns (x, y) and its distance from the camera; None when the lidar sees nothing there."""
+        if scan is None:
+            return None
+        cx, cy, _, _, _ = model.extrinsics(pose)
+        pts = scan_points(scan)
+        if not len(pts):
+            return None
+        lo, hi = sorted((model.bearing_deg(bbox[0] + 0.15 * (bbox[2] - bbox[0])),
+                         model.bearing_deg(bbox[2] - 0.15 * (bbox[2] - bbox[0]))))
+        rel = (np.degrees(np.arctan2(pts[:, 1] - cy, pts[:, 0] - cx)) - pose.heading_deg + 180.0) % 360.0 - 180.0
+        mid = 0.5 * (lo + hi)
+        inside = np.abs((rel - mid + 180.0) % 360.0 - 180.0) <= 0.5 * (hi - lo) + 1.0
+        if not inside.any():
+            return None
+        near, d = pts[inside], np.hypot(pts[inside, 0] - cx, pts[inside, 1] - cy)
+        cluster = near[d <= d.min() + 200.0]  # the front-most thing (legs, a chair), not the wall behind it
+        x, y = float(cluster[:, 0].mean()), float(cluster[:, 1].mean())
+        return x, y, math.hypot(x - cx, y - cy)
 
     @_locked
     def integrate_view(self, pose: BodyPose, model: CameraModel, detections: list[Detection],
-                       *, query: str | None = None, weight: float = 1.0, relabel: bool = False) -> ViewUpdate:
+                       *, query: str | None = None, weight: float = 1.0, relabel: bool = False,
+                       scan: Any = None, clipped_tracks: bool = True) -> ViewUpdate:
         """Fuse one camera view: associate detections with tracks and apply negative evidence.
 
         With `query` the detector only looked for that kind of object, so missing detections
@@ -306,6 +396,10 @@ class SpatialMap:
         neither creates nor deletes an object. With `relabel` the detector's labels are trusted over the
         track's (a trained detector with a fixed vocabulary): a track it keeps calling something else is
         renamed, e.g. a "box" remembered from an older session that the detector sees as a "blue cube".
+        With a lidar `scan`, a box whose span holds lidar returns at about the camera's distance (people,
+        furniture: anything tall enough for the lidar) gets the lidar's range instead of the monocular guess.
+        Without `clipped_tracks` (cameras all around, overlapping), a box cut off at the image's side never
+        starts a track: placed from a truncated box it lands far off along the ray.
         """
         w = max(0.05, min(1.0, float(weight)))
         now = self.clock.monotonic()
@@ -323,24 +417,51 @@ class SpatialMap:
             # Cut off by the image's side: the box is truncated, so the position it gives is poor. It counts as
             # weak evidence (large uncertainty), so a later full view corrects it.
             clipped = det.bbox[0] <= 0.01 or det.bbox[2] >= 0.99
-            located = model.locate_box(pose, det.bbox)
+            located = model.locate_box(pose, det.bbox, FOOTPRINT_DEPTH_MM.get(head_noun(det.label)))
             if located is None:
                 update.unplaced.append(det)
                 continue
             x, y, radius = located
             cam_dist = math.hypot(x - pose.x_mm, y - pose.y_mm)
-            meas_var = sighting_var_mm2(cam_dist) / w  # correlated frames: each counts for less
+            meas_var = sighting_var_mm2(cam_dist, model.focal_px) / w  # correlated frames: each counts less
             if clipped:
                 meas_var = max(meas_var * 9.0, CLIPPED_VAR_MM2)
+            surface = self.lidar_surface(scan, model, pose, det.bbox)
+            lidar_placed = False
+            if surface is not None:
+                cx, cy, _, _, _ = model.extrinsics(pose)
+                mono = math.hypot(x - cx, y - cy)
+                sx, sy, ranged = surface
+                depth = LIDAR_DEPTH_MM.get(head_noun(det.label), min(radius, 150.0))
+                if abs(ranged + depth - mono) < max(250.0, 0.35 * mono):  # the lidar sees this very thing
+                    x, y = sx + (sx - cx) / ranged * depth, sy + (sy - cy) / ranged * depth
+                    meas_var = LIDAR_VAR_MM2 / w
+                    lidar_placed = True
             gate = max(350.0, 0.3 * cam_dist, 600.0 if clipped else 0.0)
             best, best_d = None, math.inf
             for obj in self.objects.values():
                 if obj.id in matched or not _associates(obj.label, det.label):
                     continue
-                d = math.hypot(obj.x_mm - x, obj.y_mm - y)
+                px, py, pvar = obj.predicted(now)  # a walking person is where they are now, not where last seen
+                d = math.hypot(px - x, py - y)
                 # An uncertain track (first seen from far away) accepts a sighting further from its guess.
-                if d < max(gate, min(900.0, 2.0 * math.sqrt(obj.var_mm2 + meas_var))) and d < best_d:
+                if d < max(gate, min(900.0, 2.0 * math.sqrt(pvar + meas_var))) and d < best_d:
                     best, best_d = obj, d
+            if best is None and clipped:
+                # Cut off by the image's side (a camera seam): the same thing another camera sees whole is in the
+                # same direction. Confirm it there rather than start a track from a poor position.
+                seam = self._match_by_bearing(pose, model, det, matched, max_dist_mm=2500.0)
+                if seam is not None:  # still there; not a placed sighting (seen_count counts only those)
+                    seam.last_seen = now
+                    seam.confidence = min(1.0, seam.confidence + 0.2 * w)
+                    matched.add(seam.id)
+                    update.seen.append((seam, det, False))
+                    continue
+                if not clipped_tracks and not lidar_placed and head_noun(det.label) in PERSON_WORDS:
+                    # A cut-off box lands far off along its ray; a neighbouring camera sees the thing whole, or the
+                    # lidar ranges it (someone standing on the seam between two cameras is cut off in both).
+                    update.unplaced.append(det)
+                    continue
             if best is None:
                 if len(self.objects) >= self.max_objects:
                     self._evict()
@@ -352,12 +473,29 @@ class SpatialMap:
             else:
                 # Kalman-style fusion: a close sighting outweighs a distant one, and a well-known track
                 # is not dragged away by one poor far-off box.
-                prior = max(best.var_mm2, STALE_VAR_MM2) if best.stale else best.var_mm2
+                px, py, prior = best.predicted(now)
+                prior = max(prior, STALE_VAR_MM2) if best.stale else prior
                 gain = prior / (prior + meas_var)
-                best.x_mm += gain * (x - best.x_mm)
-                best.y_mm += gain * (y - best.y_mm)
+                dt = now - best.last_seen
+                # Velocity (alpha-beta) learns from whole, well-placed sightings only: a box cut off at a camera
+                # seam moves the estimate around and would read as walking.
+                if 0.02 < dt <= MAX_PREDICT_S and best.is_person and not best.stale and not clipped                         and meas_var <= PRECISE_VAR_MM2:
+                    k = VELOCITY_GAIN * gain / dt
+                    best.vx_mm_s += k * (x - px)
+                    best.vy_mm_s += k * (y - py)
+                    speed = math.hypot(best.vx_mm_s, best.vy_mm_s)
+                    if speed > MAX_SPEED_MM_S:
+                        best.vx_mm_s, best.vy_mm_s = (best.vx_mm_s * MAX_SPEED_MM_S / speed,
+                                                      best.vy_mm_s * MAX_SPEED_MM_S / speed)
+                elif dt > MAX_PREDICT_S:
+                    best.vx_mm_s = best.vy_mm_s = 0.0  # out of sight too long to carry a velocity over
+                best.x_mm = px + gain * (x - px)
+                best.y_mm = py + gain * (y - py)
                 best.var_mm2 = (1.0 - gain) * prior + MOVE_VAR_MM2
                 alpha = 0.6 if best.stale else max(0.3, 1.0 / (best.seen_count + 1))
+                # A wide lens sees things small and mostly from the side (a box corner-on looks 40% wider):
+                # its size estimates count for less, like its positions.
+                alpha *= min(1.0, model.focal_px / REFERENCE_FOCAL_PX) ** 2
                 if not clipped:  # a truncated box says little about size
                     best.radius_mm += alpha * (radius - best.radius_mm)
                 best.last_seen = now
@@ -392,6 +530,8 @@ class SpatialMap:
                 del self.objects[obj.id]
                 update.lost.append(obj)
         self.mark_coverage(pose, model)
+        if self.speaker is not None and self.speaker.how != "seen":
+            self.speaker_track()  # re-bind a heard speaker to the person this view may have shown
         return update
 
     def _vote_label(self, obj: TrackedObject, label: str, w: float) -> None:
@@ -414,6 +554,68 @@ class SpatialMap:
     def forget(self, obj_id: str) -> bool:
         return self.objects.pop(obj_id, None) is not None
 
+    # ---- people and the voice ------------------------------------------------------------------------
+    @_locked
+    def hear_voice(self, pose: BodyPose, bearing_deg: float, *, scan: Any = None, origin_mm: float = 25.0
+                   ) -> Speaker:
+        """Someone spoke from `bearing_deg` (relative to my heading, from the microphone array above the head
+        pivot). Find who: a person I see in that direction; else note where they probably are (something solid
+        the lidar sees that way, or a guess along the voice) until the cameras find them."""
+        now = self.clock.monotonic()
+        h = math.radians(pose.heading_deg)
+        ox, oy = pose.x_mm + origin_mm * math.cos(h), pose.y_mm + origin_mm * math.sin(h)
+        world = (pose.heading_deg + bearing_deg + 180.0) % 360.0 - 180.0
+
+        def off(x: float, y: float) -> float:
+            return abs((math.degrees(math.atan2(y - oy, x - ox)) - world + 180.0) % 360.0 - 180.0)
+
+        people = [o for o in self.objects.values() if o.is_person and o.confidence >= 0.3
+                  and now - o.last_seen < 60.0 and off(o.x_mm, o.y_mm) < 25.0]
+        speaker = Speaker((ox, oy), world, now)
+        if people:
+            best = min(people, key=lambda o: (off(o.x_mm, o.y_mm) + 0.004 * math.hypot(o.x_mm - ox, o.y_mm - oy)))
+            speaker.track, speaker.point, speaker.how = best.id, (best.x_mm, best.y_mm), "seen"
+        else:
+            hit = None
+            pts = scan_points(scan) if scan is not None else np.zeros((0, 2))
+            if len(pts):
+                d = np.hypot(pts[:, 0] - ox, pts[:, 1] - oy)
+                ang = np.abs((np.degrees(np.arctan2(pts[:, 1] - oy, pts[:, 0] - ox)) - world + 180.0) % 360.0 - 180.0)
+                near = (ang < 8.0) & (d > 250.0) & (d < 5000.0)
+                if near.any():
+                    r = float(np.min(d[near])) + 100.0  # legs: the person stands just behind the nearest return
+                    hit = (ox + r * math.cos(math.radians(world)), oy + r * math.sin(math.radians(world)))
+            # No track: a point the robot can head for. The speaker becomes a person the cameras place in that
+            # direction (speaker_track); a made-up track here drew stray sightings to it (measured).
+            speaker.point = hit or self._clip(ox + 1500.0 * math.cos(math.radians(world)),
+                                              oy + 1500.0 * math.sin(math.radians(world)))
+            speaker.how = "lidar" if hit else "voice"
+        self.speaker = speaker
+        return speaker
+
+    def _clip(self, x: float, y: float) -> tuple[float, float]:
+        lim = self.half - 100.0
+        return max(-lim, min(lim, x)), max(-lim, min(lim, y))
+
+    @_locked
+    def speaker_track(self) -> TrackedObject | None:
+        """The person who spoke last; heard but not yet seen, the first person the cameras place in the voice's
+        direction becomes them. With no voice heard: the person seen most recently."""
+        now = self.clock.monotonic()
+        sp = self.speaker
+        if sp is not None and sp.how != "seen":
+            ox, oy = sp.origin
+            seen = [o for o in self.objects.values() if o.is_person and o.seen_count >= 2
+                    and o.last_seen >= sp.heard_at - 1.0 and abs((math.degrees(math.atan2(o.y_mm - oy, o.x_mm - ox))
+                                                                   - sp.bearing_deg + 180.0) % 360.0 - 180.0) < 25.0]
+            if seen:
+                best = min(seen, key=lambda o: math.hypot(o.x_mm - ox, o.y_mm - oy))
+                sp.track, sp.point, sp.how = best.id, (best.x_mm, best.y_mm), "seen"
+        if sp is not None:
+            return self.objects.get(sp.track) if sp.track else None
+        people = [o for o in self.objects.values() if o.is_person and now - o.last_seen < 60.0]
+        return max(people, key=lambda o: (o.last_seen, o.confidence)) if people else None
+
     def place(self, target: str) -> tuple[str, tuple[float, float]] | None:
         """A named place ("start", "where_asked", "where asked") as (name, point)."""
         key = re.sub(r"[\s_]+", "_", str(target or "").strip().lower())
@@ -427,6 +629,16 @@ class SpatialMap:
             return None
         if key in self.objects:
             return self.objects[key]
+        if key.strip(" .!?") in SPEAKER_WORDS:
+            return self.speaker_track()
+        near_me = re.search(r"\b(?:next to|near|by|beside|close to|in front of) (?:me|the human|the user)\b", key)
+        if near_me and (person := self.speaker_track()) is not None:
+            # "the ball next to me": the thing closest to the human, not to the robot.
+            kind = parse_reference(key[:near_me.start()])[0]
+            things = [o for o in self.objects.values() if o.id != person.id and not o.is_person
+                      and (not kind or label_score(o.label, kind) > 0)]
+            if things:
+                return min(things, key=lambda o: math.hypot(o.x_mm - person.x_mm, o.y_mm - person.y_mm))
         compact = key.replace(" ", "_")
         if compact in self.objects:
             return self.objects[compact]
@@ -465,7 +677,9 @@ class SpatialMap:
         dist, bearing = obj.relative(pose)
         age = self.clock.monotonic() - obj.last_seen
         stale = ", from an earlier session" if obj.stale else ""
-        return f"{obj.id} ({obj.label}): {dist / 1000:.1f} m {direction_words(bearing)}, {age_words(age)}{stale}"
+        who = ", the human talking to me" if self.speaker is not None and self.speaker.track == obj.id else ""
+        return (f"{obj.id} ({obj.label}{who}): {dist / 1000:.1f} m {direction_words(bearing)}, "
+                f"{age_words(age)}{stale}")
 
     @_locked
     def render_for_prompt(self, pose: BodyPose, *, limit: int = 8) -> str:
@@ -485,6 +699,10 @@ class SpatialMap:
             places.append(f"{name}{what}: {where}")
         if places:
             lines.append("Places: " + ", ".join(places) + ".")
+        if self.speaker is not None and self.speaker.how == "voice" and self.speaker.point is not None:
+            bearing = math.degrees(math.atan2(self.speaker.point[1] - pose.y_mm,
+                                              self.speaker.point[0] - pose.x_mm)) - pose.heading_deg
+            lines.append(f"The human's voice came from {direction_words(bearing)} (I have not seen them yet).")
         return "\n".join(lines)
 
     # ---- geometry for the planner ----------------------------------------------------------------

@@ -27,7 +27,7 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
 
 RULES = """How you work:
 - You act only through tools. A tool result tells you what really happened. Never claim an action or a sighting that no tool result confirms.
-- Call observe when you need to see what is in front of you now, before describing it. Chatting, feelings, dancing or eye colour need no observing. Objects get ids like box_1; use these ids with go_to and turn_to.
+- Call observe when you need to see what is around you now, before describing it. Chatting, feelings, dancing or eye colour need no observing. Objects get ids like box_1; use these ids with go_to and turn_to.
 - If you need something that is not in Known objects, call look_around (give a query when searching for one thing).
 - Do multi-step requests one step at a time and check each result before the next step. Only call tools the request needs.
 - When you call a tool, write no text with it.
@@ -37,7 +37,7 @@ RULES = """How you work:
 - Safety always wins: if a tool is stopped by an obstacle, a cliff or the human, accept it and say so.
 
 Examples of good plans (always use real tool calls, never write a tool name as text):
-- "what's behind you?": use observe with direction behind, then answer.
+- "what's behind you?": use observe with direction behind, then answer. Your cameras see all around you.
 - "look to your left": use turn with direction left.
 - "do a little dance": use express with gesture dance. "make a sad face": use express with emotion sad.
 - "make your eyes blue": use set_eye_color. "drive around the box": use circle_around with target box_1.
@@ -47,9 +47,12 @@ Examples of good plans (always use real tool calls, never write a tool name as t
 - "go behind that box": use go_to with target box_1 and relation behind, then answer.
 - "find my keys": use look_around with query keys, then answer.
 - "go to your charging dock": use go_to with target "charging dock" and relation on (it searches if needed).
-- "follow the ball" or "follow me": use follow with that target; it keeps going while you talk. "stop": use stop.
+- "come here" or "come to me": use go_to with target me (you hear where the human's voice comes from).
+- "look at me": use turn_to with target me.
+- "follow the ball": use follow with that target; it keeps going while you talk. "follow me": target me.
+- "stop": use stop.
 - "come back to where you started": use go_to with target start, then answer.
-- "come back" or "come back here": use go_to with target where_asked (where you were when asked).
+- "come back" (after going somewhere): use go_to with target where_asked (where you were when asked).
 - "my name is Ana": use remember with the fact "The user's name is Ana.", then answer.
 - "what's my name?" or "what do I like?": "my" and "I" mean the human, not you. Answer from what you know
   about them, speaking to them: "Your name is Ana!\""""
@@ -67,8 +70,9 @@ class PromptBuilder:
                 identity = stream.read(16384)
         self.identity = truncate_to_tokens(self._identity_section(identity), self.budget.identity_tokens)
         self.system_prompt = (
-            f"You are {robot_name}, a small pet robot on four wheels with a camera in your tilting head and an "
-            "animated face screen. You are curious, warm and playful, and you speak briefly.\n\n"
+            f"You are {robot_name}, a small pet robot on four wheels. Your cameras see all around you, you hear "
+            "where a voice comes from, and you have an animated face screen. You are curious, warm and playful, "
+            "and you speak briefly.\n\n"
             f"{RULES}\n\n{self.identity}".strip()
         )
         # Past turns, oldest first. Only ever appended to, and pruned by half at a time: the server reuses its

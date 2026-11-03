@@ -12,13 +12,12 @@ from robot.cognition.backend import ChatResult, NullBackend, ScriptedBackend
 from robot.core.clock import RealClock, ReplayClock
 from robot.core.config import RobotConfig
 from robot.main import RobotHarness
-from robot.perception.camera import Frame
+from robot.perception.camera import CameraRig, Frame, encode_png
 from robot.perception.detector import Detection
 from robot.perception.geometry import CameraModel
-from robot.world.sandbox import _encode_rgb_to_png_bytes
 from robot.world.spatial_map import label_score
 
-TINY_PNG = _encode_rgb_to_png_bytes(np.zeros((4, 4, 3), dtype=np.uint8))
+TINY_PNG = encode_png(np.zeros((4, 4, 3), dtype=np.uint8))
 
 
 def make_config(tmp_path: Path, **overrides: Any) -> RobotConfig:
@@ -38,7 +37,8 @@ def make_config(tmp_path: Path, **overrides: Any) -> RobotConfig:
 
 def make_harness(tmp_path: Path, backend: Any = None, *, real: bool = False, dashboard: bool = False,
                  clock: Any = None, fake_perception: bool = True, config: RobotConfig | None = None,
-                 **kwargs: Any) -> RobotHarness:
+                 person: bool = False, **kwargs: Any) -> RobotHarness:
+    """A harness on the simulated robot. The room's person (and their voice) only with `person=True`."""
     harness = RobotHarness(
         config or make_config(tmp_path),
         clock=clock or (RealClock() if real else ReplayClock()),
@@ -50,6 +50,8 @@ def make_harness(tmp_path: Path, backend: Any = None, *, real: bool = False, das
         **kwargs,
     )
     harness.face_bridge._send_udp = lambda payload: None
+    if not person:
+        harness.sandbox.remove_object("person")
     if fake_perception:
         use_ground_truth_perception(harness)
     return harness
@@ -58,14 +60,14 @@ def make_harness(tmp_path: Path, backend: Any = None, *, real: bool = False, das
 def use_ground_truth_perception(harness: RobotHarness) -> GroundTruthDetector:
     """Swap the MuJoCo render + VLM detector for a cheap camera and a ground-truth detector."""
     detector = GroundTruthDetector(harness.sandbox)
-    harness.camera = FakeCamera(harness.body, harness.clock, CameraModel(harness.sandbox.cam_width,
-                                                                         harness.sandbox.cam_height))
+    harness.camera = CameraRig([FakeCamera(harness.body, harness.clock, model) for model in harness.rig])
     harness.skill_context.camera = harness.camera
     harness.skill_context.detector = detector
     harness.detector = detector
     harness.autonomy.camera = harness.camera
     harness.fast.detector = detector
     harness.fast.camera = harness.camera
+    harness.fast.cameras = list(harness.camera.cameras)
     harness.fast.streaming = True
     return detector
 
@@ -99,14 +101,12 @@ class GroundTruthDetector:
 
     async def detect(self, frame: Frame, query: str | None = None) -> list[Detection]:
         self.calls.append(query)
-        w, h = self.sandbox.cam_width, self.sandbox.cam_height
         out = []
-        for d in self.sandbox.detect_objects(frame.pose):
+        for d in self.sandbox.detect_objects(frame.pose, frame.model):
             label = self.labels.get(d.id, d.label.lower())
             if query and label_score(label, query) == 0:
                 continue
-            x1, y1, x2, y2 = d.bbox_px
-            out.append(Detection(label, (x1 / w, y1 / h, x2 / w, y2 / h)))
+            out.append(Detection(label, d.bbox))
         return out
 
 

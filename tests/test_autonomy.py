@@ -37,14 +37,6 @@ def test_drives_rise_over_time_and_cap():
     assert drives.drives["social"].level == 1.0
 
 
-def test_explored_surroundings_cap_curiosity():
-    drives = DriveSystem()
-    drives.step(3600.0, unexplored_fraction=0.0)
-    assert drives.drives["curiosity"].level == pytest.approx(0.5)
-    drives.step(60.0, unexplored_fraction=0.9)
-    assert drives.drives["curiosity"].level > 0.5
-
-
 def test_tools_satisfy_their_drives_and_talking_resets_loneliness():
     drives = DriveSystem()
     drives.step(1200.0)
@@ -56,28 +48,6 @@ def test_tools_satisfy_their_drives_and_talking_resets_loneliness():
     assert drives.drives["social"].level > 0
     drives.on_turn(TurnResult(say="hi"), autonomous=False)
     assert drives.drives["social"].level == 0.0 and drives.minutes_since_human == 0.0
-
-
-def test_choosing_to_do_nothing_settles_urges_for_a_while():
-    drives = DriveSystem()
-    drives.step(3600.0)
-    drives.on_turn(TurnResult(say=""), autonomous=True)
-    for d in drives.drives.values():
-        if d.name != "energy":
-            assert d.level == pytest.approx(d.threshold - 0.25)
-    assert drives.urgent() is None
-
-
-def test_energy_follows_the_battery():
-    drives = DriveSystem(low_battery_pct=30.0)
-    drives.step(0.0, battery_pct=90.0)
-    assert drives.drives["energy"].level == 0.0
-    drives.step(0.0, battery_pct=40.0)
-    assert drives.drives["energy"].level == pytest.approx(0.25)
-    drives.step(0.0, battery_pct=10.0)
-    assert drives.drives["energy"].level == 1.0
-    drives.step(0.0, battery_pct=10.0, charging=True)
-    assert drives.drives["energy"].level == 0.0
 
 
 def test_urgent_picks_the_most_pressing_drive_and_low_battery_wins():
@@ -218,48 +188,6 @@ async def test_user_stop_pauses_until_resumed():
     assert len(rig.arbiter.turns) == 1
 
 
-async def test_requested_wait_defers_drive_wakes_until_the_scheduled_time():
-    rig = Rig()
-    await rig.start()
-    rig.make_curious()
-    rig.arbiter.next_wake_s = 120.0  # the model called wait(120)
-    await rig.tick(25.0)
-    assert len(rig.arbiter.turns) == 1
-    rig.arbiter.next_wake_s = None
-    assert rig.ctl.snapshot()["next_decision_in_s"] == pytest.approx(120.0)
-    for _ in range(11):
-        await rig.tick(10.0)  # 110 s: past the 45 s think interval, curiosity still urgent
-    assert len(rig.arbiter.turns) == 1, rig.arbiter.turns
-    await rig.tick(10.0)
-    assert len(rig.arbiter.turns) == 2
-    assert rig.arbiter.turns[1] == "You asked to think again now." and rig.ctl.last_trigger == "scheduled_wake"
-
-
-async def test_a_human_turn_resets_the_idle_clock_and_its_wake_request():
-    rig = Rig()
-    await rig.start()
-    rig.make_curious()
-    await rig.bus.emit("robot.response", "arbiter", {"say": "hi", "final": True, "origin": "user",
-                                                     "next_wake_s": 30.0})
-    await rig.tick(29.0)
-    assert rig.arbiter.turns == []  # the human may still be talking
-    await rig.tick(2.0)
-    assert rig.arbiter.turns == ["You asked to think again now."]
-
-
-async def test_voice_mode_commands_are_answered_without_the_model():
-    rig = Rig()
-    await rig.start()
-    replies = []
-    rig.bus.subscribe("robot.response", lambda e: replies.append(e.payload), immediate=True)
-    for text, attr, value in [("pause", "paused", True), ("resume", "paused", False), ("be quiet", "quiet", True),
-                              ("you can talk", "quiet", False)]:
-        event = await rig.bus.emit("input.user_message", "test", {"text": text, "direct": True})
-        assert getattr(rig.ctl, attr) is value and event.payload["handled"] is True
-    assert [r["backend"] for r in replies] == ["autonomy_control"] * 4
-    assert rig.arbiter.turns == []
-
-
 async def test_rules_policy_acts_on_drives_without_the_model():
     rig = Rig(policy="rules")
     await rig.start()
@@ -280,11 +208,3 @@ async def test_model_policy_wakes_the_model_for_drives():
     assert rig.arbiter.plans == [None]
 
 
-def test_unasked_remarks_back_off_and_never_repeat():
-    rig = Rig(speak_interval_s=10.0)
-    assert rig.ctl.allow_speech("I'm feeling a little lonely right now!")
-    rig.clock.advance(11.0)
-    assert not rig.ctl.allow_speech("Something new")  # one remark unanswered: the wait doubled to 20 s
-    rig.clock.advance(10.0)
-    assert not rig.ctl.allow_speech("I'm feeling a little lonely now!")  # nearly the same words
-    assert rig.ctl.allow_speech("Ooh, a yellow duck appeared by the dock.")

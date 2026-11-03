@@ -14,8 +14,7 @@ from robot.control.fast_loop import FastLoop
 from robot.core.bus import EventBus
 from robot.core.clock import ReplayClock
 from robot.navigation.planner import GridPlanner
-from robot.perception.camera import SimCamera
-from robot.perception.geometry import CameraModel
+from robot.perception.camera import CameraRig, SimCamera
 from robot.world.sandbox import SimulationSandbox
 from robot.world.spatial_map import SpatialMap
 
@@ -29,7 +28,7 @@ async def rig():
     sandbox.bind(body)
     clear_scene(sandbox, keep=("cardboard_box",))
     world = SpatialMap(clock)
-    camera = SimCamera(sandbox, body, clock, CameraModel(sandbox.cam_width, sandbox.cam_height))
+    camera = CameraRig([SimCamera(sandbox, body, clock, model) for model in sandbox.rig])
     loop = FastLoop(bus=bus, clock=clock, body=body, camera=camera, spatial_map=world,
                     planner=GridPlanner(room_half_extent_mm=world.half, resolution_mm=50.0),
                     detector=GroundTruthDetector(sandbox), continuous=False)

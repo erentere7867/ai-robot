@@ -1,16 +1,18 @@
 """The fast layer's eyes: a small detector run on every camera frame.
 
-YOLO11n trained on this robot's objects (scripts/train_detector.py). On the laptop it runs the PyTorch
-weights (CUDA if available); on a Raspberry Pi 5 it runs the NCNN export, the fastest CPU runtime for
-YOLO on ARM. Anything outside its classes comes out as "object", and the slow layer (the VLM) can name
-it when that matters.
+YOLO11n trained on this robot's objects and people (scripts/train_detector.py), run as its NCNN export: no
+PyTorch on the robot, the fastest CPU runtime for YOLO on ARM, and with `gpu=True` the GPU through Vulkan
+(the VENTUNO Q's Adreno; any Vulkan GPU on a laptop). Anything outside its classes comes out as "object", and
+the slow layer (the VLM) can name it when that matters.
 """
 
 from __future__ import annotations
 
+import atexit
 import logging
 import threading
 import time
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -76,7 +78,7 @@ class FastDetector:
                 try:
                     if path.is_dir():  # NCNN export: run it without PyTorch
                         return NcnnDetector(path, **{k: v for k, v in kwargs.items() if k != "imgsz"})
-                    return cls(path, **kwargs)
+                    return cls(path, **{k: v for k, v in kwargs.items() if k in ("imgsz", "conf", "device")})
                 except Exception:
                     logger.warning("Could not load the fast detector from %s", path, exc_info=True)
         return None
@@ -106,16 +108,33 @@ class FastDetector:
         return self.detect_rgb(frame.rgb)
 
 
-class NcnnDetector:
-    """The same detector without PyTorch: the NCNN export run directly (for the Raspberry Pi).
+_GPU_NETS: weakref.WeakSet = weakref.WeakSet()
 
-    Importing ultralytics pulls in PyTorch (~400 MB of RAM and seconds of start-up on a Pi that also holds
-    the language model). This runs the exported graph with ncnn, letterboxes exactly as ultralytics does,
-    and decodes the boxes and class scores itself.
+
+def _release_gpu() -> None:
+    """Vulkan must be torn down after every net that used it, or the interpreter crashes on exit."""
+    if not _GPU_NETS:
+        return
+    import ncnn
+
+    for det in list(_GPU_NETS):
+        det._net = None
+    ncnn.destroy_gpu_instance()
+
+
+atexit.register(_release_gpu)
+
+
+class NcnnDetector:
+    """The detector without PyTorch: the NCNN export run directly (what the robot runs).
+
+    Importing ultralytics pulls in PyTorch (~400 MB of RAM and seconds of start-up next to the language model).
+    This runs the exported graph with ncnn, letterboxes exactly as ultralytics does, and decodes the boxes and
+    class scores itself. `gpu` runs it through Vulkan when a GPU is there (falls back to the CPU otherwise).
     """
 
     def __init__(self, model_dir: Path | str, *, conf: float = 0.4, iou: float = 0.5, threads: int = 4,
-                 **_: object) -> None:
+                 gpu: bool = False, **_: object) -> None:
         import ncnn
         import yaml
 
@@ -128,8 +147,11 @@ class NcnnDetector:
         self.size = int(imgsz[0] if isinstance(imgsz, list) else imgsz)
         self.conf, self.iou = conf, iou
         self._net = ncnn.Net()
-        self._net.opt.use_vulkan_compute = False
+        self.gpu = bool(gpu) and ncnn.get_gpu_count() > 0
+        self._net.opt.use_vulkan_compute = self.gpu
         self._net.opt.num_threads = threads
+        if self.gpu:
+            _GPU_NETS.add(self)
         self._net.load_param(str(self.model_dir / "model.ncnn.param"))
         self._net.load_model(str(self.model_dir / "model.ncnn.bin"))
         self._ncnn = ncnn

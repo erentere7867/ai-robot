@@ -1,6 +1,0 @@
-extends: ../robot.yaml
-llm:
-  base_url: "http://127.0.0.1:8100"
-  model_name: "Qwen3.5-2B-Q4_K_M"
-  model_path: "~/robot-runtime/models/llm/candidates/q35-2b/Qwen3.5-2B-Q4_K_M.gguf"
-  mmproj_path: "~/robot-runtime/models/llm/candidates/q35-2b/mmproj-F16.gguf"

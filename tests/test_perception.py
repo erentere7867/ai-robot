@@ -1,4 +1,4 @@
-"""Camera geometry, detection parsing and the spatial map, against simulator ground truth."""
+"""Seeing: camera geometry, the camera rig, fusing detections into the map, referring to things."""
 
 from __future__ import annotations
 
@@ -10,32 +10,39 @@ import pytest
 
 from robot.body.hal import BodyPose
 from robot.cognition.backend import ScriptedBackend
-from robot.core.clock import ReplayClock
+from robot.core.clock import RealClock, ReplayClock
 from robot.perception.camera import Frame
 from robot.perception.change import ChangeDetector
 from robot.perception.detector import Detection, VLMDetector, parse_detections
-from robot.perception.geometry import CameraModel
+from robot.perception.geometry import CameraModel, camera_for, default_rig
 from robot.world.sandbox import SimulationSandbox
-from robot.world.spatial_map import SpatialMap, TrackedObject, head_noun, label_score, labels_match
+from robot.world.spatial_map import (
+    SpatialMap,
+    TrackedObject,
+    head_noun,
+    label_score,
+    labels_match,
+    parse_reference,
+)
 
-MODEL = CameraModel(512, 384)
+RIG = default_rig()
+MODEL = RIG[0]  # the front (head) camera
 
 
-# ---- geometry ----------------------------------------------------------------------------------------
+@pytest.mark.parametrize("cam", RIG, ids=[c.name for c in RIG])
 @pytest.mark.parametrize("pose", [BodyPose(), BodyPose(120, -80, 37, -12), BodyPose(-400, 300, -150, 20)])
-def test_project_and_floor_point_round_trip(pose):
-    yaw = math.radians(pose.heading_deg)
-    for dist, side in [(500, 0), (900, 200), (1500, -400), (2500, 300)]:
-        x = pose.x_mm + dist * math.cos(yaw) - side * math.sin(yaw)
-        y = pose.y_mm + dist * math.sin(yaw) + side * math.cos(yaw)
-        uv = MODEL.project(pose, x, y, 0.0)
-        assert uv is not None
-        back = MODEL.floor_point(pose, *uv)
-        assert back is not None
-        assert math.hypot(back[0] - x, back[1] - y) < 1e-6
-    behind = (pose.x_mm - 800 * math.cos(yaw), pose.y_mm - 800 * math.sin(yaw))
-    assert MODEL.project(pose, *behind, 0.0) is None
-    assert MODEL.floor_point(pose, 0.5, 0.05) is None  # above the horizon
+def test_project_and_floor_point_round_trip(pose, cam):
+    for dist in (600, 1000, 1800):
+        for off in (-0.35, 0.0, 0.35):  # across the image, in units of the field of view
+            heading = math.radians(pose.heading_deg + cam.yaw_deg + off * cam.hfov_deg)
+            x, y = pose.x_mm + dist * math.cos(heading), pose.y_mm + dist * math.sin(heading)
+            uv = cam.project(pose, x, y, 0.0)
+            assert uv is not None
+            back = cam.floor_point(pose, *uv)
+            assert back is not None and math.hypot(back[0] - x, back[1] - y) < 1e-6
+    away = math.radians(pose.heading_deg + cam.yaw_deg + 180.0)
+    assert cam.project(pose, pose.x_mm + 800 * math.cos(away), pose.y_mm + 800 * math.sin(away), 0.0) is None
+    assert cam.floor_point(pose, 0.5, 0.02) is None  # above the horizon
 
 
 def test_bearing_and_view_helpers_agree():
@@ -44,33 +51,65 @@ def test_bearing_and_view_helpers_agree():
     assert MODEL.bearing_deg(0.0) == pytest.approx(MODEL.hfov_deg / 2, abs=0.01)
     assert MODEL.bearing_deg(1.0) < 0  # right of centre is negative (CCW positive)
     assert MODEL.in_view(pose, 800, 0)
-    assert not MODEL.in_view(pose, -800, 0) and not MODEL.in_view(pose, 800, 900)
-    assert MODEL.scaled(256, 192).focal_px == pytest.approx(MODEL.focal_px / 2)
+    assert not MODEL.in_view(pose, -800, 0) and not MODEL.in_view(pose, 800, 1200)
+    assert MODEL.scaled(320, 240).focal_px == pytest.approx(MODEL.focal_px / 2)
+    rear_left = next(c for c in RIG if c.name == "rear_left")
+    assert rear_left.bearing_deg(0.5) == pytest.approx(rear_left.yaw_deg)
+    assert rear_left.in_view(pose, -800, 300) and not rear_left.in_view(pose, -800, -300)
 
 
-def gt_boxes(sandbox: SimulationSandbox, pose: BodyPose):
-    w, h = sandbox.cam_width, sandbox.cam_height
-    for d in sandbox.detect_objects(pose):
-        x1, y1, x2, y2 = d.bbox_px
-        yield d, (x1 / w, y1 / h, x2 / w, y2 / h)
+def test_the_rig_sees_all_around():
+    """Every direction around the robot is inside some camera's field of view."""
+    for bearing in range(-180, 180, 5):
+        assert any(c.covers(bearing) for c in RIG), bearing
+    assert camera_for(RIG, 0.0).name == "front" and camera_for(RIG, 120.0).name == "rear_left"
+    assert camera_for(RIG, -100.0).name == "rear_right"
+
+
+def test_simulator_cameras_are_the_perception_models():
+    """MuJoCo's cameras (built from body.yaml) sit exactly where the geometry says, looking the same way."""
+    import mujoco
+
+    from robot.world.sandbox import _GL
+
+    sandbox = SimulationSandbox()
+    pose = BodyPose(300, -200, 40, 20)
+
+    def poses():
+        st = sandbox._sync_mujoco(pose)
+        out = []
+        for cam in RIG:
+            cid = mujoco.mj_name2id(st["model"], mujoco.mjtObj.mjOBJ_CAMERA, f"cam_{cam.name}")
+            out.append((cam, st["data"].cam_xpos[cid] * 1000.0, -st["data"].cam_xmat[cid].reshape(3, 3)[:, 2],
+                        st["model"].cam_fovy[cid]))
+        return out
+    for cam, position, forward, fovy in _GL.run(poses):
+        x, y, z, yaw, pitch = cam.extrinsics(pose)
+        assert max(abs(position - (x, y, z))) < 0.5, cam.name
+        axis = (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch))
+        assert max(abs(forward - axis)) < 1e-3, cam.name
+        assert fovy == pytest.approx(cam.vfov_deg, abs=0.01)
 
 
 @pytest.mark.parametrize("pose", [BodyPose(), BodyPose(0, 0, 30), BodyPose(200, 100, 20), BodyPose(0, 0, 180),
                                   BodyPose(0, 0, 0, -15), BodyPose(-300, -200, 45, 10)])
 def test_locate_box_of_ground_truth_boxes_lands_on_true_centres(pose):
+    """Every camera, wide lenses included: boxes placed on the floor land on the objects' centres."""
     sandbox = SimulationSandbox()
     checked = 0
-    for det, bbox in gt_boxes(sandbox, pose):
-        if bbox[0] <= 0.0 or bbox[2] >= 0.995 or bbox[3] >= 0.995:
-            continue  # cut off by the image border: the box no longer shows the object's extent
-        obj = sandbox.get_object(det.id)
-        located = MODEL.locate_box(pose, bbox)
-        assert located is not None, det.id
-        x, y, radius = located
-        assert math.hypot(x - obj.x_mm, y - obj.y_mm) < 60.0, (det.id, located, (obj.x_mm, obj.y_mm))
-        assert 0.5 * obj.radius_mm < radius < 1.6 * math.hypot(obj.width_mm, obj.depth_mm) / 2, det.id
-        checked += 1
-    assert checked >= 1
+    for cam in RIG:
+        for det in sandbox.detect_objects(pose, cam):
+            bbox = det.bbox
+            if bbox[0] <= 0.0 or bbox[2] >= 0.995 or bbox[3] >= 0.995 or det.id == "person":
+                continue  # cut off by the image border: the box no longer shows the object's extent
+            obj = sandbox.get_object(det.id)
+            located = cam.locate_box(pose, bbox)
+            assert located is not None, det.id
+            x, y, radius = located
+            assert math.hypot(x - obj.x_mm, y - obj.y_mm) < 90.0, (cam.name, det.id, located, (obj.x_mm, obj.y_mm))
+            assert 0.5 * obj.radius_mm < radius < 1.6 * math.hypot(obj.width_mm, obj.depth_mm) / 2, det.id
+            checked += 1
+    assert checked >= 2
 
 
 def test_ground_truth_box_matches_the_projected_object_extent():
@@ -78,15 +117,35 @@ def test_ground_truth_box_matches_the_projected_object_extent():
     sandbox = SimulationSandbox()
     pose = BodyPose(0, 0, 30)
     det = next(d for d in sandbox.detect_objects(pose) if d.id == "cardboard_box")
-    x1, y1, x2, y2 = det.bbox_px
     obj = sandbox.get_object("cardboard_box")
-    corners_v = [MODEL.project(pose, obj.x_mm + sx * 110, obj.y_mm + sy * 110, 0.0)[1] * 384
+    corners_v = [MODEL.project(pose, obj.x_mm + sx * 110, obj.y_mm + sy * 110, 0.0)[1]
                  for sx in (-1, 1) for sy in (-1, 1)]
-    assert abs(y2 - max(corners_v)) < 8  # sandbox and CameraModel mounts differ by a few mm
-    assert x2 - x1 > 110  # seen corner-on, wider than its 220 mm face
+    assert abs(det.bbox[3] - max(corners_v)) < 0.01
 
 
-# ---- detection parsing ---------------------------------------------------------------------------------
+def test_lidar_ranges_a_person_the_camera_placed_roughly():
+    """A person's box gets the lidar's distance (their legs), not the monocular guess."""
+    sandbox = SimulationSandbox()
+    pose = BodyPose(0, 0, 0)
+    sandbox.move_object("person", 1150.0, 300.0)
+    det = next(d for d in sandbox.detect_objects(pose) if d.id == "person")
+    from robot.perception.lidar import Scan, SimLidar
+
+    class Still:
+        def pose(self):
+            return pose
+
+    lidar = SimLidar(sandbox, Still(), type("C", (), {"monotonic": staticmethod(lambda: 0.0)})(), noise_mm=0.0)
+    scan = lidar.latest()
+    assert isinstance(scan, Scan)
+    spatial = SpatialMap(ReplayClock())
+    bad = (det.bbox[0], det.bbox[1], det.bbox[2], min(1.0, det.bbox[3] - 0.03))  # feet cut short: placed too far
+    spatial.integrate_view(pose, MODEL, [Detection("person", bad)], scan=scan)
+    person = next(iter(spatial.objects.values()))
+    assert math.hypot(person.x_mm - 1150.0, person.y_mm - 300.0) < 80.0
+    assert person.var_mm2 < 100.0 ** 2
+
+
 def test_parse_detections_handles_grids_bare_boxes_and_garbage():
     grid = parse_detections('[{"label": "Red Ball!", "bbox": [100, 200, 300, 400]}]')
     assert grid == [Detection("red ball", (0.1, 0.2, 0.3, 0.4))]
@@ -150,7 +209,6 @@ def test_change_detector_needs_a_reference_and_a_real_change():
     assert change.changed(moved) == 0.0
 
 
-# ---- labels --------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("a, b, score", [
     ("brown cardboard box", "box", 2), ("box", "cube", 1), ("cardboard box", "carton", 1),
     ("blue cube", "box", 1), ("red ball", "ball", 2), ("red ball", "blue ball", 0), ("brown box", "tan box", 2),
@@ -168,7 +226,6 @@ def test_head_noun():
     assert head_noun("the small red") == "object"
 
 
-# ---- spatial map ---------------------------------------------------------------------------------------
 def det_at(x: float, y: float, label: str, pose: BodyPose | None = None, half_width_mm: float = 60.0,
            height_mm: float = 120.0) -> Detection:
     """A box as a perfect detector would draw it for an object centred at (x, y)."""
@@ -438,3 +495,38 @@ def test_named_places_resolve_with_spaces_or_underscores_and_the_asked_spot_is_n
     restored, _ = fresh_map()
     restored.load(tmp_path / "map.json")
     assert ASKED_PLACE not in restored.places
+
+
+def world() -> SpatialMap:
+    m = SpatialMap(RealClock())
+    for oid, label, x, y, r in [("box_1", "brown cardboard box", -750, 0, 120), ("ball_1", "red ball", 650, 450, 48),
+                                ("cube_1", "blue cube", 650, -450, 60), ("mug_1", "green mug", 1400, 0, 43)]:
+        m.objects[oid] = TrackedObject(oid, label, x, y, r, 0.0, 0.0)
+    return m
+
+
+def test_egocentric_direction_and_generic_nouns():
+    m, pose = world(), BodyPose()
+    assert m.resolve("the thing behind you", pose).id == "box_1"
+    assert m.resolve("the object on your left", pose).id == "ball_1"
+    assert m.resolve("whatever is to your right", pose).id == "cube_1"
+    # The same words after turning round name something else: directions are relative to the robot.
+    assert m.resolve("the thing behind you", BodyPose(heading_deg=180.0)).id in {"ball_1", "cube_1", "mug_1"}
+
+
+def test_superlatives_colour_only_and_typos():
+    m, pose = world(), BodyPose()
+    assert m.resolve("whichever one is nearest", pose).id == "box_1"
+    assert m.resolve("the farthest thing", pose).id == "mug_1"
+    assert m.resolve("the biggest one", pose).id == "box_1"
+    assert m.resolve("the red one", pose).id == "ball_1"
+    assert m.resolve("cardboard boz", pose).id == "box_1"
+    assert label_score("cardboard box", "boz") == 1 and label_score("box", "fox") == 0
+
+
+def test_nothing_to_go_on_or_nothing_there():
+    m, pose = world(), BodyPose()
+    assert m.resolve("it", pose) is None
+    assert m.resolve("the duck", pose) is None
+    assert m.resolve("the ball behind you", pose) is None  # a ball, but not behind
+    assert parse_reference("the closest box behind you") == ("box", (180.0, 65.0), "near")

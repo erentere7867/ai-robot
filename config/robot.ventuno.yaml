@@ -8,8 +8,8 @@
 extends: robot.yaml
 
 runtime:
-  body_backend: "mcu"            # the on-board STM32H5 through the Arduino Router (robot/body/mcu_body.py)
-  camera: "csi"                  # MIPI camera through the ISP (GStreamer); "usb" for a USB camera
+  body_backend: "ventuno"        # the on-board STM32H5 through the Arduino Router (robot/body/ventuno_body.py)
+  camera: "csi"                  # three MIPI cameras through the ISP (GStreamer); "usb" for USB cameras
   face_fps: 30.0
 
 bus:
@@ -19,8 +19,9 @@ bus:
 perception:
   fast_detector: "auto"
   prefer_ncnn: true
-  imgsz: 320
+  imgsz: 416
   confidence: 0.4
+  detector_gpu: true             # NCNN on the Adreno GPU through Vulkan: three cameras' worth of detections
   loop_hz: 50.0
   control_thread: true
   realtime_priority: 60          # needs LimitRTPRIO (set by scripts/ventuno/sprocket.service)

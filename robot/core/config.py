@@ -103,7 +103,7 @@ class LLMConfig:
         ).expanduser()
     )
     gpu_layers: int = 99
-    threads: int = 0  # CPU threads for llama-server (0 = its default); 4 on a Raspberry Pi 5
+    threads: int = 0  # CPU threads for llama-server (0 = its default)
     ctx_size: int = 8192
     timeout_s: float = 90.0
     temperature: float = 0.0
@@ -114,8 +114,6 @@ class LLMConfig:
     # off 95% at 0.7 s per decision, on 86% at 5-9 s, so it is off by default.
     thinking: bool = False
     thinking_budget_tokens: int = 512
-    # Can this model see camera images? False for a text-only decision model (then `vision_llm` is the eye).
-    vision: bool = True
     # Extra llama-server flags for this model, e.g. ["--swa-full", "--checkpoint-min-step", "256"] for LFM3.
     server_args: list[str] | None = None
 
@@ -136,7 +134,7 @@ class LLMConfig:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if not (PROJECT_ROOT / "config" / "robot.yaml").exists():
-    PROJECT_ROOT = Path(sys.prefix) / "share" / "companion-robot"
+    PROJECT_ROOT = Path(sys.prefix) / "share" / "sprocket-robot"
 
 
 @dataclass
@@ -192,11 +190,13 @@ class PerceptionConfig:
     fast_detector: str = "auto"  # auto: use ~/robot-runtime/models/fast_detector* if trained; off: VLM only
     # 2D lidar: "off", "sim" (raycast in the sandbox) or a serial port for an LD19/LD06 ("/dev/ttyUSB0").
     lidar: str = "off"
-    # NCNN (no PyTorch) is the fastest CPU runtime for YOLO on ARM and is what the Pi runs; using it on the
+    # NCNN (no PyTorch) is the fastest CPU runtime for YOLO on ARM and is what the robot runs; using it on the
     # laptop too means every simulator run exercises the exact perception code of the robot.
     prefer_ncnn: bool = True
-    imgsz: int = 320
+    imgsz: int = 416
     confidence: float = 0.4
+    detector_gpu: bool = False  # run the detector on the GPU through Vulkan (NCNN)
+    detector_threads: int = 4  # CPU threads for the detector when it runs on the CPU
     loop_hz: float = 20.0
     # Real-time control (see robot/control/fast_loop.py and robot/core/realtime.py).
     control_thread: bool = False      # run the fast loop in its own pinned, prioritised thread
@@ -227,10 +227,9 @@ class RobotConfig:
     soul_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "SOUL.md")
     body_config_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "body.yaml")
     sim_tick_hz: float = 20.0
-    # "kinematic" | "physics" (simulated) | "serial" (a USB motor board) | "mcu" (VENTUNO Q's on-board STM32H5)
+    # "kinematic" | "physics" (simulated) | "ventuno" (the VENTUNO Q's on-board STM32H5, firmware/ventuno_mcu)
     body_backend: str = "kinematic"
-    serial_port: str = "/dev/ttyACM0"  # the motor microcontroller (firmware/base_controller)
-    camera: str = "sim"  # "sim" | "picamera" (Pi camera module) | "csi" (MIPI camera, GStreamer) | "usb"
+    camera: str = "sim"  # "sim" | "csi" (MIPI cameras through the ISP, GStreamer) | "usb"
     spatial_map_path: Path = field(
         default_factory=lambda: Path("~/robot-runtime/data/spatial_map.json").expanduser()
     )
@@ -245,9 +244,6 @@ class RobotConfig:
         default_factory=lambda: Path("~/robot-runtime/models/ggml-tiny.en.bin").expanduser()
     )
     llm: LLMConfig = field(default_factory=LLMConfig)
-    # Optional second model for the camera (naming things, yes/no checks, questions about the view) when
-    # `llm` is a text-only decision model. None: `llm` does both.
-    vision_llm: LLMConfig | None = None
     context_budget: ContextBudgetConfig = field(default_factory=ContextBudgetConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     autonomy: AutonomyConfig = field(default_factory=AutonomyConfig)
@@ -266,10 +262,10 @@ class RobotConfig:
                 raise ValueError(f"{key} must be finite and positive")
         if not 1 <= self.sim_tick_hz <= 200 or not 1 <= self.max_queue_size <= 4096:
             raise ValueError("Simulation rate or queue size is outside supported limits")
-        if self.body_backend not in ("kinematic", "physics", "serial", "mcu"):
-            raise ValueError("runtime.body_backend must be 'kinematic', 'physics', 'serial' or 'mcu'")
-        if self.camera not in ("sim", "picamera", "csi", "usb"):
-            raise ValueError("runtime.camera must be 'sim', 'picamera', 'csi' or 'usb'")
+        if self.body_backend not in ("kinematic", "physics", "ventuno"):
+            raise ValueError("runtime.body_backend must be 'kinematic', 'physics' or 'ventuno'")
+        if self.camera not in ("sim", "csi", "usb"):
+            raise ValueError("runtime.camera must be 'sim', 'csi' or 'usb'")
 
     @classmethod
     def from_yaml(
@@ -324,13 +320,10 @@ class RobotConfig:
                 startup_timeout_s=float(llm_raw.get("startup_timeout_s", defaults.startup_timeout_s)),
                 thinking=_as_bool(llm_raw.get("thinking", False), "llm.thinking"),
                 thinking_budget_tokens=int(llm_raw.get("thinking_budget_tokens", 512)),
-                vision=_as_bool(llm_raw.get("vision", bool(mmproj)), "llm.vision"),
                 server_args=[str(a) for a in extra] if extra is not None else None,
             )
 
         llm = _llm(llm_raw, LLMConfig())
-        vision_raw = _section(raw, "vision_llm")
-        vision_llm = _llm(vision_raw, LLMConfig(base_url="http://127.0.0.1:8081")) if vision_raw else None
         defaults = ContextBudgetConfig()
         cb = ContextBudgetConfig(**{key: int(cb_raw.get(key, getattr(defaults, key))) for key in vars(defaults)})
         return cls(
@@ -346,7 +339,6 @@ class RobotConfig:
             body_config_path=_resolve(str(rt.get("body_config_path", "config/body.yaml")), default_rel=True),
             sim_tick_hz=float(rt.get("sim_tick_hz", 20.0)),
             body_backend=str(rt.get("body_backend", "kinematic")),
-            serial_port=str(rt.get("serial_port", "/dev/ttyACM0")),
             camera=str(rt.get("camera", "sim")),
             spatial_map_path=_resolve(str(rt.get("spatial_map_path", "~/robot-runtime/data/spatial_map.json"))),
             max_queue_size=int(bus.get("max_queue_size", 256)),
@@ -360,7 +352,6 @@ class RobotConfig:
                 str(audio_raw.get("asr_model_path", "~/robot-runtime/models/ggml-tiny.en.bin"))
             ),
             llm=llm,
-            vision_llm=vision_llm,
             context_budget=cb,
             agent=AgentConfig(**_section(raw, "agent")),
             autonomy=AutonomyConfig(**_section(raw, "autonomy")),

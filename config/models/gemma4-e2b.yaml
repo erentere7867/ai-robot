@@ -1,8 +1,0 @@
-extends: ../robot.yaml
-llm:
-  base_url: "http://127.0.0.1:8100"
-  model_name: "gemma-4-E2B-it-Q4_0"
-  model_path: "~/robot-runtime/models/llm/candidates/gemma4/gemma-4-E2B-it-Q4_0.gguf"
-  mmproj_path: "~/robot-runtime/models/llm/candidates/gemma4/mmproj-gemma-4-E2B-it-Q8_0.gguf"
-  server_args: []
-  ctx_size: 6144

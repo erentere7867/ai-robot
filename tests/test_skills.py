@@ -43,11 +43,12 @@ async def test_observe_again_from_the_same_pose_returns_the_cached_nudge(sim):
     first = await run(sim, "observe")
     second = await run(sim, "observe")
     assert "You already looked from here" in second.message and second.data == first.data
-    assert len(sim.detector.calls) == 1
+    cameras = len(sim.rig)
+    assert len(sim.detector.calls) == cameras  # one look: every camera once
     await run(sim, "turn", direction="left", degrees=20)
     calls = len(sim.detector.calls)  # turning streams frames through the detector too
     third = await run(sim, "observe")
-    assert "You already looked from here" not in third.message and len(sim.detector.calls) == calls + 1
+    assert "You already looked from here" not in third.message and len(sim.detector.calls) == calls + cameras
 
 
 @pytest.mark.parametrize("relation, check", [

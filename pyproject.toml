@@ -1,7 +1,7 @@
 [project]
-name = "companion-robot-harness"
-version = "0.1.0"
-description = "Local-first embodied AI robot harness with a bounded, interruptible runtime"
+name = "sprocket-robot"
+version = "0.2.0"
+description = "Embodied AI robot harness for the Arduino VENTUNO Q: 360-degree vision, voice direction, real-time control"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27.0",
@@ -14,7 +14,8 @@ dependencies = [
 audio = ["sounddevice>=0.5"]
 # Training and exporting the fast layer's detector (on the laptop); the robot runs the NCNN export.
 perception = ["ultralytics>=8.3", "opencv-python-headless>=4.9"]
-robot = ["pyserial>=3.5", "msgpack>=1.0", "ncnn"]  # the real robot: MCU link (Arduino Router), lidar, detector
+# The VENTUNO Q: MCU link (Arduino Router, msgpack-RPC), LD19 lidar (serial), detector (NCNN), microphones.
+robot = ["pyserial>=3.5", "msgpack>=1.0", "ncnn", "sounddevice>=0.5"]
 face = ["pygame-ce>=2.5"]
 dev = [
     "pytest>=8.0",
@@ -32,8 +33,8 @@ build-backend = "setuptools.build_meta"
 include = ["robot*"]
 
 [tool.setuptools.data-files]
-"share/companion-robot/config" = ["config/robot.yaml", "config/robot.ventuno.yaml", "config/body.yaml", "config/SOUL.md", "config/companion_r1.xml", "config/companion_r1_physics.xml"]
-"share/companion-robot/config/meshes" = ["config/meshes/*.stl"]
+"share/sprocket-robot/config" = ["config/robot.yaml", "config/robot.ventuno.yaml", "config/body.yaml", "config/SOUL.md", "config/companion_r1.xml", "config/companion_r1_physics.xml"]
+"share/sprocket-robot/config/meshes" = ["config/meshes/*.stl"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

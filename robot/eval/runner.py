@@ -22,7 +22,7 @@ from typing import Any
 
 from robot.core.config import PROJECT_ROOT, RobotConfig
 from robot.core.events import Event
-from robot.eval.scenarios import CameraModel, Grade, Scenario, ScenarioRun, TurnRecord, plan_layout
+from robot.eval.scenarios import Grade, Scenario, ScenarioRun, TurnRecord, default_cameras, plan_layout
 from robot.main import RobotHarness
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class ScenarioResult:
             "model_calls": self.model_calls,
             "actions": {"completed": self.actions_ok, "failed": self.actions_failed},
             "reflexes": sum(len(t.reflexes) for t in self.run.turns),
-            "camera": self.run.camera.to_dict(),
+            "cameras": [c.name for c in self.run.camera],
             "objects_start": self.run.objects_start,
             "objects_end": self.run.objects_end,
             "transcript": [t.to_dict() for t in self.run.turns],
@@ -101,15 +101,22 @@ def snapshot_objects(sandbox: Any) -> list[dict[str, Any]]:
 
 
 def apply_scene(sandbox: Any, scenario: Scenario, seed: int) -> None:
-    """Reset the room, then apply the scenario's removals and the seeded, jittered layout."""
+    """Reset the room, then apply the scenario's removals and the seeded, jittered layout.
+
+    The person is in the room only for scenarios that place them; they stand facing the robot's start."""
     reset = getattr(sandbox, "reset_default_scene", None)
     if callable(reset):
         reset()
     for obj_id in scenario.setup.remove:
         sandbox.remove_object(obj_id)
+    if "person" not in scenario.setup.overrides:
+        sandbox.remove_object("person")
     room_half = float(getattr(sandbox, "room_half_extent_mm", 1500.0))
     for obj_id, (x, y) in plan_layout(sandbox.list_objects(), seed, scenario.setup, room_half_mm=room_half).items():
-        sandbox.move_object(obj_id, x, y)
+        if obj_id == "person":
+            sandbox.move_object(obj_id, x, y, yaw_deg=math.degrees(math.atan2(-y, -x)))
+        else:
+            sandbox.move_object(obj_id, x, y)
 
 
 def build_config(options: RunOptions, db_path: Path) -> RobotConfig:
@@ -245,7 +252,7 @@ class _Session:
     def __init__(self, harness: RobotHarness) -> None:
         self.harness = harness
         self.probe = _Probe(harness)
-        self.camera = CameraModel.from_sandbox(harness.sandbox)
+        self.camera = tuple(harness.rig)
         self.turn_index = 0
         self._motion_task: asyncio.Task | None = None
 
@@ -348,7 +355,7 @@ async def run_scenario(scenario: Scenario, seed: int, options: RunOptions) -> Sc
     turns: list[TurnRecord] = []
     objects_start: list[dict[str, Any]] = []
     objects_end: list[dict[str, Any]] = []
-    camera = CameraModel()
+    camera = default_cameras()
     error: str | None = None
     session: _Session | None = None
     with tempfile.TemporaryDirectory(prefix="robot-eval-", ignore_cleanup_errors=True) as tmp:

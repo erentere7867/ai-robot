@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from collections import deque
@@ -14,6 +15,7 @@ import numpy as np
 from robot.body.hal import BodyPose
 from robot.core.events import Event, EventPriority
 from robot.core.service import ServiceHealth
+from robot.perception.camera import encode_png, fit_width
 from robot.world.spatial_map import CELL_MM
 
 if TYPE_CHECKING:
@@ -1407,14 +1409,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="panel-header">
         <div class="panel-title">
           <svg class="panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-          1ST-PERSON HEAD CAMERA VISION
+          360° CAMERAS
         </div>
-        <div class="panel-tag">LFM3-VL-2B EMBODIED VISION</div>
+        <div class="panel-tag">FRONT (HEAD) + REAR-LEFT / REAR-RIGHT</div>
       </div>
       <div class="camera-viewport">
-        <img id="headCamImg" alt="1st-person head camera view" />
-        <div class="cam-overlay-badge top-left">HEAD CAMERA (Z=286mm)</div>
+        <img id="headCamImg" alt="front (head) camera view" />
+        <div class="cam-overlay-badge top-left">FRONT CAMERA</div>
         <div class="cam-overlay-badge top-right" id="camTiltBadge">TILT: 0°</div>
+      </div>
+      <div style="display:flex;gap:4px;margin-top:4px">
+        <img id="rearLeftImg" alt="rear-left camera" style="flex:1;min-width:0;border-radius:4px" />
+        <img id="rearRightImg" alt="rear-right camera" style="flex:1;min-width:0;border-radius:4px" />
       </div>
       <div class="vision-hud">
         <div class="vision-summary" id="camHud">Camera: Scanning scene...</div>
@@ -1736,7 +1742,7 @@ let pendingUserMsg = null;
 let isRefreshing = false;
 let lastCamUrl = '';
 const htmlCache = {};
-// Panels poll / redraw only while on screen (IntersectionObserver), to keep a Pi's CPU free.
+// Panels poll / redraw only while on screen (IntersectionObserver), to keep the robot's CPU free.
 const panelVisible = {face: true, map: true, think: true, drives: true};
 
 function esc(value) {
@@ -2163,9 +2169,14 @@ async function refreshState() {
       document.getElementById('camTiltBadge').textContent = `TILT: ${Math.round(p.head_tilt_deg)}°`;
       document.getElementById('camHud').textContent = cam.summary || 'Camera: Scanning visual scene...';
       const detsHtml = (cam.visible_objects || []).map(d =>
-        `<span class="vis-pill" style="border-color:${esc(d.color)}"><strong>${esc(d.label)}</strong> (${esc(d.point_norm[0])},${esc(d.point_norm[1])}) ${esc(d.distance_mm)}mm ${esc(d.direction)}</span>`
+        `<span class="vis-pill" style="border-color:${esc(d.color)}"><strong>${esc(d.label)}</strong> ${esc(d.distance_mm)}mm ${esc(d.direction)}</span>`
       ).join('');
       setHtmlIfChanged('camDetections', detsHtml);
+      for (const [name, el] of [['rear_left', 'rearLeftImg'], ['rear_right', 'rearRightImg']]) {
+        const url = (st.sandbox.cameras || {})[name];
+        const img = document.getElementById(el);
+        if (img && url && img.src !== url) img.src = url;
+      }
     }
 
     // Kinematics & Gauges
@@ -2884,6 +2895,7 @@ class DashboardServer:
         self._capabilities_dict: dict[str, Any] = self.harness.registry.to_dict()
         self._memory_cache: dict[str, Any] | None = None
         self._memory_revision = -1
+        self._camera_cache: dict[str, tuple[Any, str]] = {}
         self._clients: set[asyncio.Task] = set()
         # "Thinking" stream: why the robot did what it did.
         self._thinking: deque[dict[str, Any]] = deque(maxlen=MAX_THINKING_ENTRIES)
@@ -2996,7 +3008,7 @@ class DashboardServer:
             "services": services_health,
             "autonomy": self.harness.autonomy.snapshot(),
             "goal": self.harness.arbiter.active_goal,
-            "sandbox": self.harness.sandbox.snapshot(self.harness.body.pose()),
+            "sandbox": {**self.harness.sandbox.snapshot(self.harness.body.pose()), "cameras": self._camera_views()},
             "capabilities": self._capabilities_dict,
             "memory": {
                 "active_memories": mem_export["active_memories"],
@@ -3049,6 +3061,22 @@ class DashboardServer:
                     "latency_ms": p.get("latency_ms", 0.0),
                 }
             )
+
+    def _camera_views(self) -> dict[str, str]:
+        """The newest frame of each non-front camera, as small PNG data URLs (frames the fast loop already has)."""
+        out: dict[str, str] = {}
+        fast = getattr(self.harness, "fast", None)
+        for name, (frame, _dets) in list(getattr(fast, "views", {}).items()):
+            if name == "front" or getattr(frame, "rgb", None) is None:
+                continue
+            cached = self._camera_cache.get(name)
+            if cached is not None and cached[0] is frame:
+                out[name] = cached[1]
+                continue
+            url = "data:image/png;base64," + base64.b64encode(encode_png(fit_width(frame.rgb, 320))).decode("ascii")
+            self._camera_cache[name] = (frame, url)
+            out[name] = url
+        return out
 
     # ---- "why" views: spatial map, thinking stream, drives ------------------------------------------
     def build_map_payload(self, *, truth: bool = False) -> dict[str, Any]:
@@ -3281,8 +3309,8 @@ class DashboardServer:
         if not origin:
             return True
         try:
-            from urllib.parse import urlparse
             import ipaddress
+            from urllib.parse import urlparse
             parsed = urlparse(origin)
             if parsed.scheme not in ("http", "https"):
                 return False
@@ -3291,7 +3319,7 @@ class DashboardServer:
             orig_host = (parsed.hostname or "").lower()
             if orig_host in ("localhost", "127.0.0.1", "::1") or orig_host.endswith(".ts.net") or "." not in orig_host:
                 return True
-            ip = ipaddress.ip_address(orig_host)
+            ipaddress.ip_address(orig_host)  # any IP-literal origin (LAN, VPN)
             return True
         except Exception:
             pass
@@ -3519,9 +3547,7 @@ class DashboardServer:
                 self.harness.body._pose = BodyPose()
                 self.harness.body._manual_tof_override = False
                 self.harness.body._manual_cliff_override = False
-                self.harness.sandbox._sync_sensors_and_observations(
-                    self.harness.body.pose(), emit_bus=False
-                )
+                self.harness.sandbox._sync_sensors(self.harness.body.pose())
                 await self.harness.body._emit_pose()
             await self.harness.bus.drain()
             return (

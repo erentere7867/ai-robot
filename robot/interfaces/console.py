@@ -161,7 +161,7 @@ class ConsoleInterface:
             return
 
         if head == "/world":
-            print(self.harness.world.render_for_prompt())
+            print(self.harness.spatial_map.render_for_prompt(self.harness.body.pose()))
             return
 
         if head == "/emotion" and len(parts) >= 2:

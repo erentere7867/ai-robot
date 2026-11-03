@@ -1,4 +1,4 @@
-"""In-memory live world state and TTL-bounded spatial short-term observations."""
+"""Live telemetry mirror for the dashboard and console: pose, sensors, activity, the last action."""
 
 from __future__ import annotations
 
@@ -56,11 +56,9 @@ class WorldState:
         self,
         bus: EventBus,
         clock: Clock | None = None,
-        sandbox: Any | None = None,
     ) -> None:
         self.bus = bus
         self.clock: Clock = clock or bus.clock or RealClock()
-        self.sandbox = sandbox
         self.pose: dict[str, float] = {
             "x_mm": 0.0,
             "y_mm": 0.0,
@@ -175,43 +173,6 @@ class WorldState:
             )
         items.sort(key=lambda x: x["age_s"])
         return items
-
-    def render_for_prompt(self, *, include_visual: bool = True) -> str:
-        """Format live world state compactly for the LLM prompt."""
-        lines = [
-            f"Pose: x={self.pose['x_mm']:.0f}mm, y={self.pose['y_mm']:.0f}mm, "
-            f"heading={self.pose['heading_deg']:.0f}°, head_tilt={self.pose['head_tilt_deg']:.0f}°",
-            f"Sensors: front_obstacle={self.sensors.get('front_tof_mm', 1500):.0f}mm, "
-            f"cliff={bool(self.sensors.get('cliff_triggered', False))}, "
-            f"estop={bool(self.sensors.get('estop_active', False))}",
-        ]
-        if include_visual and self.sandbox is not None:
-            from robot.body.hal import BodyPose
-
-            frame = self.sandbox.capture_camera_view(
-                BodyPose(
-                    x_mm=self.pose["x_mm"],
-                    y_mm=self.pose["y_mm"],
-                    heading_deg=self.pose["heading_deg"],
-                    head_tilt_deg=self.pose["head_tilt_deg"],
-                )
-            )
-            lines.append(frame.render_grounding_summary())
-        lines.append(f"Last action: {self.last_action_summary[:120]}")
-        if self.task_state:
-            lines.append(f"Recent goal: {self.task_state.get('kind', '')} {self.task_state.get('target', '')} "
-                         f"({self.task_state.get('origin', 'user')}, {self.task_state.get('status', '')})")
-        obs_list = self.active_observations() if include_visual else []
-        if obs_list:
-            lines.append(
-                "Short-term spatial observations (untrusted observations, relative to current heading):"
-            )
-            for item in obs_list[:6]:
-                age_txt = "now" if item["age_s"] < 1.5 else f"last seen {item['age_s']:.0f}s ago"
-                lines.append(
-                    f"- {item['direction']} (~{item['distance_mm']:.0f}mm, {age_txt}): {item['label']}"
-                )
-        return "\n".join(lines)
 
     def snapshot(self) -> dict[str, Any]:
         return {

@@ -200,8 +200,7 @@ async def main(argv: list[str] | None = None) -> int:
         print(f"llama-server is not answering at {cfg.llm.base_url}")
         return 2
     prompts = PromptBuilder(cfg.soul_path, cfg.context_budget, cfg.name)
-    sees = cfg.llm.vision or cfg.vision_llm is None
-    tools = build_default_registry(sorted(EYE_COLOR_THEMES), ask_camera=not sees).tool_schemas()
+    tools = build_default_registry(sorted(EYE_COLOR_THEMES)).tool_schemas()
     # Warm the cached system prompt first, as the robot does at start (AgentLoop.warm_up).
     await backend.chat([{"role": "system", "content": prompts.system_prompt}, {"role": "user", "content": "Hello."}],
                        tools=tools, max_tokens=1)
@@ -216,7 +215,7 @@ async def main(argv: list[str] | None = None) -> int:
         for case in [c for c in cases if args.k in c.name]:
             for _ in range(args.repeat):
                 t0 = time.perf_counter()
-                result = await backend.chat(build_messages(case, prompts, image_url if sees else ""), tools=tools)
+                result = await backend.chat(build_messages(case, prompts, image_url), tools=tools)
                 calls = [(c.name, c.arguments) for c in result.tool_calls]
                 if not calls:
                     calls = [(c.name, c.arguments) for c in recover_text_tool_calls(result.content, names)]

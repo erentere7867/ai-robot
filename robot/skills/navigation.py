@@ -24,7 +24,7 @@ from robot.control.behaviors import (
 )
 from robot.skills.base import Skill, SkillContext, SkillError, SkillResult
 from robot.skills.perception import find, in_view, look_around
-from robot.world.spatial_map import ASKED_PLACE, TrackedObject, head_noun
+from robot.world.spatial_map import ASKED_PLACE, SPEAKER_WORDS, TrackedObject, head_noun
 
 START_WORDS = {"start", "start point", "starting point", "home", "where i started", "where you started", "origin"}
 RELATIONS = ["near", "behind", "in_front_of", "left_of", "right_of", "between", "on"]
@@ -47,7 +47,11 @@ _BETWEEN = re.compile(r"\bbetween (?:the )?(.+?) and (?:the )?(.+?)(?:[.,!?]|$)"
 # A distance the human said ("30 cm", "half a metre"); otherwise a distance in the call is the model's guess.
 _SAID_DISTANCE = re.compile(r"\d|\b(?:half|quarter)\b|\b(?:cm|centimet\w*|met(?:er|re)s?|inch\w*|feet|foot)\b",
                             re.I)
-_RETURN = re.compile(r"\b(?:come|go|get|head|drive|walk|roll) back\b|\breturn\b|\bcome here\b", re.I)
+_RETURN = re.compile(r"\b(?:come|go|get|head|drive|walk|roll) back\b|\breturn\b", re.I)
+# "Come here", "come to me", "come back here": the human, wherever their voice came from.
+_TO_SPEAKER = re.compile(r"\b(?:come|get|go|move|roll|drive)(?: back| over| right)? (?:here|to me|over here)\b|"
+                         r"\bcome (?:closer|over)\b|\bto me\b", re.I)
+PERSON_GAP_MM = 350.0  # personal space: from the edge of the person's track to my centre
 _ON_WORDS = re.compile(r"\b(?:on|onto|on top|dock|charg\w*|mat|platform|pad)\b", re.I)
 
 
@@ -69,12 +73,55 @@ def _other_named(ctx: SkillContext, request: str, target_id: str) -> str | None:
     return None
 
 
+def _means_speaker(ctx: SkillContext, target: str) -> bool:
+    """Does this call mean the human who is talking? Their own words ("me", "here"), or a request to come to
+    them answered with something the request does not name (the model's guess)."""
+    key = target.strip().lower().strip(" .!?")
+    if key in SPEAKER_WORDS:
+        return True
+    if not ctx.request or not _TO_SPEAKER.search(ctx.request) or not _speaker_known(ctx):
+        return False  # nobody heard: "come back here" is where I was when asked (see _return_place)
+    if "start" in ctx.request.lower() or key in START_WORDS:
+        return False
+    obj = ctx.spatial_map.resolve(target, ctx.pose())
+    return obj is None or not (obj.id in ctx.request.lower()
+                               or head_noun(obj.label) in ctx.request.lower().replace("_", " "))
+
+
+def _speaker_known(ctx: SkillContext) -> bool:
+    speaker = ctx.spatial_map.speaker
+    return ctx.spatial_map.speaker_track() is not None or (speaker is not None and speaker.point is not None)
+
+
+async def _find_speaker(ctx: SkillContext) -> TrackedObject | None:
+    """The human who spoke; heard but not yet seen, a few looks all around first to find them."""
+    heard = ctx.spatial_map.speaker
+    for _ in range(3):
+        if heard is None or heard.how == "seen" or ctx.fast is None:
+            break
+        await ctx.fast.perceive_now()
+    return ctx.spatial_map.speaker_track()
+
+
+def _no_speaker(ctx: SkillContext | None = None) -> SkillError:
+    if ctx is not None and ctx.spatial_map.speaker is not None:
+        return SkillError("I heard the human but can't see them yet. Say so; go_to me heads towards their voice.")
+    return SkillError("I don't know where the human is: I have not heard or seen them. Say so, and ask them to "
+                      "say something so you can hear where they are.")
+
+
 async def _resolve(ctx: SkillContext, target: str) -> TrackedObject:
-    """Find a target in the map ("box_1", "the red ball", "the thing behind you"), searching first if needed.
+    """Find a target in the map ("box_1", "the red ball", "the thing behind you", "me"), searching first if
+    needed.
 
     Directions in a description are the robot's as it was asked: after turning round to look, "the thing
     behind you" is still the thing that was behind.
     """
+    if target.strip().lower().strip(" .!?") in SPEAKER_WORDS:
+        person = await _find_speaker(ctx)
+        if person is None:
+            raise _no_speaker(ctx)
+        return person
     asked_from = ctx.pose()
     obj = ctx.spatial_map.resolve(target, asked_from)
     if obj is not None:
@@ -108,8 +155,36 @@ def _return_place(ctx: SkillContext, target: str) -> str | None:
     return ASKED_PLACE if ASKED_PLACE in ctx.spatial_map.places else None
 
 
+async def _go_to_speaker(ctx: SkillContext, distance_cm: float | None) -> SkillResult:
+    """Come to the human: stop at a comfortable distance, facing them; follows them if they move meanwhile."""
+    gap = 10.0 * distance_cm if distance_cm is not None and _SAID_DISTANCE.search(ctx.request or "") \
+        else PERSON_GAP_MM
+    person = await _find_speaker(ctx)
+    speaker = ctx.spatial_map.speaker
+    if person is None and (speaker is None or speaker.point is None):
+        raise _no_speaker()
+    if person is None:
+        pose = ctx.pose()
+        px, py = speaker.point
+        dist = max(1.0, math.hypot(px - pose.x_mm, py - pose.y_mm))
+        stop = max(0.0, dist - gap - 250.0)
+        done = await ctx.behave(GoToPoint((pose.x_mm + (px - pose.x_mm) * stop / dist,
+                                           pose.y_mm + (py - pose.y_mm) * stop / dist), "where your voice came from"))
+        return SkillResult(done.ok, "I came towards your voice, but I can't see you yet." if done.ok else done.message)
+    pose = ctx.pose()
+    dx, dy = person.x_mm - pose.x_mm, person.y_mm - pose.y_mm
+    norm = max(1.0, math.hypot(dx, dy))
+    done = await ctx.behave(GoToObject(person.id, Relation("near", gap, None, (dx / norm, dy / norm))))
+    ctx.attached_image = None
+    if not done.ok:
+        return SkillResult(False, done.message.replace(person.id, "you"))
+    return SkillResult(True, "I'm here with you.", {"person": person.id})
+
+
 async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: str = "",
                 distance_cm: float | None = None) -> SkillResult:
+    if _means_speaker(ctx, target) and relation in ("near", "in_front_of", "on"):
+        return await _go_to_speaker(ctx, distance_cm)
     target = _return_place(ctx, target) or target
     place = ctx.spatial_map.place(target)
     if target.strip().lower() in START_WORDS or (place is not None and place[0] == "start"):
@@ -133,9 +208,9 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
         distance_cm = None
     asked = _asked_relation(ctx.request)
     repaired = ""
-    if asked and relation in ("near", "in_front_of"):
-        # The call dropped the relation the human named. Measured: told to retry, the 2B model picks yet
-        # another wrong relation, so the call is repaired from the human's own words instead.
+    if asked and relation != asked:
+        # The call dropped or swapped the relation the human named ("between" -> left_of, measured). Told to
+        # retry, the 2B model picks yet another wrong relation, so the call is repaired from the human's words.
         if asked == "between" and not other:
             other = _other_named(ctx, ctx.request, obj.id) or ""
         if asked == "between" and not other:
@@ -165,7 +240,7 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
     view = (dx / norm, dy / norm) if norm > 1.0 else (math.cos(math.radians(pose.heading_deg)),
                                                       math.sin(math.radians(pose.heading_deg)))
     rel = Relation(relation, distance_cm * 10.0 if distance_cm is not None else ROBOT_CLEARANCE_MM,
-                   second.id if second else None, view)
+                   second.id if second else None, view, (obj.x_mm, obj.y_mm))
     done = await ctx.behave(GoToObject(obj.id, rel))
     if done.ok and done.data.get("confirmed") is False and second is None:
         # Not where I thought (a far-off guess or a misdetection): search from here and go again rather than
@@ -188,6 +263,8 @@ async def go_to(ctx: SkillContext, target: str, relation: str = "near", other: s
 
 
 async def face(ctx: SkillContext, target: str) -> SkillResult:
+    if _means_speaker(ctx, target):
+        target = "me"
     if target.strip().lower() in START_WORDS:
         sx, sy = ctx.spatial_map.places.get("start", (0.0, 0.0))
         done = await ctx.behave(Turn(bearing_to(ctx.pose(), sx, sy)))
@@ -196,6 +273,8 @@ async def face(ctx: SkillContext, target: str) -> SkillResult:
     done = await ctx.behave(Face(obj.id))
     if not done.ok:
         return SkillResult(False, done.message)
+    if ctx.spatial_map.speaker is not None and ctx.spatial_map.speaker.track == obj.id:
+        return SkillResult(True, "I'm facing you.")
     return SkillResult(True, f"I'm facing {ctx.spatial_map.describe(obj, ctx.pose())}.")
 
 
@@ -247,12 +326,22 @@ async def circle_around(ctx: SkillContext, target: str = "all", laps: float = 1.
     return SkillResult(done.ok, done.message)
 
 
-async def follow(ctx: SkillContext, target: str, distance_cm: float = 60.0) -> SkillResult:
+_FOLLOW_ASKED = re.compile(r"\bfollow|\bafter me\b|\bcome with me\b|\bkeep up\b", re.I)
+
+
+async def follow(ctx: SkillContext, target: str, distance_cm: float | None = None) -> SkillResult:
     """Start following; this keeps going after the reply until stopped or the target is lost."""
-    obj = await _resolve(ctx, target)
+    if ctx.request and _TO_SPEAKER.search(ctx.request) and not _FOLLOW_ASKED.search(ctx.request) \
+            and _means_speaker(ctx, target):
+        # "Come here" answered with follow (measured with the 2B model): come once, then stay.
+        return await _go_to_speaker(ctx, distance_cm)
+    if distance_cm is None or (ctx.request and not _SAID_DISTANCE.search(ctx.request)):
+        distance_cm = 60.0  # a distance the human did not say is the model's guess (it picked 30 cm)
+    obj = await _resolve(ctx, "me" if _means_speaker(ctx, target) else target)
     ctx.check()
     ctx.fast.start_behavior(Follow(obj.id, distance_cm * 10.0))
-    return SkillResult(True, f"I'm following {obj.id} now, about {distance_cm:.0f} cm behind it, and I'll keep "
+    who = "you" if ctx.spatial_map.speaker is not None and ctx.spatial_map.speaker.track == obj.id else obj.id
+    return SkillResult(True, f"I'm following {who} now, about {distance_cm:.0f} cm behind, and I'll keep "
                              "going until you tell me to stop.", {"following": obj.id})
 
 
@@ -316,7 +405,8 @@ async def explore(ctx: SkillContext) -> SkillResult:
 def skills() -> list[Skill]:
     target = {"type": "string", "description": "a known object id such as box_1; or the human's description, "
               "such as 'charging dock', 'the thing behind you' or 'the closest box' (I search for it if it is not "
-              "known yet); or start, the spot where I was switched on"}
+              "known yet); or me, the human talking to you (you hear where their voice comes from); or start, "
+              "the spot where I was switched on"}
     return [
         Skill("go_to", "Drive to a spot relative to a known object; plans a safe path around obstacles and "
               "turns to face the object at the end. 'behind' means the far side of the object from where you "
@@ -349,7 +439,8 @@ def skills() -> list[Skill]:
               {"direction": {"type": "string", "enum": ["up", "down", "level"]}}, tilt_head, ["direction"]),
         Skill("explore", "Drive to a part of the room you have not seen yet and look around there.", {}, explore),
         # Listed last: a small model favours tools near the top, and these two are rarely the right first step.
-        Skill("follow", "Keep following a moving person or object until told to stop, e.g. 'follow me'.",
+        Skill("follow", "Keep following a moving person or object until told to stop, e.g. 'follow me' is "
+              "target me.",
               {"target": target, "distance_cm": {"type": "number", "minimum": 30, "maximum": 200}},
               follow, ["target"]),
         Skill("stop", "Halt all motion when the human says stop or freeze.", {}, stop),
