@@ -2,7 +2,7 @@
 
 Local-first embodied AI robot harness for `companion_r1` (4-wheel skid-steer base, tiltable head, 5" 800×480 face display, LFM3-VL-2B).
 
-Two layers, like robots that react in real time. A **fast layer** (20 Hz) sees and steers: a small
+Layers, like professional robots that react in real time. A **real-time controller** (the VENTUNO Q's STM32H5, 200 Hz) runs the wheels, odometry and reflexes. A **fast layer** (50 Hz, its own thread) sees and steers: a small
 detector (YOLO11n, trained on this robot's objects from simulator renders) runs on every camera frame,
 keeps a live map, and closed-loop behaviours (go somewhere, follow, search, circle, turn) drive the
 wheels from it, re-planning as things move. A **slow layer**, LFM3-VL-2B, understands what you say,
@@ -17,7 +17,7 @@ pet its own reasons to act; the model decides whether and how. Use `stop` to int
 autonomy, and **Autonomy on** / `resume autonomy` to resume.
 
 See [architecture](docs/architecture.md) for how it works and how to measure it,
-[Raspberry Pi](docs/raspberry_pi.md) for running it on the real robot (setup script, motor-controller
+[VENTUNO Q](docs/ventuno_q.md) for running it on the real robot (setup script, real-time controller
 firmware, wiring), and [evaluation](docs/evaluation.md) for the simulator test suite.
 
 Try it from a terminal (needs the model files below):
@@ -32,14 +32,15 @@ Python 3.11 or newer is required. Install the core harness with `python -m pip i
 Add `[audio]` for microphone/speaker support, `[face]` for the standalone face window, or `[dev]`
 for tests, linting, and the harness benchmark. The core harness does not import pygame.
 
-For the Raspberry Pi 5 (4 GB), use the harness resource profile:
+On the robot (Arduino VENTUNO Q: Qualcomm Dragonwing IQ8 + STM32H5), use its profile:
 
 ```bash
-python -m robot --config config/robot.pi5.yaml --headless --no-dashboard
+python -m robot --config config/robot.ventuno.yaml --headless --no-dashboard
 ```
 
-This profile drives the real robot (`SerialBody` + `firmware/base_controller` on a Pi Pico, Pi camera,
-NCNN detector, CPU inference); `bash scripts/pi/setup_pi5.sh` installs everything. Add `--mic` when
+This profile drives the real robot (`McuBody` + `firmware/ventuno_mcu` on the on-board STM32H5 through the
+Arduino Router, MIPI camera, LD19 lidar, NCNN detector, llama-server pinned to its own cores);
+`bash scripts/ventuno/setup.sh` installs everything and `scripts/ventuno/mcu_check.py` checks the link. Add `--mic` when
 microphone input is wanted; microphone input requires a wake word by default. Console/dashboard
 messages are direct input.
 
@@ -87,7 +88,8 @@ database; its results can differ from the original session. Replay refuses the n
 Measure the harness separately from the model:
 
 ```bash
-python scripts/bench_runtime.py --config config/robot.pi5.yaml --turns 1000 --dashboard --output artifacts/runtime-benchmark.json
+python scripts/bench_control.py                   # control-loop timing under load (real-time layout)
+python scripts/bench_runtime.py --config config/robot.ventuno.yaml --turns 1000 --dashboard --output artifacts/runtime-benchmark.json
 python -m ruff check robot scripts tests
 python -m pytest -q
 ```

@@ -2,7 +2,10 @@
 
 Two layers, like most robots that react in real time:
 
-* a **fast layer** (20 Hz) that sees and steers: a small detector on every camera frame keeps a live
+* a **real-time controller** (the VENTUNO Q's STM32H5, 200 Hz): wheel loops, odometry, braking envelope,
+  reflexes and watchdog, never waiting for Linux (`firmware/ventuno_mcu`, see docs/ventuno_q.md);
+* a **fast layer** (50 Hz, in its own real-time thread, perception in another) that sees and steers: a
+  small detector on every camera frame and a 360-degree lidar keep a live
   map of the room, and closed-loop behaviours (go somewhere, follow, search, turn) steer the wheels
   from it, re-planning as things move;
 * a **slow layer** (LFM3-VL-2B, about once a second or on events) that understands requests, picks
@@ -22,7 +25,7 @@ correcting while it drives.
       AgentLoop ── tools ──► LFM3-VL-2B (llama.cpp)             SLOW LAYER  ~1 Hz / on events
           │ go_to · follow · stop · turn · move · circle_around · observe · look_around · express …
  ─────────┼──────────────────────────────────────────────────────────────────────────────────
-          ▼                                                     FAST LAYER  20 Hz
+          ▼                                                     FAST LAYER  50 Hz (control thread)
       FastLoop  ── every tick ──►  1. newest detection ─► SpatialMap (objects, ToF occupancy)
           │                         2. active behaviour ─► speed command
           ▼                                   ▲
@@ -39,7 +42,9 @@ correcting while it drives.
 | Layer | Rate | Where | Job |
 |---|---|---|---|
 | Reflexes | 100 Hz | `firmware/base_controller` (sim: `body/*_body.py`) | forward stop at the range sensor, bumper, cliff, e-stop, 300 ms watchdog |
-| Fast loop | 20 Hz | `control/fast_loop.py` | fuse the newest detection into the map, tick the behaviour, send speeds |
+| Fast loop | 50 Hz | `control/fast_loop.py` (own thread, absolute deadlines) | tick the behaviour, collision monitor, send speeds |
+| Perception | camera / 10 Hz lidar | `control/fast_loop.py` (perception thread) | detections and scans into the map, scan-to-map localization |
+| Collision monitor | every tick | `control/safety.py` | cap speed to what still stops in time (lidar + range sensor) |
 | Detector | as fast as it runs (60 fps laptop CPU) | `perception/fast_detector.py` | YOLO11n trained on this robot's objects; unknown things come out as "object" |
 | Behaviours | every tick while active | `control/behaviors.py` | pure pursuit on A* paths, live goals (moving targets), honest failure reasons |
 | Deliberation | on events | `cognition/agent.py` | pick behaviours and arguments, judge results, answer |
@@ -182,7 +187,8 @@ saw, and the drives that wake it when idle.
 
 Bodies: `SimBody` (kinematic, the default), `PhysicsBody` (`runtime.body_backend: physics`: MuJoCo
 dynamics, wheel slip, noisy encoder/IMU odometry, a contact bumper) and `SerialBody`
-(`runtime.body_backend: serial`: the real robot's motor microcontroller, see `docs/raspberry_pi.md`).
+(`runtime.body_backend: serial`: a USB motor board) and `McuBody` (`mcu`: the VENTUNO Q's STM32H5, see
+`docs/ventuno_q.md`).
 All three take speed set points (`set_velocity`, watchdog included) and discrete actions (`execute`).
 
 `llama-server` runs with the vision projector, `--jinja` and two slots (`-np 2 -c 16384`). Decisions
@@ -261,11 +267,12 @@ Known limitations:
   and the skills report honestly, but replies can still be slightly off.
 - The same object can be listed twice when the VLM boxes it twice in one view.
 
-## Raspberry Pi 5 (4 GB)
+## Arduino VENTUNO Q
 
-See `docs/raspberry_pi.md`: setup script, wiring, the motor-controller firmware and what to expect.
-In short: the fast layer (NCNN detector + 20 Hz loop) is sized for the Pi's CPU, reflexes run on the
-microcontroller, and the language model (Q4_K_M, CPU) is only consulted to choose what to do next.
+See `docs/ventuno_q.md`: layers and rates, the core plan, measured control timing, localization,
+safety layers, bring-up.
+In short: hard real time on the microcontroller; on Linux the control thread is pinned to a fast A78
+core at SCHED_FIFO, perception to another, llama-server to two more, everything else to the A55s.
 
 ## Hands later
 
