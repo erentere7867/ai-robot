@@ -10,22 +10,6 @@ from robot.memory.models import MemoryProposal, MemoryProvenance
 NAME_SUBJECT = "name"
 MAX_FACT_CHARS = 300
 # Snake-case tool identifiers are never durable facts; plain-word tools are rejected only on their own.
-DEFAULT_RESERVED_TERMS = frozenset(
-    {
-        "perform_trick",
-        "tilt_head",
-        "set_gaze",
-        "set_eye_color",
-        "raw_gpio_write",
-        "schedule_wake",
-        "robot_response",
-        "drive",
-        "spin",
-        "stop",
-        "observe",
-    }
-)
-
 _STOPWORDS = {
     "a", "an", "the", "that", "this", "my", "our", "your", "is", "are", "was", "were", "to", "be", "about",
     "please", "hey", "sprocket", "robot", "i", "me", "user", "user's", "of", "in", "on", "for", "with", "and",
@@ -444,23 +428,15 @@ def is_question(text: str) -> bool:
     return stripped.endswith("?") or bool(_QUESTION_START.match(stripped) or _YES_NO_START.match(stripped))
 
 
-def is_instruction_like(text: str, reserved_terms: frozenset[str] | set[str] = DEFAULT_RESERVED_TERMS) -> bool:
+def is_instruction_like(text: str) -> bool:
     """True for prompt-injection phrasing, role markers, code/JSON, or tool identifiers."""
-    if any(p.search(text) for p in _INSTRUCTION_PATTERNS) or _SNAKE_IDENTIFIER.search(text):
-        return True
-    lowered = text.lower().strip(" .!")
-    for term in reserved_terms:
-        term = term.lower()
-        if lowered == term or ("_" in term and re.search(rf"\b{re.escape(term)}\b", text, re.IGNORECASE)):
-            return True
-    return False
+    return any(p.search(text) for p in _INSTRUCTION_PATTERNS) or bool(_SNAKE_IDENTIFIER.search(text))
 
 
 def fact_rejection_reason(
     text: str,
     *,
     max_chars: int = MAX_FACT_CHARS,
-    reserved_terms: frozenset[str] | set[str] = DEFAULT_RESERVED_TERMS,
 ) -> str | None:
     """Return why `text` must not be stored as a durable fact, or None when acceptable."""
     stripped = text.strip()
@@ -468,7 +444,7 @@ def fact_rejection_reason(
         return "empty"
     if len(stripped) > max_chars:
         return "too_long"
-    if is_instruction_like(stripped, reserved_terms):
+    if is_instruction_like(stripped):
         return "instruction_like"
     if is_question(stripped):
         return "question"
@@ -557,7 +533,6 @@ def extract_fact_candidates(user_text: str) -> list[FactCandidate]:
 def extract_explicit_memory_proposals(user_message: str) -> list[MemoryProposal]:
     """Detect explicit 'remember ...', 'forget ...', 'my name is ...' or 'call me ...' in a user message."""
     stripped = user_message.strip()
-    # Strip optional leading wake word like "Sprocket, remember..."
     stripped = re.sub(
         r"^\s*(?:hey\s+)?(?:sprocket|robot)\s*[,:]?\s*",
         "",

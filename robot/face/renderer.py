@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import pygame
 
@@ -46,11 +45,9 @@ class PygameFaceRenderer:
         surf = self.surface
         surf.fill(BG_COLOR)
 
-        # Outer rounded visor frame
         visor_rect = pygame.Rect(24, 20, self.width - 48, self.height - 40)
         pygame.draw.rect(surf, BEZEL_COLOR, visor_rect, width=2, border_radius=36)
 
-        # Eye centers and dimensions
         eye_w = 180
         eye_h = 190
         center_y = int(self.height * 0.44) + int(params.gaze_y * 28)
@@ -85,10 +82,8 @@ class PygameFaceRenderer:
             is_left=False,
         )
 
-        # Mouth / expressive voice bar
         self._draw_mouth(surf, params, shift_x=int(gaze_shift_x * 0.4))
 
-        # Status badge in bottom-left of visor
         if self._font is not None:
             badge_text = f"{params.activity.upper()} | {params.emotion} ({params.intensity:.1f}) | gaze:{params.gaze_target}"
             txt_surf = self._font.render(badge_text, True, (110, 135, 165))
@@ -98,12 +93,6 @@ class PygameFaceRenderer:
             pygame.display.flip()
 
         return surf
-
-    def save_snapshot(self, path: Path | str) -> Path:
-        out = Path(path).expanduser().resolve()
-        out.parent.mkdir(parents=True, exist_ok=True)
-        pygame.image.save(self.surface, str(out))
-        return out
 
     def _draw_eye(
         self,
@@ -124,7 +113,6 @@ class PygameFaceRenderer:
         h = max(10, int(base_h * max(0.05, min(1.30, openness))))
         rect = pygame.Rect(cx - w // 2, cy - h // 2, w, h)
 
-        # Soft outer glow
         glow_color = (
             max(0, color_rgb[0] // 4),
             max(0, color_rgb[1] // 4),
@@ -133,10 +121,8 @@ class PygameFaceRenderer:
         glow_rect = rect.inflate(20, 20)
         pygame.draw.rect(surf, glow_color, glow_rect, border_radius=max(8, h // 2))
 
-        # Core glowing eye shape
         pygame.draw.rect(surf, color_rgb, rect, border_radius=max(6, int(min(w, h) * 0.36)))
 
-        # Specular highlight when eye is open
         if h > 36:
             hl_r = max(6, min(18, h // 9))
             hl_color = (
@@ -146,13 +132,11 @@ class PygameFaceRenderer:
             )
             pygame.draw.circle(surf, hl_color, (cx - w // 5, cy - h // 5), hl_r)
 
-        # Lower eyelid happy squint mask
         if squint > 0.02 and h > 24:
             squint_h = int(h * min(0.65, squint))
             mask_rect = pygame.Rect(rect.left - 8, rect.bottom - squint_h, w + 16, squint_h + 12)
             pygame.draw.ellipse(surf, BG_COLOR, mask_rect)
 
-        # Upper eyebrow slope polygon mask
         if abs(brow_deg) > 1.0 and h > 20:
             slope = math.tan(math.radians(max(-30.0, min(30.0, brow_deg)))) * (w * 0.5)
             # Positive brow_deg slopes down toward the center (stern/curious), negative slopes up toward center (concerned)
@@ -177,7 +161,6 @@ class PygameFaceRenderer:
         color = params.color_rgb
 
         if params.mouth_open > 0.18:
-            # Speaking or surprised rounded mouth
             mrect = pygame.Rect(mx - mw // 2, my - mh // 2, mw, mh)
             pygame.draw.rect(surf, color, mrect, border_radius=mh // 2)
         else:
@@ -188,7 +171,6 @@ class PygameFaceRenderer:
             for i in range(steps + 1):
                 t = i / steps
                 x = int((mx - mw // 2) + t * mw)
-                # Parabola peaking at t=0.5
                 y = int(my + 4.0 * t * (1.0 - t) * curve_px)
                 pts.append((x, y))
             pygame.draw.lines(surf, color, False, pts, width=6)

@@ -44,7 +44,7 @@ async def cognition_load(stall_ms: float, every_s: float, stop: asyncio.Event) -
     return n
 
 
-async def run(threaded: bool, tune: bool, hz: float, seconds: float, stall_ms: float, every_s: float) -> dict:
+async def run(tune: bool, hz: float, seconds: float, stall_ms: float, every_s: float) -> dict:
     cfg = RobotConfig.from_yaml("config/robot.yaml")
     with tempfile.TemporaryDirectory() as tmp:
         cfg.database_path = Path(tmp) / "memory.db"
@@ -52,7 +52,6 @@ async def run(threaded: bool, tune: bool, hz: float, seconds: float, stall_ms: f
         cfg.record_events = False
         cfg.autonomy.enabled = False
         cfg.perception.loop_hz = hz
-        cfg.perception.control_thread = threaded
         cfg.perception.lidar = "sim"
         cfg.perception.tune_process = tune
         cfg.llm.backend = "null"
@@ -87,8 +86,8 @@ async def main() -> int:
     parser.add_argument("--out", default="artifacts/bench-control.json")
     args = parser.parse_args()
     results = []
-    for threaded, tune in ((False, False), (True, False), (True, True)):
-        r = await run(threaded, tune, args.hz, args.seconds, args.stall_ms, args.every)
+    for tune in (False, True):
+        r = await run(tune, args.hz, args.seconds, args.stall_ms, args.every)
         results.append(r)
         print(json.dumps(r))
     Path(args.out).write_text(json.dumps(results, indent=1), encoding="utf-8")

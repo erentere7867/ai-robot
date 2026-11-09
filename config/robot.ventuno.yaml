@@ -8,30 +8,21 @@
 extends: robot.yaml
 
 runtime:
-  body_backend: "ventuno"        # the on-board STM32H5 through the Arduino Router (robot/body/ventuno_body.py)
+  body_backend: "ventuno"        # the on-board STM32H5 through the Arduino Router (robot/hardware/ventuno_body.py)
   camera: "csi"                  # three MIPI cameras through the ISP (GStreamer); "usb" for USB cameras
   face_fps: 30.0
 
 bus:
   max_queue_size: 128
-  record_events: true            # keep: recordings are how real runs are debugged (rotated, see docs)
 
 perception:
-  fast_detector: "auto"
-  prefer_ncnn: true
-  imgsz: 416
-  confidence: 0.4
   detector_gpu: true             # NCNN on the Adreno GPU through Vulkan: three cameras' worth of detections
-  loop_hz: 50.0
-  control_thread: true
   realtime_priority: 60          # needs LimitRTPRIO (set by scripts/ventuno/sprocket.service)
-  collision_monitor: true
   tune_process: true             # GC freeze, 1 ms GIL switch, mlockall (LimitMEMLOCK=infinity)
   lidar: "/dev/lidar"            # LD19/LD06 through a udev symlink (scripts/ventuno/99-sprocket.rules)
   localization: true             # lidar scans matched to the map correct odometry drift
 
 llm:
-  backend: "auto"
   auto_start_server: false       # sprocket-llm.service runs llama-server pinned to its own cores
   base_url: "http://127.0.0.1:8080"
   model_name: "LFM3-VL-2B-Q4_K_M"
@@ -45,7 +36,5 @@ llm:
   startup_timeout_s: 180.0
 
 autonomy:
-  enabled: true
-  policy: "rules"
   idle_after_s: 30.0
   think_interval_s: 90.0

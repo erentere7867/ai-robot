@@ -4,21 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from robot_fakes import ScriptedBackend
 
-from robot.actions.registry import CapabilityRegistry
-from robot.actions.tools import ToolCallRequest
 from robot.audio.service import AudioService
 from robot.audio.tts import SynthesizedSpeech
 from robot.audio.vad import VoiceActivityDetector
-from robot.body.hal import BodyCapabilities
-from robot.cognition.agent import recover_text_tool_calls
-from robot.cognition.backend import ChatResult, NullBackend, ScriptedBackend, ToolCall
+from robot.body.hal import load_capabilities
+from robot.cognition.backend import ChatResult, NullBackend, ToolCall
 from robot.cognition.llamacpp import LlamaCppBackend
 from robot.cognition.prompts import PromptBuilder, estimate_tokens, truncate_to_tokens
+from robot.cognition.textcalls import recover_text_tool_calls
 from robot.core.bus import EventBus
 from robot.core.clock import RealClock, ReplayClock
 from robot.core.config import PROJECT_ROOT, AgentConfig, RobotConfig
@@ -86,7 +87,7 @@ async def test_stop_invalidates_even_uncancellable_late_inference(tmp_path):
         await harness.bus.drain()
         assert harness.body.pose().x_mm == 0
         assert (await pending)["backend"] == "cancelled"
-        assert not harness.executor._active_tasks
+        assert harness.fast.behavior is None
 
 
 @pytest.mark.asyncio
@@ -101,7 +102,7 @@ async def test_cancel_cannot_run_remaining_plan(tmp_path):
             if harness.body.pose().linear_vel_mm_s:
                 break
             await asyncio.sleep(0.002)
-        await harness.bus.emit("action.cancel", "test", {"reason": "stop"}, priority=EventPriority.CRITICAL)
+        await harness.bus.emit("action.cancel", "test", {"reason": "user_stop"}, priority=EventPriority.CRITICAL)
         await turn
         assert harness.body.pose().x_mm < 300
         assert harness.body.pose().heading_deg == 0
@@ -138,20 +139,10 @@ async def test_telemetry_cannot_remove_control_and_critical_bypasses_backpressur
     assert delivered == ["action.cancel", "body.pose"]
 
 
-@pytest.mark.parametrize(
-    "tool,args",
-    [
-        ("spin", {"angle_deg": "NaN"}),
-        ("spin", {"angle_deg": float("inf")}),
-        ("drive", {"distance_mm": "NaN"}),
-        ("drive", {"distance_mm": True}),
-        ("tilt_head", {"angle_deg": "-Infinity"}),
-        ("drive", {}),
-        ("spin", {}),
-    ],
-)
-def test_nonfinite_and_missing_motor_args_are_rejected(tool, args):
-    assert not CapabilityRegistry(BodyCapabilities()).validate_tool_call(ToolCallRequest(tool, args)).valid
+def test_a_non_finite_speed_command_is_no_command():
+    caps = load_capabilities()
+    assert caps.clamp_velocity(float("nan"), float("inf")) == (0.0, 0.0)
+    assert caps.clamp_velocity(9999.0, -9999.0) == (caps.max_linear_speed_mm_s, -caps.max_angular_speed_deg_s)
 
 
 @pytest.mark.asyncio
@@ -235,18 +226,13 @@ def test_recording_rotation_is_streamed_and_session_size_is_capped(tmp_path):
     assert recorder.dropped_count == 8
 
 
-def test_ventuno_profile_and_strict_response_validation():
+def test_ventuno_profile_extends_the_base_and_model_numbers_are_validated():
     cfg = RobotConfig.from_yaml("config/robot.ventuno.yaml")
-    assert cfg.body_backend == "ventuno" and cfg.camera == "csi" and cfg.max_queue_size == 128
-    assert cfg.perception.control_thread and cfg.perception.realtime_priority == 60
-    assert cfg.perception.lidar == "/dev/lidar" and cfg.llm.threads == 2 and not cfg.llm.auto_start_server
-    assert cfg.face_fps == 30 and cfg.autonomy.policy == "rules"
+    assert cfg.body_backend == "ventuno" and cfg.perception.loop_hz == RobotConfig.from_yaml().perception.loop_hz
     # Model-supplied numbers are validated before any skill runs: NaN never reaches a motor.
     with pytest.raises(SkillError):
         _coerce("degrees", {"type": "number"}, "NaN")
     assert _coerce("degrees", {"type": "number", "minimum": 5, "maximum": 360}, 9999) == 360
-    assert not CapabilityRegistry(BodyCapabilities()).validate_tool_call(
-        ToolCallRequest("spin", {"angle_deg": float("nan")})).valid
 
 
 @pytest.mark.asyncio
@@ -306,7 +292,7 @@ def test_config_tolerates_empty_sections_and_rejects_ambiguous_values(tmp_path):
     path = tmp_path / "robot.yaml"
     path.write_text(
         'robot:\n  wake_words: "sprocket"\nruntime:\nagent:\nautonomy:\naudio:\n'
-        'bus:\n  record_events: "false"\nllm:\n  backend: "null"\n',
+        'bus:\n  record_events: false\nllm:\n  backend: "null"\n',
         encoding="utf-8",
     )
     cfg = RobotConfig.from_yaml(path, project_root=PROJECT_ROOT)
@@ -314,12 +300,37 @@ def test_config_tolerates_empty_sections_and_rejects_ambiguous_values(tmp_path):
     assert cfg.record_events is False
     assert cfg.agent.max_steps == AgentConfig().max_steps and cfg.autonomy.enabled is True
 
-    path.write_text('llm:\n  auto_start_server: "sometimes"\n', encoding="utf-8")
+    path.write_text('llm:\n  auto_start_server: "false"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="auto_start_server"):
         RobotConfig.from_yaml(path, project_root=PROJECT_ROOT)
     path.write_text("agent: 5\n", encoding="utf-8")
     with pytest.raises(ValueError, match="agent"):
         RobotConfig.from_yaml(path, project_root=PROJECT_ROOT)
+
+
+def test_an_unknown_setting_is_an_error_not_silently_ignored(tmp_path):
+    path = tmp_path / "robot.yaml"
+    path.write_text("perception:\n  lidarr: sim\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="lidarr"):
+        RobotConfig.from_yaml(path, project_root=PROJECT_ROOT)
+
+
+def test_the_real_robot_runs_without_the_simulator():
+    """MuJoCo is only for the laptop: nothing the robot imports may need it."""
+    code = ("import sys; sys.modules['mujoco'] = None\n"
+            "import robot.main, robot.hardware.platform, robot.hardware.ventuno_body\n")
+    done = subprocess.run([sys.executable, "-c", code], cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr[-2000:]
+
+
+async def test_a_stop_with_any_configured_wake_word_halts_before_the_model(tmp_path):
+    cfg = RobotConfig.from_yaml()
+    cfg.database_path, cfg.spatial_map_path = tmp_path / "m.db", tmp_path / "map.json"
+    cfg.record_events, cfg.llm.backend, cfg.perception.fast_detector = False, "null", "off"
+    cfg.wake_words = ["jarvis"]
+    async with RobotHarness(cfg, clock=ReplayClock(), backend=NullBackend(), tts_mode="warble") as harness:
+        harness.face_bridge._send_udp = lambda payload: None
+        assert (await harness.submit_message("jarvis, stop!"))["backend"] == "reflex_stop"
 
 
 def test_vad_utterance_segmentation_and_barge_in() -> None:
@@ -428,8 +439,8 @@ async def test_map_endpoint_shows_the_robots_own_map_and_optional_sim_truth(dash
     now = harness.clock.monotonic()
     smap.objects["box_1"] = TrackedObject("box_1", "brown cardboard box", 950.0, 420.0, 120.0, now, now)
     smap.objects["ball_1"] = TrackedObject("ball_1", "red ball", 680.0, 160.0, 50.0, now, now, stale=True)
-    smap.add_obstacle_point(1200.0, -300.0, weight=2.0)
-    smap.mark_coverage(harness.body.pose(), harness.camera.model)
+    smap.grid.add_obstacle_point(1200.0, -300.0, weight=2.0)
+    smap.grid.mark_coverage(harness.body.pose(), harness.camera.model)
 
     data = await _get_json(dash, "/api/map")
     assert data["robot"] == {"x_mm": 0.0, "y_mm": 0.0, "heading_deg": 0.0, "head_tilt_deg": 0.0}

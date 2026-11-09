@@ -22,9 +22,7 @@ bus:
 
 agent:
   max_steps: 14        # model calls per request
-  max_actions: 200
   timeout_s: 300.0
-  plan: true           # several-part requests ("... and come back") are done one part at a time
 
 autonomy:
   enabled: true
@@ -45,7 +43,6 @@ llm:
   timeout_s: 90.0
   temperature: 0.0
   max_tokens: 256
-  thinking: false              # true lets the model reason first: slower, not more accurate here
 
 context_budget:
   total_tokens: 4096
@@ -59,12 +56,7 @@ context_budget:
 
 perception:
   fast_detector: "auto"        # the trained YOLO11n (scripts/train_detector.py); "off" = VLM only
-  prefer_ncnn: true            # the robot's runtime (no PyTorch), so the simulator runs the same code
-  imgsz: 416
   detector_gpu: true           # NCNN on the GPU through Vulkan (falls back to the CPU without one)
   confidence: 0.4
   loop_hz: 50.0
-  # Real-time layout: the control loop and perception each get a thread of their own (robot/control/fast_loop.py)
-  control_thread: true
-  collision_monitor: true
   lidar: "sim"                 # simulated 360-degree lidar (robot/perception/lidar.py)

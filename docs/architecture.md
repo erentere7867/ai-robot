@@ -51,9 +51,9 @@ and the simulator builds its MuJoCo cameras from it (their poses agree to 0.5 mm
 
 ## Perception
 
-1. Every camera hands out frames tagged with the body's pose at capture (`CameraRig`; `SimCamera` renders
-   MuJoCo from the true pose, `RealCamera` reads a MIPI camera through the ISP and rectifies wide lenses from
-   a calibration file). PNG encoding is lazy and capped at 512 px wide for the VLM.
+1. Every camera hands out frames tagged with the body's pose at capture (`CameraRig`; `robot/sim/sensors.py`
+   renders MuJoCo from the true pose, `robot/hardware/sensors.py` reads a MIPI camera through the ISP and rectifies
+   wide lenses from a calibration file). PNG encoding is lazy and capped at 512 px wide for the VLM.
 2. The **fast detector** is YOLO11n trained on this robot's objects and people (`scripts/train_detector.py`:
    renders labelled frames from all three cameras in randomized rooms with a person in random clothes,
    random lighting, shadows and reflections; exact boxes from a segmentation render). It runs as an NCNN
@@ -109,10 +109,22 @@ The planner (`navigation/planner.py`) is A* on the lidar occupancy grid plus tra
 footprint (181 mm circumscribed radius) and margins. Every speed command passes the collision monitor
 (`control/safety.py`): speed capped to what still stops in time, given lidar points all around and the front ToF.
 
+## One way to move
+
+Every motion is a speed command plus a head angle, refreshed at the control rate; there is no separate "drive 30 cm"
+command to the body. Turning, driving a distance, gestures from `body.yaml` and the dashboard's buttons are all
+behaviours (`control/behaviors.py`), so every one of them passes the collision monitor, can be cancelled the same
+way, and runs identically in the simulator and on the MCU.
+
+`robot/platform.py` assembles the robot: `robot/sim` or `robot/hardware` builds a body and its senses behind one
+`Platform`, and nothing above it knows which it got. The real robot never imports MuJoCo.
+
 ## Making a small model reliable
 
 A 2B model chooses well among few, clear tools, and badly at the edges. The harness guards those edges in code,
-each measured against the simulator before it went in:
+each measured against the simulator before it went in. Rules that read the words of the request live together in
+`cognition/repair.py`, between the model and the skills, so skills stay plain capabilities and the rules can go
+when a better model no longer needs them:
 
 - Few, semantic tools listed in a deliberate order; examples written in words, not code.
 - The request's own words repair a call that drops what the human said: the relation ("go *behind*"), "come

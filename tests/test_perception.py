@@ -7,15 +7,16 @@ import math
 
 import numpy as np
 import pytest
+from robot_fakes import ScriptedBackend
 
 from robot.body.hal import BodyPose
-from robot.cognition.backend import ScriptedBackend
+from robot.cognition.vlm import VLMDetector
 from robot.core.clock import RealClock, ReplayClock
 from robot.perception.camera import Frame
 from robot.perception.change import ChangeDetector
-from robot.perception.detector import Detection, VLMDetector, parse_detections
+from robot.perception.detection import Detection, parse_detections
 from robot.perception.geometry import CameraModel, camera_for, default_rig
-from robot.world.sandbox import SimulationSandbox
+from robot.sim.sandbox import SimulationSandbox
 from robot.world.spatial_map import (
     SpatialMap,
     TrackedObject,
@@ -52,7 +53,6 @@ def test_bearing_and_view_helpers_agree():
     assert MODEL.bearing_deg(1.0) < 0  # right of centre is negative (CCW positive)
     assert MODEL.in_view(pose, 800, 0)
     assert not MODEL.in_view(pose, -800, 0) and not MODEL.in_view(pose, 800, 1200)
-    assert MODEL.scaled(320, 240).focal_px == pytest.approx(MODEL.focal_px / 2)
     rear_left = next(c for c in RIG if c.name == "rear_left")
     assert rear_left.bearing_deg(0.5) == pytest.approx(rear_left.yaw_deg)
     assert rear_left.in_view(pose, -800, 300) and not rear_left.in_view(pose, -800, -300)
@@ -70,7 +70,7 @@ def test_simulator_cameras_are_the_perception_models():
     """MuJoCo's cameras (built from body.yaml) sit exactly where the geometry says, looking the same way."""
     import mujoco
 
-    from robot.world.sandbox import _GL
+    from robot.sim.sandbox import _GL
 
     sandbox = SimulationSandbox()
     pose = BodyPose(300, -200, 40, 20)
@@ -129,13 +129,16 @@ def test_lidar_ranges_a_person_the_camera_placed_roughly():
     pose = BodyPose(0, 0, 0)
     sandbox.move_object("person", 1150.0, 300.0)
     det = next(d for d in sandbox.detect_objects(pose) if d.id == "person")
-    from robot.perception.lidar import Scan, SimLidar
+    from robot.perception.lidar import Scan
+    from robot.sim.sensors import SimLidar
 
     class Still:
         def pose(self):
             return pose
 
-    lidar = SimLidar(sandbox, Still(), type("C", (), {"monotonic": staticmethod(lambda: 0.0)})(), noise_mm=0.0)
+        true_pose = pose
+
+    lidar = SimLidar(sandbox, Still(), type("C", (), {"monotonic": staticmethod(lambda: 0.0)})(), mount_x_mm=-105.0, height_mm=330.0, noise_mm=0.0)
     scan = lidar.latest()
     assert isinstance(scan, Scan)
     spatial = SpatialMap(ReplayClock())
@@ -369,25 +372,26 @@ def test_resolve_prefers_ids_then_exact_nouns_over_synonyms():
 def test_range_readings_build_occupancy_and_clear_free_space():
     spatial, _ = fresh_map()
     pose = BodyPose()
-    spatial.update_range(pose, 800.0)
-    hit = spatial.to_cell(141 + 800, 0)
-    assert spatial.occupied_mask()[hit]
-    assert spatial.occupancy[spatial.to_cell(400, 0)] < 0
+    grid = spatial.grid
+    grid.update_range(pose, 800.0, offset_mm=141.0)
+    hit = grid._cell(141 + 800, 0)
+    assert grid.occupied_mask()[hit]
+    assert grid.occupancy[grid._cell(400, 0)] < 0
     for _ in range(4):
-        spatial.update_range(pose, 2500.0)  # beam passes through: the old hit is cleared
-    assert not spatial.occupied_mask()[hit]
-    spatial.update_range(pose, float("nan"))
-    spatial.update_range(pose, -5.0)
-    spatial.add_obstacle_point(99999, 0)  # outside the map: ignored
-    assert spatial.occupied_mask().sum() == 0
+        grid.update_range(pose, 2500.0, offset_mm=141.0)  # beam passes through: the old hit is cleared
+    assert not grid.occupied_mask()[hit]
+    grid.update_range(pose, float("nan"), offset_mm=141.0)
+    grid.update_range(pose, -5.0, offset_mm=141.0)
+    grid.add_obstacle_point(99999, 0)  # outside the map: ignored
+    assert grid.occupied_mask().sum() == 0
 
 
 def test_coverage_marks_the_view_cone():
     spatial, _ = fresh_map()
-    before = spatial.unseen_fraction_near(1000, 0, 800)
-    spatial.mark_coverage(BodyPose(), MODEL)
-    assert spatial.unseen_fraction_near(1000, 0, 800) < before
-    assert spatial.unseen_fraction_near(-1500, 0, 600) == 1.0
+    before = spatial.grid.unseen_fraction_near(1000, 0, 800)
+    spatial.grid.mark_coverage(BodyPose(), MODEL)
+    assert spatial.grid.unseen_fraction_near(1000, 0, 800) < before
+    assert spatial.grid.unseen_fraction_near(-1500, 0, 600) == 1.0
 
 
 def test_save_and_load_marks_objects_stale(tmp_path):
@@ -429,9 +433,8 @@ def test_render_for_prompt_lists_nearest_first_and_places():
 async def test_targeted_detections_are_confirmed_on_a_crop() -> None:
     import numpy as np
 
-    from robot.cognition.backend import ScriptedBackend
+    from robot.cognition.vlm import VLMDetector
     from robot.perception.camera import Frame, encode_png
-    from robot.perception.detector import VLMDetector
 
     rgb = np.zeros((48, 64, 3), dtype=np.uint8)
     frame = Frame(encode_png(rgb), BodyPose(), CameraModel(64, 48), 0.0, rgb=rgb)
@@ -446,7 +449,7 @@ async def test_targeted_detections_are_confirmed_on_a_crop() -> None:
 
 
 def test_room_surfaces_are_not_objects() -> None:
-    from robot.perception.detector import parse_detections
+    from robot.perception.detection import parse_detections
 
     text = ('[{"label": "blue wall", "bbox": [0, 0, 400, 300]}, {"label": "blue floor", "bbox": [0, 600, 999, 999]},'
             ' {"label": "red ball", "bbox": [100, 600, 200, 700]}]')

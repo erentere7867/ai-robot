@@ -1,10 +1,8 @@
 """Background decisions when no human owns the robot: drives, scene changes and requested wakes.
 
-Each tick is cheap (numbers and a 32x24 thumbnail). With the "rules" policy a drive picks a behaviour
-itself (curious: explore; playful: a gesture; low battery: go charge), like a pet's habits, and the model
-is only woken when there may be something worth saying: a scene change, a wake it asked for, or
-loneliness when speaking is allowed. Whatever it says unasked must not repeat what it said recently, and
-each unanswered remark doubles the wait before the next.
+Each tick is cheap (numbers and a 32x24 thumbnail). A drive picks a behaviour itself (curious: explore;
+playful: a gesture; low battery: go charge), like a pet's habits, and the model is only woken when there may
+be something worth saying: a scene change, a wake it asked for, or loneliness when speaking is allowed.
 """
 
 from __future__ import annotations
@@ -13,12 +11,12 @@ import asyncio
 import math
 import random
 import re
-from collections import deque
 from typing import Any
 
-from robot.behavior.drives import DriveSystem
-from robot.core.events import Event, EventPriority
+from robot.core.events import CancelReason, Event, EventPriority
 from robot.core.service import ServiceHealth
+from robot.interaction.drives import DriveSystem
+from robot.interaction.pacing import SpeechPacer
 from robot.perception.change import ChangeDetector
 
 _RESUME = re.compile(r"^(?:please )?(?:resume(?: autonomy)?|autonomy on)[.!?]*$", re.I)
@@ -33,23 +31,19 @@ _TALK = re.compile(r"^(?:please )?(?:you can talk|quiet mode off|speak freely)[.
 class AutonomyController:
     name = "autonomy"
 
-    def __init__(self, *, bus, arbiter, body, config, attention, audio, camera=None, spatial_map=None,
-                 drives: DriveSystem | None = None):
+    def __init__(self, *, bus, arbiter, body, config, audio, camera, spatial_map, drives: DriveSystem,
+                 pacer: SpeechPacer):
         self.bus = bus
         self.arbiter = arbiter
         self.body = body
         self.config = config
-        self.attention = attention
         self.audio = audio
         self.camera = camera
         self.spatial_map = spatial_map
-        self.drives = drives or DriveSystem(rate_scale=getattr(config, "drive_rate_scale", 1.0))
+        self.drives = drives
         self.enabled = config.enabled
         self.paused = False
-        self.quiet = False
-        self._spoke_at = -math.inf
-        self._unanswered = 0  # remarks made on its own since the human last spoke
-        self._said: deque[set[str]] = deque(maxlen=8)
+        self.pacer = pacer
         self._rng = random.Random(0)
         self.running = False
         self.reason = "waiting for idle time"
@@ -65,7 +59,6 @@ class AutonomyController:
         self._subs: list[str] = []
 
     def bind(self) -> None:
-        self._subs.append(self.bus.subscribe("input.user_message", self._on_input, immediate=True))
         self._subs.append(self.bus.subscribe("action.cancel", self._on_cancel, immediate=True))
         self._subs.append(self.bus.subscribe("robot.response", self._on_response, immediate=True))
 
@@ -89,28 +82,11 @@ class AutonomyController:
 
     def snapshot(self) -> dict[str, Any]:
         now = self.bus.clock.monotonic()
-        return {"enabled": self.enabled, "paused": self.paused, "quiet": self.quiet,
+        return {"enabled": self.enabled, "paused": self.paused, "quiet": self.pacer.quiet,
                 "active": bool(self._task and not self._task.done()), "reason": self.reason,
                 "last_trigger": self.last_trigger,
                 "next_decision_in_s": round(self._wake_at - now, 1) if self._wake_at is not None else None,
                 **self.drives.snapshot()}
-
-    def _speech_due(self) -> bool:
-        interval = self.config.speak_interval_s * 2 ** min(self._unanswered, 5)
-        return not self.quiet and self.bus.clock.monotonic() - self._spoke_at >= interval
-
-    def allow_speech(self, text: str = "") -> bool:
-        """May an autonomous turn say this now? Saying it counts, so call this once per reply."""
-        if not self._speech_due():
-            return False
-        words = set(re.findall(r"[a-z']+", text.lower()))
-        if words and any(len(words & old) >= 0.6 * min(len(words), len(old)) for old in self._said):
-            return False  # nearly the same as something it said unasked recently
-        self._spoke_at = self.bus.clock.monotonic()
-        self._unanswered += 1
-        if words:
-            self._said.append(words)
-        return True
 
     def _habit(self, drive: str) -> list[tuple[str, dict[str, Any]]] | None:
         """What the pet does about a drive by itself; None means it is worth asking the model."""
@@ -121,7 +97,7 @@ class AutonomyController:
             return [("express", {"emotion": self._rng.choice(["happy", "excited", "curious"]), "gesture": gesture})]
         if drive == "energy":
             return [("go_to", {"target": "charging dock", "relation": "on"})]
-        if drive == "social" and not self._speech_due():
+        if drive == "social" and not self.pacer.due():
             return [("express", {"emotion": self._rng.choice(["love", "curious", "shy"]),
                                  "gesture": "curious_tilt"})]
         return None
@@ -142,9 +118,9 @@ class AutonomyController:
         if paused is not None:
             self.paused = bool(paused)
         if quiet is not None:
-            self.quiet = bool(quiet)
+            self.pacer.quiet = bool(quiet)
         if self.paused or not self.enabled:
-            await self.bus.emit("action.cancel", self.name, {"reason": "autonomy_pause"},
+            await self.bus.emit("action.cancel", self.name, {"reason": CancelReason.AUTONOMY_PAUSE},
                                 priority=EventPriority.CRITICAL, correlation_id=correlation_id)
         elif enabled is True or paused is False:
             self.last_user_at = self.bus.clock.monotonic() - self.config.idle_after_s
@@ -152,14 +128,14 @@ class AutonomyController:
         self.reason = "paused by user" if self.paused else "running" if self.enabled else "disabled"
         await self.bus.emit("autonomy.updated", self.name, self.snapshot(), correlation_id=correlation_id)
 
-    async def _on_input(self, event: Event) -> None:
-        text = str(event.payload.get("text", "")).strip()
-        attend, cleaned = self.attention.should_attend(text, direct_address=bool(event.payload.get("direct", False)))
-        if not attend:
-            return
+    def note_human(self) -> None:
+        """Someone just addressed the robot."""
         self.last_user_at = self.bus.clock.monotonic()
         self._wake_at = None
-        self._unanswered = 0
+        self.pacer.human_spoke()
+
+    async def handle_mode_command(self, cleaned: str, correlation_id: str) -> bool:
+        """A spoken switch for this controller ("pause", "be quiet"); True when that is what it was."""
         mode, message = None, ""
         if _RESUME.fullmatch(cleaned):
             mode, message = {"enabled": True, "paused": False}, "Okay, I'll go back to doing my own thing."
@@ -170,33 +146,28 @@ class AutonomyController:
         elif _TALK.fullmatch(cleaned):
             mode, message = {"quiet": False}, "Yay, I'll chat when I find something interesting."
         if mode is None:
-            return
-        event.payload["handled"] = True
-        await self.set_mode(**mode, correlation_id=event.correlation_id or event.id)
+            return False
+        await self.set_mode(**mode, correlation_id=correlation_id)
         await self.bus.emit("robot.response", self.name, {
             "say": message, "sound": "none", "emotion": {"name": "neutral", "intensity": 0.4},
             "actions": [], "backend": "autonomy_control", "status": "completed", "final": True,
-        }, priority=EventPriority.HIGH, correlation_id=event.correlation_id or event.id)
+        }, priority=EventPriority.HIGH, correlation_id=correlation_id)
+        return True
 
     def _on_cancel(self, event: Event) -> None:
-        reason = event.payload.get("reason")
-        if reason in ("user_stop_command", "autonomy_pause"):
+        reason = CancelReason(event.payload.get("reason", CancelReason.OTHER))
+        if reason.pauses_autonomy:
             self.paused = True
             self._wake_at = None
             self.reason = "paused by user"
-        elif reason in ("user_barge_in", "manual_control"):
+        elif reason.is_human_activity:
             self.last_user_at = self.bus.clock.monotonic()
 
     def _scene_changed(self) -> bool:
         """Compare camera thumbnails while the robot holds still (a moving camera always 'changes')."""
-        if self.camera is None:
-            return False
         pose = self.body.pose()
         key = (round(pose.x_mm), round(pose.y_mm), round(pose.heading_deg), round(pose.head_tilt_deg))
-        try:
-            thumb = self.camera.thumbnail()
-        except Exception:
-            return False
+        thumb = self.camera.thumbnail()
         if key != self._view_key:
             self._view_key = key
             self._change.reset(thumb)
@@ -210,12 +181,9 @@ class AutonomyController:
         now = self.bus.clock.monotonic()
         dt, self._last_tick = now - self._last_tick, now
         sensors = self.body.sensors()
-        unexplored = None
-        if self.spatial_map is not None:
-            pose = self.body.pose()
-            unexplored = self.spatial_map.unseen_fraction_near(pose.x_mm, pose.y_mm, 1500.0)
-        self.drives.step(dt, battery_pct=getattr(sensors, "battery_pct", None),
-                         charging=getattr(sensors, "charging", False), unexplored_fraction=unexplored)
+        pose = self.body.pose()
+        self.drives.step(dt, battery_pct=sensors.battery_pct, charging=sensors.charging,
+                         unexplored_fraction=self.spatial_map.grid.unseen_fraction_near(pose.x_mm, pose.y_mm, 1500.0))
         if not self.running or not self.enabled or self.paused:
             return
         scheduled = self._wake_at is not None and now >= self._wake_at
@@ -227,7 +195,7 @@ class AutonomyController:
         if now - self.last_user_at < self.config.idle_after_s or self.arbiter.fsm.in_follow_up_window():
             self.reason = "giving the human time to talk"
             return
-        if self.audio.is_speaking or (self.audio._utterance_task and not self.audio._utterance_task.done()):
+        if self.audio.busy:
             return
         if sensors.estop_active or sensors.cliff_triggered or sensors.picked_up:
             self.reason = "waiting for safety sensors to clear"
@@ -240,8 +208,7 @@ class AutonomyController:
         elif now >= self.next_decision_at and urgent is not None and self._wake_at is None:
             # A requested wake (the wait tool) defers drive wakes until then; outside events still count.
             trigger, text = f"drive:{urgent[0]}", urgent[1]
-            if self.config.policy == "rules":
-                plan = self._habit(urgent[0])
+            plan = self._habit(urgent[0])
         elif now >= self.next_decision_at and changed:
             trigger, text = "scene_changed", "Something in front of you just changed or moved."
         if trigger is None:

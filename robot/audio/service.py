@@ -27,7 +27,7 @@ from robot.audio.tts import RobotTTSEngine, SynthesizedSpeech
 from robot.audio.vad import VoiceActivityDetector
 from robot.core.bus import EventBus
 from robot.core.clock import RealClock
-from robot.core.events import Event, EventPriority
+from robot.core.events import CancelReason, Event, EventPriority
 from robot.core.service import ServiceHealth
 from robot.face.process import FaceProcessBridge
 
@@ -51,7 +51,7 @@ class AudioService:
         enable_speaker: bool = True,
         enable_mic: bool = False,
         tts_mode: str = "auto",
-        asr_mode: str = "auto",
+        asr: SpeechRecognizer | None = None,
         realtime_sync: bool | None = None,
         mic_array: MicArray | None = None,
     ) -> None:
@@ -67,7 +67,7 @@ class AudioService:
         self.sfx = PetSoundSynthesizer()
         self.tts = RobotTTSEngine(mode=effective_tts_mode)
         self.vad = VoiceActivityDetector()
-        self.asr = SpeechRecognizer(mode=asr_mode)
+        self.asr = asr or SpeechRecognizer()
 
         self.is_speaking: bool = False
         self.muted: bool = False
@@ -195,6 +195,11 @@ class AudioService:
                 payload={"reason": reason},
                 priority=EventPriority.HIGH,
             )
+
+    @property
+    def busy(self) -> bool:
+        """Speaking, or about to."""
+        return self.is_speaking or (self._utterance_task is not None and not self._utterance_task.done())
 
     async def wait_until_done(self, timeout_s: float = 10.0) -> None:
         """Wait for any active speech playback task to complete."""
@@ -592,6 +597,6 @@ class AudioService:
         await self.bus.emit(
             "action.cancel",
             source=self.name,
-            payload={"reason": "user_barge_in"},
+            payload={"reason": CancelReason.BARGE_IN},
             priority=EventPriority.CRITICAL,
         )

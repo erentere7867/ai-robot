@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from robot.cognition.backend import ChatResult, NullBackend, ScriptedBackend
+from robot.body.hal import BodyCapabilities
+from robot.cognition.backend import ChatResult, NullBackend, ToolCall
+from robot.cognition.repair import repair_call
 from robot.core.clock import RealClock, ReplayClock
 from robot.core.config import RobotConfig
 from robot.main import RobotHarness
 from robot.perception.camera import CameraRig, Frame, encode_png
-from robot.perception.detector import Detection
+from robot.perception.detection import Detection
 from robot.perception.geometry import CameraModel
-from robot.world.spatial_map import label_score
+from robot.platform import Platform
+from robot.sim.platform import build_sim
+from robot.skills.base import SkillResult
+from robot.world.labels import label_score
 
 TINY_PNG = encode_png(np.zeros((4, 4, 3), dtype=np.uint8))
 
@@ -39,10 +45,23 @@ def make_harness(tmp_path: Path, backend: Any = None, *, real: bool = False, das
                  clock: Any = None, fake_perception: bool = True, config: RobotConfig | None = None,
                  person: bool = False, **kwargs: Any) -> RobotHarness:
     """A harness on the simulated robot. The room's person (and their voice) only with `person=True`."""
+    eye = GroundTruthDetector()
+
+    def platform(config: RobotConfig, bus: Any, clock: Any, capabilities: BodyCapabilities,
+                 rig: tuple[CameraModel, ...], localizer: Any) -> Platform:
+        built = build_sim(config, bus, clock, capabilities, rig, localizer)
+        if fake_perception:
+            eye.sandbox = built.sandbox
+            built.camera = CameraRig([FakeCamera(built.body, clock, model) for model in rig])
+            built.detector = eye
+        return built
+
     harness = RobotHarness(
         config or make_config(tmp_path),
         clock=clock or (RealClock() if real else ReplayClock()),
         backend=backend if backend is not None else NullBackend(),
+        platform_factory=platform,
+        vlm_detector=eye if fake_perception else None,
         enable_dashboard=dashboard,
         dashboard_port=0,
         tts_mode="warble",
@@ -52,24 +71,7 @@ def make_harness(tmp_path: Path, backend: Any = None, *, real: bool = False, das
     harness.face_bridge._send_udp = lambda payload: None
     if not person:
         harness.sandbox.remove_object("person")
-    if fake_perception:
-        use_ground_truth_perception(harness)
     return harness
-
-
-def use_ground_truth_perception(harness: RobotHarness) -> GroundTruthDetector:
-    """Swap the MuJoCo render + VLM detector for a cheap camera and a ground-truth detector."""
-    detector = GroundTruthDetector(harness.sandbox)
-    harness.camera = CameraRig([FakeCamera(harness.body, harness.clock, model) for model in harness.rig])
-    harness.skill_context.camera = harness.camera
-    harness.skill_context.detector = detector
-    harness.detector = detector
-    harness.autonomy.camera = harness.camera
-    harness.fast.detector = detector
-    harness.fast.camera = harness.camera
-    harness.fast.cameras = list(harness.camera.cameras)
-    harness.fast.streaming = True
-    return detector
 
 
 class FakeCamera:
@@ -80,27 +82,30 @@ class FakeCamera:
         self.clock = clock
         self.model = model or CameraModel()
         self.captures = 0
-        self.thumb = np.zeros((24, 32), dtype=np.float32)
 
     def capture(self) -> Frame:
         self.captures += 1
-        return Frame(TINY_PNG + bytes([self.captures % 256]), self.body.pose(), self.model,
-                     self.clock.monotonic(), self.thumb)
+        frame = Frame(TINY_PNG + bytes([self.captures % 256]), self.body.pose(), self.model, self.clock.monotonic())
+        frame._thumbnail = np.zeros((24, 32), dtype=np.float32)
+        return frame
 
-    def thumbnail(self) -> np.ndarray:
-        return self.thumb
+    def close(self) -> None:
+        pass
 
 
 class GroundTruthDetector:
-    """Detections built from the simulator's projected ground-truth boxes (what an ideal VLM would say)."""
+    """Detections built from the simulator's projected ground-truth boxes (what an ideal detector would say)."""
 
-    def __init__(self, sandbox: Any, *, labels: dict[str, str] | None = None) -> None:
+    def __init__(self, sandbox: Any = None, *, labels: dict[str, str] | None = None) -> None:
         self.sandbox = sandbox
         self.labels = labels or {}
         self.calls: list[str | None] = []
 
-    async def detect(self, frame: Frame, query: str | None = None) -> list[Detection]:
-        self.calls.append(query)
+    @property
+    def vocabulary(self) -> list[str]:
+        return [self.labels.get(o["id"], o["label"].lower()) for o in self.sandbox.list_objects()]
+
+    def _boxes(self, frame: Frame, query: str | None) -> list[Detection]:
         out = []
         for d in self.sandbox.detect_objects(frame.pose, frame.model):
             label = self.labels.get(d.id, d.label.lower())
@@ -109,19 +114,80 @@ class GroundTruthDetector:
             out.append(Detection(label, d.bbox))
         return out
 
+    def detect_frame(self, frame: Frame) -> list[Detection]:
+        self.calls.append(None)
+        return self._boxes(frame, None)
+
+    async def detect(self, frame: Frame, query: str | None = None) -> list[Detection]:
+        self.calls.append(query)
+        return self._boxes(frame, query)
+
+    async def name_object(self, frame: Frame, bbox: tuple[float, float, float, float]) -> str | None:
+        return None
+
 
 class FixedDetector:
     """Always returns the same detections (or a queue of lists, one per call)."""
 
+    vocabulary: list[str] = []
+
     def __init__(self, *views: list[Detection]) -> None:
         self.views = list(views)
         self.calls: list[str | None] = []
+
+    def detect_frame(self, frame: Frame) -> list[Detection]:
+        self.calls.append(None)
+        if len(self.views) > 1:
+            return list(self.views.pop(0))
+        return list(self.views[0]) if self.views else []
 
     async def detect(self, frame: Frame, query: str | None = None) -> list[Detection]:
         self.calls.append(query)
         if len(self.views) > 1:
             return list(self.views.pop(0))
         return list(self.views[0]) if self.views else []
+
+    async def name_object(self, frame: Frame, bbox: tuple[float, float, float, float]) -> str | None:
+        return None
+
+
+class ScriptedBackend:
+    """Deterministic backend for tests: each entry is a reply, or a callable receiving the messages.
+
+    Reply shorthand: a string is plain text; a dict {"call": name, "args": {...}} is one tool call;
+    {"calls": [[name, args], ...]} is several; {"say": text} is plain text.
+    """
+
+    name = "scripted"
+
+    def __init__(self, script: list[Any] | None = None, *, default: Any = "") -> None:
+        self.script = list(script or [])
+        self.default = default
+        self.requests: list[dict[str, Any]] = []
+        self._counter = 0
+
+    async def is_available(self) -> bool:
+        return True
+
+    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
+        self.requests.append({"messages": json.loads(json.dumps(messages, default=str)), "tools": tools,
+                              "tool_choice": tool_choice})
+        entry = self.script.pop(0) if self.script else self.default
+        if callable(entry):
+            entry = entry(messages, tools)
+        return self._to_result(entry)
+
+    def _to_result(self, entry: Any) -> ChatResult:
+        if isinstance(entry, ChatResult):
+            return entry
+        if isinstance(entry, str):
+            return ChatResult(entry, backend_name=self.name)
+        calls = []
+        pairs = entry.get("calls") or ([[entry["call"], entry.get("args", {})]] if "call" in entry else [])
+        for name, args in pairs:
+            self._counter += 1
+            calls.append(ToolCall(f"call_{self._counter}", name, dict(args)))
+        return ChatResult(str(entry.get("say", "")), calls, backend_name=self.name)
 
 
 class GatedBackend(ScriptedBackend):
@@ -150,12 +216,22 @@ class GatedBackend(ScriptedBackend):
         return await super().chat(messages, tools=tools, max_tokens=max_tokens)
 
 
+async def run_skill(harness: RobotHarness, name: str, **args: Any) -> SkillResult:
+    """Call a skill as the agent does: repaired from what the human said (`harness.asked`), if anything."""
+    call = repair_call(name, args, getattr(harness, "asked", ""), harness.skill_context)
+    if call.refusal:
+        return SkillResult(False, call.refusal, status="rejected")
+    result = await harness.skills.run(call.tool, call.args, harness.skill_context)
+    result.message += call.note
+    return result
+
+
 def clear_scene(sandbox: Any, keep: tuple[str, ...] = (), spatial_map: Any = None) -> None:
     for obj in list(sandbox.list_objects()):
         if obj["id"] not in keep:
             sandbox.remove_object(obj["id"])
     if spatial_map is not None:
-        spatial_map.forget_range_hits()  # range hits on the removed objects would be ghost obstacles
+        spatial_map.grid.clear_hits()  # range hits on the removed objects would be ghost obstacles
 
 
 def last_user_text(messages: list[dict[str, Any]]) -> str:

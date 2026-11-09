@@ -11,7 +11,7 @@
 //   * command watchdog: no velocity command for 300 ms -> stop
 //   * 50 Hz telemetry to Linux: pose, velocities, raw ticks, range, fault flags, battery
 //
-// Link: Arduino Router Bridge (msgpack-RPC; the Linux side is robot/body/mcu_body.py over
+// Link: Arduino Router Bridge (msgpack-RPC; the Linux side is robot/hardware/ventuno_body.py over
 // /var/run/arduino-router.sock). Methods this sketch provides, all as notifications (no reply):
 //   cmd_vel(v_mm_s, w_mdeg_s)   head(tilt_ddeg)   stop()   estop(on)   reset_odom()
 // It notifies `telemetry` with:

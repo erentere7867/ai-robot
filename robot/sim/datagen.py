@@ -21,7 +21,7 @@ import mujoco
 import numpy as np
 
 from robot.body.hal import BodyPose
-from robot.world.sandbox import _GL, SimulationSandbox
+from robot.sim.sandbox import _GL, SimulationSandbox
 
 # The room's known objects, people, and "object": anything else (distractors here, unknown things on the
 # robot). The fast layer tracks unknown objects too, and the VLM names them when it matters.
@@ -59,7 +59,7 @@ class SceneRandomizer:
         self.sandbox = sandbox
         self.rng = random.Random(seed)
         self.base_ids = [oid for oid in OBJECT_CLASS if sandbox.get_object(oid) is not None]
-        st = sandbox._state()
+        st = sandbox.mujoco_state()
         self._model = st["model"]
         self._light0 = self._model.light_diffuse.copy()
         self._ambient0 = self._model.vis.headlight.ambient.copy()

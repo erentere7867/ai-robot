@@ -30,7 +30,7 @@ Python 3.11+, a llama.cpp `llama-server` build, and the model files in `config/r
 (`LFM3-VL-2B-Q4_K_M.gguf` + `mmproj-LFM3-VL-2B-F16.gguf`).
 
 ```bash
-python -m pip install -e ".[dev,audio,face]"
+python -m pip install -e ".[sim,dev,audio,face]"
 python -m robot                    # console + dashboard at http://127.0.0.1:8090 (starts llama-server)
 python scripts/try_robot.py "what's behind you?" "come here" "do a full circle around the box behind you"
 ```
@@ -56,10 +56,10 @@ Testing spans unit-level subsystem tests up to full simulator scenario grading:
 
 ### 1. Subsystem unit & integration tests (`pytest`)
 
-330 tests without needing a model server or hardware, completing in < 1 minute:
+No model server or hardware needed, about a minute:
 
 ```bash
-python -m pytest -q                                              # full suite (330 tests)
+python -m pytest -q                                              # full suite
 
 # Or test individual subsystems:
 pytest tests/test_control.py                                     # 50 Hz control loop, behaviors, safety monitor
@@ -106,15 +106,18 @@ python scripts/ventuno/calibrate_camera.py front                # camera calibra
 
 ```
 robot/
-  body/         SimBody (kinematic), PhysicsBody (MuJoCo), VentunoBody (STM32H5 over the Arduino Router)
+  platform.py   the robot the harness runs on: a body and its senses, simulated or real
+  body/         the body interface every robot implements (HAL), reflexes, dimensions from body.yaml
+  sim/          the simulated robot: kinematic and MuJoCo bodies, room, cameras, lidar, voice, training data
+  hardware/     the real robot: VENTUNO Q MCU link, MIPI/USB cameras, LD19 lidar
   control/      fast loop (control + perception threads), behaviours, collision monitor
-  perception/   camera rig, geometry, YOLO (NCNN) and VLM detectors, lidar, training data
-  world/        spatial map (objects, people, speaker, occupancy), localization, simulator
+  perception/   camera rig, geometry, the trained detector (NCNN), lidar scans
+  world/        spatial map (objects, people, speaker), occupancy grid, labels, localization
   audio/        speech in/out, voice direction (doa.py), sounds
-  cognition/    agent loop, prompts, to-do list for multi-part requests, llama.cpp client
+  cognition/    agent loop, prompts, call repair, to-do list for multi-part requests, llama.cpp client, VLM eye
   skills/       what the model can call: go_to, follow, observe, circle_around, express, remember, ...
   memory/       long-term memory store and consolidation
-  behavior/     attention, arbitration, autonomy and drives, emotion
+  interaction/  attention and input routing, arbitration, autonomy and drives, emotion
   eval/         simulator scenarios and ground-truth graders
 config/         robot.yaml (laptop), robot.ventuno.yaml (robot), body.yaml (geometry, sensors), MuJoCo model
 firmware/       ventuno_mcu: the STM32H5 sketch

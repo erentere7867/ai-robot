@@ -119,10 +119,6 @@ class MemoryConsolidator:
         """Extract durable facts (with provenance and importance) from a user statement."""
         return extract_fact_candidates(user_text)
 
-    def extract_candidates(self, user_text: str) -> list[tuple[str, str]]:
-        """Extract `(subject, normalized_fact)` pairs from a user statement."""
-        return [(c.subject, c.text) for c in self.extract_candidate_facts(user_text)]
-
     def compress_episodes(self) -> dict[str, int]:
         """Fold old episodes into per-day summaries; compress sooner when near the episode cap."""
         older_than = self.episode_compress_after_s

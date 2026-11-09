@@ -19,6 +19,41 @@ class EventPriority(IntEnum):
     TELEMETRY = 40  # High-frequency sensor readings, periodic health pings
 
 
+class CancelReason(StrEnum):
+    """Why `action.cancel` was emitted; what each reason ends is decided here, once."""
+
+    NEW_TURN = "new_turn"
+    AUTONOMOUS_START = "autonomous_start"
+    BARGE_IN = "user_barge_in"
+    USER_STOP = "user_stop"
+    STOP_COMMAND = "user_stop_command"
+    AUTONOMY_PAUSE = "autonomy_pause"
+    MANUAL = "manual_control"
+    ESTOP = "estop"
+    FORGET = "forget"
+    REQUEST_CANCELLED = "request_cancelled"
+    OTHER = "cancelled"
+
+    @property
+    def ends_turn(self) -> bool:
+        """A new turn replaces the old one itself; every other reason stops it."""
+        return self not in (CancelReason.NEW_TURN, CancelReason.AUTONOMOUS_START)
+
+    def ends_behavior(self, persistent: bool) -> bool:
+        """Starting to talk, or a new request, does not end following; a stop does."""
+        if not self.ends_turn:
+            return False
+        return not (persistent and self is CancelReason.BARGE_IN)
+
+    @property
+    def pauses_autonomy(self) -> bool:
+        return self in (CancelReason.STOP_COMMAND, CancelReason.AUTONOMY_PAUSE)
+
+    @property
+    def is_human_activity(self) -> bool:
+        return self in (CancelReason.BARGE_IN, CancelReason.MANUAL)
+
+
 class DropPolicy(StrEnum):
     """Backpressure behavior when a subscriber queue is full."""
 

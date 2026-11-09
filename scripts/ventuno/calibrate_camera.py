@@ -5,7 +5,7 @@ distances all over the image, and press space for each view (20 or more); q fini
     python scripts/ventuno/calibrate_camera.py rear_left            # CSI camera of that name (body.yaml)
     python scripts/ventuno/calibrate_camera.py front --source usb
 
-Writes ~/robot-runtime/calibration/<camera>.npz (K, D, size), which robot/perception/camera.py loads.
+Writes ~/robot-runtime/calibration/<camera>.npz (K, D, size), which robot/hardware/sensors.py loads.
 """
 
 from __future__ import annotations

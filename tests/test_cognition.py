@@ -7,19 +7,15 @@ import json
 
 import httpx
 import pytest
+from robot_fakes import ScriptedBackend
 
 from robot.body.hal import BodyPose
-from robot.cognition.agent import AgentLoop, recover_text_tool_calls, speakable
-from robot.cognition.backend import (
-    BackendUnavailable,
-    ChatResult,
-    NullBackend,
-    ScriptedBackend,
-    ToolCall,
-    UnavailableBackend,
-)
+from robot.cognition.agent import AgentLoop
+from robot.cognition.backend import BackendUnavailable, ChatResult, NullBackend, ToolCall
+from robot.cognition.guards import speakable
 from robot.cognition.llamacpp import AutoBackend, LlamaCppBackend
-from robot.cognition.prompts import PromptBuilder
+from robot.cognition.prompts import BACKGROUND_HEADER, PromptBuilder
+from robot.cognition.textcalls import recover_text_tool_calls
 from robot.core.clock import ReplayClock
 from robot.core.config import AgentConfig, ContextBudgetConfig, LLMConfig
 from robot.perception.camera import Frame
@@ -27,15 +23,16 @@ from robot.perception.geometry import CameraModel
 from robot.skills.base import Skill, SkillContext, SkillRegistry, SkillResult
 from robot.world.spatial_map import SpatialMap, TrackedObject
 
-TOOLS = {"observe", "move", "bump", "wait", "secret"}
+TOOLS = {"observe", "move", "bump", "wait"}
 
 
 class Probe:
     """A tiny tool set that records what really ran."""
 
-    def __init__(self) -> None:
+    def __init__(self, move_report_is_answer: bool = False) -> None:
         self.ran: list[tuple[str, dict]] = []
         self.frames = 0
+        self.move_report_is_answer = move_report_is_answer
 
     def registry(self) -> SkillRegistry:
         registry = SkillRegistry()
@@ -58,27 +55,33 @@ class Probe:
             ctx.wake_request_s = seconds
             return SkillResult(True, "ok")
 
-        async def secret(ctx: SkillContext) -> SkillResult:
-            self.ran.append(("secret", {}))
-            return SkillResult(True, "done")
-
-        registry.add(Skill("observe", "Look.", {}, observe))
+        registry.add(Skill("observe", "Look.", {}, observe, acts=True, idempotent=True))
         registry.add(Skill("move", "Drive.", {"direction": {"type": "string", "enum": ["forward", "backward"]},
                                                "distance_cm": {"type": "number", "minimum": 5, "maximum": 200}},
-                           move, ["direction"]))
+                           move, ["direction"], acts=True, ends_part=True,
+                           report_is_answer=self.move_report_is_answer))
         registry.add(Skill("bump", "Always bumps.", {"n": {"type": "number"}}, bump, ["n"]))
         registry.add(Skill("wait", "Wait.", {"seconds": {"type": "number", "minimum": 5, "maximum": 600}}, wait,
                            ["seconds"]))
-        registry.add(Skill("secret", "Human only.", {}, secret, background_ok=False))
         return registry
+
+
+class _MovingBody:
+    """Each look at the pose is from somewhere new; a repeated call is never "from the same spot"."""
+
+    x = 0.0
+
+    def pose(self) -> BodyPose:
+        self.x += 500.0
+        return BodyPose(self.x)
 
 
 def make_ctx(objects: dict[str, TrackedObject] | None = None, cancelled=lambda: False) -> SkillContext:
     clock = ReplayClock()
     spatial = SpatialMap(clock)
     spatial.objects.update(objects or {})
-    return SkillContext(bus=None, executor=None, body=None, camera=None, detector=None, spatial_map=spatial,
-                        planner=None, memory=None, emotion=None, clock=clock, registry=None, cancelled=cancelled)
+    return SkillContext(bus=None, body=_MovingBody(), camera=None, vlm=None, spatial_map=spatial, planner=None,
+                        memory=None, emotion=None, clock=clock, capabilities=None, cancelled=cancelled)
 
 
 def request(text: str = "do it", history: list[dict] | None = None) -> list[dict]:
@@ -87,7 +90,7 @@ def request(text: str = "do it", history: list[dict] | None = None) -> list[dict
 
 
 async def run(script, *, background=False, probe=None, ctx=None, messages=None, limit=3300, max_steps=14,
-              events=None, fast_finish=False):
+              events=None, said="do it"):
     probe = probe or Probe()
     backend = script if hasattr(script, "chat") else ScriptedBackend(script)
 
@@ -95,10 +98,12 @@ async def run(script, *, background=False, probe=None, ctx=None, messages=None, 
         if events is not None:
             events.append((kind, payload))
 
-    loop = AgentLoop(backend, probe.registry(), AgentConfig(max_steps=max_steps, fast_finish=fast_finish),
-                     prompt_limit_tokens=limit,
-                     on_event=on_event)
-    result = await loop.run(messages or request(), ctx or make_ctx(), background=background)
+    budget = ContextBudgetConfig(total_tokens=limit + 300 + 1100, response_reserve_tokens=300, tools_tokens=1100)
+    loop = AgentLoop(backend, probe.registry(), AgentConfig(max_steps=max_steps), budget=budget, on_event=on_event)
+    if messages is not None:
+        said = next((m["content"].rsplit("]\n", 1)[-1] for m in reversed(messages) if m.get("role") == "user"
+                     and "[Situation]" in str(m.get("content"))), said)
+    result = await loop.run(messages or request(), ctx or make_ctx(), request="" if background else said)
     return result, backend, probe
 
 
@@ -233,13 +238,20 @@ async def test_failed_call_skips_the_rest_of_its_batch():
     assert result.say == "The bumper stopped me."
 
 
+class _Offline:
+    name = "offline"
+
+    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto"):
+        raise BackendUnavailable("No language model is available")
+
+
 async def test_backend_unavailable_reports_offline_and_never_acts():
     events = []
-    result, _, probe = await run(UnavailableBackend(), events=events)
+    result, _, probe = await run(_Offline(), events=events)
     assert result.status == "unavailable" and probe.ran == []
     assert "offline" in result.say
     assert events[0][0] == "cognition.unavailable"
-    background, _, _ = await run(UnavailableBackend(), background=True)
+    background, _, _ = await run(_Offline(), background=True)
     assert background.status == "unavailable" and background.say == ""
 
 
@@ -266,13 +278,6 @@ async def test_only_the_newest_camera_image_stays_in_context():
     assert any("(image no longer shown)" in str(m.get("content")) for m in fourth)
     assert fourth[-1]["role"] == "user" and "camera view after observe" in fourth[-1]["content"][1]["text"]
     assert result.say == "Both views checked."
-
-
-async def test_background_turn_cannot_use_human_only_tools():
-    result, backend, probe = await run([{"call": "secret"}, ""], background=True)
-    assert probe.ran == []
-    tool = next(m for m in backend.requests[1]["messages"] if m["role"] == "tool")
-    assert json.loads(tool["content"])["result"] == "Not available on your own."
 
 
 async def test_wait_request_and_expression_reach_the_turn_result():
@@ -323,14 +328,15 @@ def big_history(turns: int = 3) -> list[dict]:
 @pytest.mark.parametrize("limit", [1300, 1500, 2000, 2600])
 def test_fit_never_orphans_tool_messages(limit):
     probe = Probe()
-    loop = AgentLoop(ScriptedBackend(), probe.registry(), AgentConfig(), prompt_limit_tokens=limit)
+    loop = AgentLoop(ScriptedBackend(), probe.registry(), AgentConfig(),
+                     budget=ContextBudgetConfig(total_tokens=limit + 1400, response_reserve_tokens=300, tools_tokens=1100))
     messages = request("go", big_history())
     for k in range(6):
         call = {"id": f"n{k}", "type": "function",
                 "function": {"name": "move", "arguments": json.dumps({"direction": "forward"})}}
         messages += [{"role": "assistant", "content": "", "tool_calls": [call]},
                      {"role": "tool", "tool_call_id": f"n{k}", "content": json.dumps({"ok": True, "result": "y" * 300})}]
-    loop._fit(messages)
+    loop.fit(messages)
     assert messages[0]["role"] == "system"
     assert any("[Situation]" in str(m.get("content")) for m in messages)
     assert_no_orphans(messages)
@@ -396,19 +402,10 @@ def test_background_header_situation_and_clear(tmp_path):
 
 
 # ---- backends ----------------------------------------------------------------------------------------
-async def test_scripted_and_null_backends():
-    scripted = ScriptedBackend(["hi", {"call": "observe"}, {"calls": [["turn", {"direction": "left"}]], "say": "ok"},
-                                lambda messages, tools: f"{len(messages)} {tools is None}"])
-    assert (await scripted.chat([])).content == "hi"
-    assert (await scripted.chat([])).tool_calls[0].name == "observe"
-    third = await scripted.chat([])
-    assert third.content == "ok" and third.tool_calls[0].arguments == {"direction": "left"}
-    assert (await scripted.chat([{}, {}])).content == "2 True"
-    assert (await scripted.chat([])).content == ""  # default once the script is used up
-
+async def test_null_backend_talks_but_never_moves():
     null = NullBackend()
     assert (await null.chat([{"role": "user", "content": "x"}])).content == "[]"
-    assert (await null.chat([{"role": "user", "content": "[Background event] x"}], tools=[])).content == ""
+    assert (await null.chat([{"role": "user", "content": f"{BACKGROUND_HEADER} x"}], tools=[])).content == ""
     assert (await null.chat([{"role": "tool", "content": "{}"}], tools=[])).content == "Done."
     assert not (await null.chat([{"role": "user", "content": "go"}], tools=[])).tool_calls
 
@@ -505,7 +502,7 @@ async def test_auto_backend_backoff_prevents_repeated_failed_requests():
             return ChatResult("ok", backend_name="llamacpp:test")
 
     recovered = AutoBackend(Healthy())
-    assert (await recovered.chat([])).content == "ok" and recovered.last_used_backend == "llamacpp:test"
+    assert (await recovered.chat([])).content == "ok"
 
 
 async def test_reply_claiming_an_action_without_a_tool_is_nudged_once():
@@ -702,7 +699,7 @@ async def test_warm_up_reads_the_system_prompt_and_tools_once():
 
 async def test_fast_finish_speaks_the_skill_report_without_another_model_call():
     script = [ChatResult(content="", tool_calls=[ToolCall("c1", "move", {"direction": "forward"})])]
-    result, backend, probe = await run(script, fast_finish=True)
+    result, backend, probe = await run(script, probe=Probe(move_report_is_answer=True))
     assert result.say == "Moved forward 30 cm." and result.status == "completed"
     assert len(backend.requests) == 1 and probe.ran == [("move", {"direction": "forward", "distance_cm": 30.0})]
 
@@ -710,6 +707,6 @@ async def test_fast_finish_speaks_the_skill_report_without_another_model_call():
 async def test_fast_finish_never_cuts_a_several_part_request_short():
     script = [ChatResult(content="", tool_calls=[ToolCall("c1", "move", {"direction": "forward"})]),
               ChatResult(content="", tool_calls=[ToolCall("c2", "move", {"direction": "backward"})])]
-    result, backend, _ = await run(script, fast_finish=True,
+    result, backend, _ = await run(script, probe=Probe(move_report_is_answer=True),
                                    messages=request("move forward and then move backward"))
     assert len(backend.requests) == 2 and result.say == "Moved backward 30 cm."

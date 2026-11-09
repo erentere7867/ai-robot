@@ -181,7 +181,6 @@ class FaceProcessBridge:
         self.set_theme(theme)
 
     async def _on_memory_updated(self, event: Event) -> None:
-        # Automatically honor memories about preferred robot eye color!
         rec = event.payload.get("record") or {}
         subj = str(rec.get("subject", "")).lower()
         content = str(rec.get("content", "")).lower()
@@ -236,7 +235,6 @@ def run_standalone_face_loop(
                     elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
                         running = False
 
-            # Drain all pending UDP state packets without blocking
             while True:
                 try:
                     data, _addr = sock.recvfrom(65535)

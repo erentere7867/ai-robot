@@ -10,6 +10,10 @@ from typing import Any
 
 from robot.core.config import ContextBudgetConfig
 
+SITUATION_HEADER = "[Situation]"
+BACKGROUND_HEADER = "[Background event - no human is talking to you]"
+HUMAN_HEADER = "[Human says]"
+
 
 def estimate_tokens(text: str) -> int:
     """Conservative UTF-8 heuristic; the server still enforces its real context limit."""
@@ -157,10 +161,10 @@ class PromptBuilder:
             lines.append("Recent activity: " + "; ".join(recent))
         if extra:
             lines.append(extra)
-        return "[Situation]\n" + "\n".join(lines)
+        return f"{SITUATION_HEADER}\n" + "\n".join(lines)
 
     def build(self, request_text: str, situation: str, *, background: bool) -> list[dict[str, Any]]:
-        header = "[Background event - no human is talking to you]" if background else "[Human says]"
+        header = BACKGROUND_HEADER if background else HUMAN_HEADER
         user = {"role": "user", "content": f"{situation}\n\n{header}\n{request_text.strip()}"}
         messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         for exchange in self.history:  # already within budget (see _prune), unchanged since the last request

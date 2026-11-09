@@ -64,11 +64,11 @@ class DriveSystem:
         if not autonomous:
             self.minutes_since_human = 0.0
             self.drives["social"].level = 0.0
-        for entry in getattr(result, "tool_log", []):
+        for entry in result.tool_log:
             for name, amounts in SATISFIERS.items():
                 if entry.get("ok") and entry.get("tool") in amounts:
                     self.drives[name].level = max(0.0, self.drives[name].level - amounts[entry["tool"]])
-        if autonomous and not getattr(result, "tool_log", None):
+        if autonomous and not result.tool_log:
             # Choosing to do nothing still settles the urge for a while.
             for drive in self.drives.values():
                 if drive.level >= drive.threshold:

@@ -1,4 +1,4 @@
-"""Grid path planning (A* + line-of-sight smoothing) and camera coverage tracking for exploration."""
+"""Grid path planning: A* over an inflated occupancy grid, smoothed by line of sight."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class PlannedPath:
     ok: bool
     waypoints: list[tuple[float, float]]
     length_mm: float = 0.0
-    message: str = ""
+    outside: bool = False  # an endpoint is outside the mapped area
 
 
 class GridPlanner:
@@ -41,7 +41,7 @@ class GridPlanner:
         *,
         room_half_extent_mm: float = 1500.0,
         resolution_mm: float = 40.0,
-        robot_radius_mm: float = 181.0,  # circumscribed radius of the 282 x 228 mm footprint
+        robot_radius_mm: float,
         clearance_mm: float = 60.0,  # room to turn in place and to curve between waypoints
     ) -> None:
         self.half = float(room_half_extent_mm)
@@ -121,23 +121,6 @@ class GridPlanner:
                 return self.to_world(best[1])
         return None
 
-    def _line_free(
-        self, grid: np.ndarray, a: tuple[int, int], b: tuple[int, int], *, allow_escape: bool = False
-    ) -> bool:
-        """Bresenham-style check; `allow_escape` tolerates the initial blocked run when leaving an inflated zone."""
-        steps = max(abs(b[0] - a[0]), abs(b[1] - a[1]), 1) * 2
-        escaping = allow_escape
-        for k in range(steps + 1):
-            t = k / steps
-            i = int(round(a[0] + (b[0] - a[0]) * t))
-            j = int(round(a[1] + (b[1] - a[1]) * t))
-            if grid[i, j]:
-                if not escaping:
-                    return False
-            else:
-                escaping = False
-        return True
-
     def line_is_free(self, grid, start, goal, *, allow_escape=False) -> bool:
         """Check a segment from actual odometry, rather than rounded cell centres."""
         steps = max(1, int(math.ceil(math.hypot(goal[0] - start[0], goal[1] - start[1]) / (self.res / 4))))
@@ -163,11 +146,11 @@ class GridPlanner:
     ) -> PlannedPath:
         """Plan a smoothed collision-free path from `start` to `goal` (both in mm)."""
         if any(not math.isfinite(v) or abs(v) >= self.half for v in (*start, *goal)):
-            return PlannedPath(False, [], message="Route endpoint is outside the mapped area.")
+            return PlannedPath(False, [], outside=True)
         grid = self.build_grid(obstacles, points=points)
         goal_free = self.nearest_free(grid, *goal, max_r_mm=goal_tolerance_mm)
         if goal_free is None:
-            return PlannedPath(False, [], message="Goal is blocked by obstacles or walls.")
+            return PlannedPath(False, [])
         s = self.to_cell(*start)
         g = self.to_cell(*goal_free)
         # The robot may currently sit inside an inflated zone (e.g. right after approaching
@@ -175,8 +158,7 @@ class GridPlanner:
         start_blocked = bool(grid[s])
         cells = self._astar(grid, s, g, allow_start_escape=start_blocked)
         if cells is None:
-            return PlannedPath(False, [], message="No collision-free route found.")
-        # String-pull smoothing
+            return PlannedPath(False, [])
         smoothed = [cells[0]]
         idx = 0
         while idx < len(cells) - 1:
@@ -198,7 +180,7 @@ class GridPlanner:
         for p in pts:
             length += math.hypot(p[0] - prev[0], p[1] - prev[1])
             prev = p
-        return PlannedPath(True, pts, length_mm=length, message="ok")
+        return PlannedPath(True, pts, length_mm=length)
 
     def _astar(
         self, grid: np.ndarray, s: tuple[int, int], g: tuple[int, int], *, allow_start_escape: bool
@@ -246,38 +228,3 @@ class GridPlanner:
                     h = math.hypot(g[0] - ni, g[1] - nj)
                     heapq.heappush(open_heap, (nc + h, nc, nxt))
         return None
-
-
-class CoverageMap:
-    """Tracks which floor cells the head camera has already looked at (for frontier-style exploration)."""
-
-    def __init__(self, *, room_half_extent_mm: float = 1500.0, resolution_mm: float = 100.0) -> None:
-        self.half = float(room_half_extent_mm)
-        self.res = float(resolution_mm)
-        self.n = int(math.ceil(2.0 * self.half / self.res))
-        self.seen = np.zeros((self.n, self.n), dtype=bool)
-        centers = -self.half + (np.arange(self.n) + 0.5) * self.res
-        self._xs = np.broadcast_to(centers[:, None], (self.n, self.n))
-        self._ys = np.broadcast_to(centers[None, :], (self.n, self.n))
-
-    def reset(self) -> None:
-        self.seen[:] = False
-
-    def mark_view(
-        self, cam_x_mm: float, cam_y_mm: float, heading_deg: float, *, hfov_deg: float, range_mm: float
-    ) -> None:
-        dx = self._xs - cam_x_mm
-        dy = self._ys - cam_y_mm
-        dist = np.hypot(dx, dy)
-        ang = np.degrees(np.arctan2(dy, dx)) - heading_deg
-        ang = (ang + 180.0) % 360.0 - 180.0
-        # Floor closer than ~250 mm is below the camera's view cone
-        self.seen |= (dist <= range_mm) & (dist >= 250.0) & (np.abs(ang) <= 0.5 * hfov_deg)
-
-    @property
-    def fraction_seen(self) -> float:
-        return float(self.seen.mean())
-
-    def unseen_near(self, x_mm: float, y_mm: float, radius_mm: float) -> int:
-        mask = (self._xs - x_mm) ** 2 + (self._ys - y_mm) ** 2 <= radius_mm * radius_mm
-        return int(np.count_nonzero(mask & ~self.seen))

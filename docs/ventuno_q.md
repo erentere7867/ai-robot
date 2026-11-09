@@ -16,7 +16,7 @@ Linux, and the Linux side is itself split so that thinking can never delay steer
 | 16 GB LPDDR5-6400 | ~51 GB/s | room for a bigger model; decoding speed is bandwidth-bound |
 | 3x MIPI CSI | three cameras at once | the front, rear-left and rear-right cameras |
 | STM32H5F5 (Cortex-M33, 250 MHz) | the real-time controller | `firmware/ventuno_mcu`: wheels, odometry, reflexes, watchdog |
-| Arduino Router | msgpack-RPC between the two | `robot/body/ventuno_body.py` over `/var/run/arduino-router.sock` |
+| Arduino Router | msgpack-RPC between the two | `robot/hardware/ventuno_body.py` over `/var/run/arduino-router.sock` |
 
 ## Parts
 
@@ -123,6 +123,6 @@ true pose, the corrected pose 31 mm / 0.7°.
 Nothing here has run on a VENTUNO Q. The firmware compiles against the documented Router Bridge API
 (`Bridge.provide_safe`, `Bridge.notify`) and the Linux side against the router's msgpack-RPC protocol, both as
 published for the UNO Q; neither has met the real board. Expect to adjust pins, encoder directions, gains
-(`KFF`, `KP`, `KI`), the camera pipeline (`robot/perception/camera.py` tries Qualcomm's `qtiqmmfsrc`, then
+(`KFF`, `KP`, `KI`), the camera pipeline (`robot/hardware/sensors.py` tries Qualcomm's `qtiqmmfsrc`, then
 `libcamerasrc`; `runtime.camera: usb` is the safe start), the microphone channel order (match
 `positions_mm` in `body.yaml` to how the array numbers its microphones) and the detector's Vulkan driver.

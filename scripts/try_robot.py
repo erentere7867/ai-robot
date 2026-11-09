@@ -82,17 +82,17 @@ async def main(argv: list[str] | None = None) -> int:
     await harness.start()
     try:
         for text in args.messages:
-            truth = getattr(harness.body, "true_pose", harness.body.pose)()
+            truth = harness.body.true_pose()
             print(f"\nHUMAN: {text}    [{_fmt_pose(truth)}]")
             t0 = time.perf_counter()
             reply = await harness.submit_message(text, timeout_s=600)
             await harness.arbiter.wait_until_done()
-            truth = getattr(harness.body, "true_pose", harness.body.pose)()
+            truth = harness.body.true_pose()
             print(f"ROBOT: {reply.get('say', '')!r}  ({time.perf_counter() - t0:.1f}s, {reply.get('status')})"
                   f"  [{_fmt_pose(truth)}]")
         print("\n" + harness.spatial_map.render_for_prompt(harness.body.pose()))
         for obj in harness.sandbox.list_objects():
-            pose = getattr(harness.body, "true_pose", harness.body.pose)()
+            pose = harness.body.true_pose()
             d = math.hypot(obj["x_mm"] - pose.x_mm, obj["y_mm"] - pose.y_mm)
             print(f"   truth: {obj['label']:<16} at ({obj['x_mm']:.0f}, {obj['y_mm']:.0f}), {d:.0f} mm away")
     finally:

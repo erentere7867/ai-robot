@@ -8,7 +8,7 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 from robot.core.bus import EventBus
-from robot.core.events import Event, EventPriority
+from robot.core.events import CancelReason, Event, EventPriority
 
 if TYPE_CHECKING:
     from robot.main import RobotHarness
@@ -42,7 +42,7 @@ async def _read_line(prompt: str) -> str:
 
 
 class ConsoleInterface:
-    """Interactive and one-shot text console for Milestone H1."""
+    """Interactive and one-shot text console."""
 
     def __init__(self, harness: RobotHarness, *, verbose_events: bool = True) -> None:
         self.harness = harness
@@ -60,7 +60,7 @@ class ConsoleInterface:
             self._sub_ids.append(
                 self.bus.subscribe("expression.updated", self._on_expression, name="console:expr")
             )
-            self._sub_ids.append(self.bus.subscribe("action.*", self._on_action_event, name="console:act"))
+            self._sub_ids.append(self.bus.subscribe("skill.completed", self._on_skill, name="console:skill"))
             self._sub_ids.append(
                 self.bus.subscribe("memory.updated", self._on_memory_updated, name="console:mem")
             )
@@ -91,12 +91,12 @@ class ConsoleInterface:
     async def run_interactive(self) -> None:
         """Run interactive REPL loop until `/quit` or EOF/Ctrl+C."""
         print("=" * 72)
-        print(f" {self.harness.config.name} Harness (Milestone H3 — Voice, Pet SFX, Mouth Sync & Barge-In)")
+        print(f" {self.harness.config.name}")
         if self.harness.dashboard is not None:
             print(f" Web Dashboard: {self.harness.dashboard.url}")
         print(" Commands: /status | /memories | /consolidate | /world | /emotion <name>")
         print("           /theme <color> | /sound <name> | /say <text> | /mute on|off | /bargein")
-        print("           /observe <label> [dist_mm] [bearing_deg] | /estop on|off | /quit")
+        print("           /estop on|off | /quit")
         print("=" * 72)
 
         while True:
@@ -125,9 +125,9 @@ class ConsoleInterface:
         head = parts[0].lower()
 
         if head == "/status":
-            snap = self.harness.world.snapshot()
             stats = self.bus.stats()
-            print(f"[status] FSM={self.harness.fsm.state} | Pose={snap['pose']} | Sensors={snap['sensors']}")
+            print(f"[status] FSM={self.harness.fsm.state} | Pose={self.harness.body.pose().to_dict()} | "
+                  f"Sensors={self.harness.body.sensors().to_dict()}")
             print(f"[status] Bus published={stats['published_count']} dropped={stats['dropped_count']}")
             print(f"[status] Autonomy={self.harness.autonomy.snapshot()} | Goal={self.harness.arbiter.active_goal}")
             return
@@ -176,28 +176,14 @@ class ConsoleInterface:
             await self.bus.drain()
             return
 
-        if head == "/observe" and len(parts) >= 2:
-            label = parts[1]
-            dist = float(parts[2]) if len(parts) >= 3 else 800.0
-            bearing = float(parts[3]) if len(parts) >= 4 else 0.0
-            await self.bus.emit(
-                "perception.observation",
-                source="console_sim",
-                payload={"label": label, "distance_mm": dist, "relative_bearing_deg": bearing},
-                priority=EventPriority.NORMAL,
-            )
-            await self.bus.drain()
-            print(f"[world] Recorded observation '{label}' at {dist:.0f}mm, bearing {bearing:.0f}°")
-            return
-
         if head == "/estop" and len(parts) >= 2:
             active = parts[1].lower() in ("on", "true", "1")
             self.harness.body.set_estop(active)
             if active:
                 await self.bus.emit(
-                    "action.cancel", "console", {"reason": "estop"}, priority=EventPriority.CRITICAL
+                    "action.cancel", "console", {"reason": CancelReason.ESTOP}, priority=EventPriority.CRITICAL
                 )
-            await self.harness.body._emit_pose()
+            await self.harness.body.publish_state()
             print(f"[safety] Emergency stop set to {active}")
             return
 
@@ -260,11 +246,9 @@ class ConsoleInterface:
             f"gaze={p.get('gaze_target')}{snd}{reason}"
         )
 
-    def _on_action_event(self, event: Event) -> None:
+    def _on_skill(self, event: Event) -> None:
         p = event.payload
-        if event.type in ("action.completed", "action.failed", "action.rejected", "action.cancelled"):
-            msg = p.get("message") or p.get("error") or event.type
-            print(f"  [{event.type}] tool={p.get('tool')} -> {msg}")
+        print(f"  [{'ok' if p.get('ok') else 'failed'}] tool={p.get('tool')} -> {p.get('message')}")
 
     def _on_memory_updated(self, event: Event) -> None:
         p = event.payload

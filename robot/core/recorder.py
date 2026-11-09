@@ -7,12 +7,9 @@ import queue
 import threading
 import time
 import uuid
-from collections.abc import Iterable
 from pathlib import Path
 from typing import TextIO
 
-from robot.core.bus import EventBus
-from robot.core.clock import ReplayClock
 from robot.core.events import Event
 
 logger = logging.getLogger(__name__)
@@ -159,38 +156,3 @@ class EventRecorder:
     def load_events(file_path: Path | str) -> list[Event]:
         """Load recorded events from a JSONL file."""
         return list(EventRecorder.iter_events(file_path))
-
-
-class EventReplayer:
-    """Replays recorded events onto an EventBus with deterministic clock stepping."""
-
-    def __init__(self, bus: EventBus, clock: ReplayClock | None = None) -> None:
-        self.bus = bus
-        self.clock = (
-            clock
-            if isinstance(clock, ReplayClock)
-            else (bus.clock if isinstance(bus.clock, ReplayClock) else None)
-        )
-
-    async def replay(
-        self,
-        events: Iterable[Event],
-        *,
-        include_types: set[str] | None = None,
-        exclude_types: set[str] | None = None,
-        collect: bool = True,
-    ) -> list[Event]:
-        """Publish recorded events in order and drain the bus after each step."""
-        replayed: list[Event] = []
-        for event in events:
-            if include_types is not None and event.type not in include_types:
-                continue
-            if exclude_types is not None and event.type in exclude_types:
-                continue
-            if self.clock is not None and event.ts > 0:
-                self.clock.set_time(event.ts)
-            await self.bus.publish(event)
-            await self.bus.drain()
-            if collect:
-                replayed.append(event)
-        return replayed

@@ -137,10 +137,6 @@ class FaceAnimator:
             self._current.theme = tname
             self._current.color_rgb = rgb
 
-    def trigger_blink(self) -> None:
-        """Immediately start a natural blink cycle."""
-        self._since_blink_s = self.blink_period_s
-
     def step(self, dt_s: float = 1.0 / 60.0) -> FaceFrameParams:
         """Advance procedural animation by `dt_s` seconds and return updated frame parameters."""
         dt = max(0.001, min(0.25, float(dt_s)))
@@ -151,7 +147,6 @@ class FaceAnimator:
         act = self._current.activity
         inten = self._current.intensity
 
-        # 1. Target emotion geometry
         t_left_open = 1.0
         t_right_open = 1.0
         t_left_brow = 0.0
@@ -171,7 +166,6 @@ class FaceAnimator:
             t_pupil = 1.15 + 0.15 * inten
             t_mouth_curve = 0.65 + 0.35 * inten
         elif emo == "curious":
-            # Asymmetric curious eye & brow tilt!
             t_left_open = 1.08 + 0.10 * inten
             t_right_open = 0.85 - 0.10 * inten
             t_left_brow = -10.0 * inten
@@ -247,7 +241,6 @@ class FaceAnimator:
             t_pupil = 1.22
             t_mouth_curve = 0.85 * inten
 
-        # 2. Layer composable activity state
         base_gx, base_gy = GAZE_PRESETS.get(self._current.gaze_target, (0.0, 0.0))
         t_mouth_open = 0.04
 
@@ -256,7 +249,6 @@ class FaceAnimator:
             t_right_open = min(1.25, t_right_open + 0.08)
             t_pupil = min(1.30, t_pupil + 0.08)
         elif act == "thinking":
-            # Gaze drifts upward and scans gently side-to-side while thinking
             base_gx += 0.25 * math.sin(self._elapsed_s * 2.4)
             base_gy = -0.38 + 0.08 * math.cos(self._elapsed_s * 1.8)
             t_left_open *= 0.88
@@ -266,12 +258,10 @@ class FaceAnimator:
                 t_mouth_open = max(0.04, min(1.0, float(self.external_mouth_open)))
                 t_squint = min(0.65, t_squint + 0.06 * t_mouth_open)
             else:
-                # Rhythmic mouth oscillation synchronized with speaking state
                 osc = 0.5 * (1.0 + math.sin(self._elapsed_s * 18.0))
                 t_mouth_open = 0.18 + 0.55 * osc
                 t_squint = min(0.65, t_squint + 0.06 * osc)
         elif act == "idle":
-            # Subtle idle breathing micro-motion
             base_gx += 0.06 * math.sin(self._elapsed_s * 0.9)
             base_gy += 0.04 * math.cos(self._elapsed_s * 0.7)
 
@@ -280,7 +270,6 @@ class FaceAnimator:
         elif emo == "surprised" and act != "speaking":
             t_mouth_open = 0.35 * inten
 
-        # 3. Blinking envelope
         blink_amt = 0.0
         if self._since_blink_s >= self.blink_period_s:
             b_progress = (self._since_blink_s - self.blink_period_s) / self.blink_duration_s
@@ -288,10 +277,8 @@ class FaceAnimator:
                 self._since_blink_s = 0.0
                 blink_amt = 0.0
             else:
-                # Smooth triangle/sine blink curve
                 blink_amt = math.sin(b_progress * math.pi)
 
-        # 4. Smooth exponential interpolation
         rate = min(1.0, dt * 12.0)
         gaze_rate = min(1.0, dt * 10.0)
         self._current.gaze_x = _lerp(self._current.gaze_x, base_gx, gaze_rate)

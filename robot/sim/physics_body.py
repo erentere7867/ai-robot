@@ -1,9 +1,8 @@
 """Rigid-body MuJoCo simulation of companion_r1 with motor/servo actuators, odometry and sensor noise.
 
-`PhysicsBody` is an optional drop-in replacement for the kinematic `SimBody`. Commands drive the wheel
-velocity and head servo actuators of `config/companion_r1_physics.xml`; a 100 Hz "firmware" loop inside
-the 2 ms physics step closes the loop on the odometry estimate (quantised wheel encoders + noisy IMU
-yaw), as motor firmware would on hardware. `pose()` is that estimate; `true_pose()` is MuJoCo ground
+`PhysicsBody` replaces the kinematic `SimBody` when dynamics matter. Commands drive the wheel velocity and
+head servo actuators of `config/companion_r1_physics.xml`; a 100 Hz "firmware" loop inside the 2 ms physics
+step closes the speed loop and integrates odometry (quantised wheel encoders + noisy IMU yaw), as the MCU does. `pose()` is that estimate; `true_pose()` is MuJoCo ground
 truth. Chassis contact or stalled wheels raise a "bumper" reflex. Movable sandbox objects are free
 bodies that the robot can push; their new positions are written back with `sandbox.move_object()`.
 """
@@ -12,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import logging
 import math
 import threading
@@ -24,13 +22,13 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from robot.body.hal import BodyCapabilities, BodyCommand, BodyPose, CommandResult, SensorReadings
-from robot.body.sim_body import SimBody, _normalize_angle_deg
+from robot.body.hal import BodyCapabilities, BodyPose, Reflex
+from robot.core.angles import wrap_deg
 from robot.core.bus import EventBus
 from robot.core.clock import RealClock
 from robot.core.config import PROJECT_ROOT
-from robot.core.events import EventPriority
 from robot.core.service import ServiceHealth
+from robot.sim.sim_body import SimBody
 
 logger = logging.getLogger(__name__)
 
@@ -54,28 +52,6 @@ class SensorNoise:
     @classmethod
     def off(cls) -> SensorNoise:
         return cls(0.0, 0.0, 0.0, 0.0)
-
-
-@dataclass
-class _BaseMotion:
-    """Drive/spin set point tracked by the firmware loop in the odometry frame."""
-
-    kind: str  # "drive" (mm) | "spin" (deg)
-    sign: float
-    target: float
-    speed: float
-    x0: float
-    y0: float
-    heading0: float
-    yaw0: float
-    timeout_s: float
-    rate: float = 0.0
-    rate_i: float = 0.0
-    arrived: bool = False
-    settle_s: float = 0.0
-    elapsed_s: float = 0.0
-    done: bool = False
-    timed_out: bool = False
 
 
 @dataclass
@@ -105,18 +81,10 @@ class PhysicsBody(SimBody):
     name = "physics_body"
 
     LINEAR_ACCEL_MM_S2 = 800.0
-    LINEAR_DECEL_MM_S2 = 600.0
     ANGULAR_ACCEL_DEG_S2 = 360.0
-    CREEP_MM_S = 15.0
-    CREEP_DEG_S = 8.0
-    DRIVE_TOLERANCE_MM = 0.8
-    SPIN_TOLERANCE_DEG = 0.15
-    HEADING_GAIN = 4.0  # (deg/s) per deg of heading error
-    CROSS_TRACK_GAIN_DEG_MM = 0.15
     RATE_P = 0.5
     RATE_I = 3.0
     TURN_SLIP_FACTOR = 2.4  # effective/nominal track width of the skid-steer base (feed-forward only)
-    HEAD_TOLERANCE_DEG = 0.5
     BUMPER_FORCE_N = 6.0
     BUMPER_HOLD_S = 0.04
     STALL_HOLD_S = 0.3
@@ -128,7 +96,7 @@ class PhysicsBody(SimBody):
     def __init__(
         self,
         bus: EventBus,
-        capabilities: BodyCapabilities | None = None,
+        capabilities: BodyCapabilities,
         *,
         step_dt_s: float = 0.05,
         sandbox: Any | None = None,
@@ -142,13 +110,6 @@ class PhysicsBody(SimBody):
         self._data: mujoco.MjData | None = None
         self._step_lock = threading.RLock()  # the idle task and the control thread both advance the physics
         super().__init__(bus, capabilities, step_dt_s=step_dt_s)
-        for key, value in (
-            ("battery_idle_pct_per_min", battery_idle_pct_per_min),
-            ("battery_pct_per_m", battery_pct_per_m),
-            ("charge_pct_per_min", charge_pct_per_min),
-        ):
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(f"{key} must be finite and nonnegative")
         self.battery_idle_pct_per_min = float(battery_idle_pct_per_min)
         self.battery_pct_per_m = float(battery_pct_per_m)
         self.charge_pct_per_min = float(charge_pct_per_min)
@@ -178,17 +139,14 @@ class PhysicsBody(SimBody):
         self._contact_force = np.zeros(6)
         self._ray_geom = np.zeros(1, dtype=np.int32)
 
-        self._motion: _BaseMotion | None = None
         self._fw_v = 0.0  # speed-control set point ramped by the firmware (mm/s, deg/s)
         self._fw_w = 0.0
         self._fw_w_i = 0.0
         self._fw_blocked = False
-        self._fw_reflex: tuple[str, str] | None = None
-        self._halt_serial = 0
+        self._fw_reflex: Reflex | None = None
         self._head_setpoint = 0.0
         self._head_target = 0.0
-        self._head_speed = self._caps.joints["head_tilt"].max_speed_deg_s
-        self._head_settle_s = 0.0
+        self._head_speed = self._caps.head_tilt.max_speed_deg_s
         self._bump_s = 0.0
         self._stall_s = 0.0
         self._phase = 0
@@ -199,7 +157,6 @@ class PhysicsBody(SimBody):
         self._perf_wall_s = 0.0
         self._perf_sim_s = 0.0
         self._idle_task: asyncio.Task | None = None
-        self._sandbox: Any | None = None
         self._battery_travel_mm = 0.0
 
         # Let the tyres settle onto the floor before odometry is zeroed.
@@ -207,7 +164,7 @@ class PhysicsBody(SimBody):
         self._reset_odometry()
         self._clock_ref = self._battery_ref = self.bus.clock.monotonic()
         if sandbox is not None:
-            self.bind_sandbox(sandbox)
+            self.bind_world(sandbox)
 
     # -- odometry estimate (what pose() reports) ------------------------------------------------
 
@@ -217,15 +174,11 @@ class PhysicsBody(SimBody):
 
     @_pose.setter
     def _pose(self, value: BodyPose) -> None:
-        """Assigning the pose (the dashboard's scene reset does this) also teleports the robot."""
         self._odom = value
-        if self._data is not None:
-            self.reset_pose(value)
 
     def reset_pose(self, pose: BodyPose | None = None) -> None:
         """Teleport the physical robot (and head) to `pose`, at rest, and re-zero odometry there.
 
-        A base or head motion in progress is interrupted and reports "cancelled".
         """
         pose = pose or BodyPose()
         m, d = self._model, self._data
@@ -235,8 +188,7 @@ class PhysicsBody(SimBody):
         d.qpos[a + 3 : a + 7] = (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
         d.qvel[v : v + 6] = 0.0
         d.qvel[self._wheel_vadr] = 0.0
-        spec = self._caps.joints["head_tilt"]
-        tilt = max(spec.min_deg, min(spec.max_deg, pose.head_tilt_deg))
+        tilt = self._caps.clamp_head(pose.head_tilt_deg)
         d.qpos[self._head_qadr] = math.radians(tilt)
         d.qvel[self._head_vadr] = 0.0
         self._halt_actuators()
@@ -272,7 +224,7 @@ class PhysicsBody(SimBody):
         return BodyPose(
             x_mm=float(q[a]) * 1000.0,
             y_mm=float(q[a + 1]) * 1000.0,
-            heading_deg=_normalize_angle_deg(math.degrees(yaw)),
+            heading_deg=wrap_deg(math.degrees(yaw)),
             head_tilt_deg=math.degrees(float(q[self._head_qadr])),
             linear_vel_mm_s=forward * 1000.0,
             angular_vel_deg_s=math.degrees(float(qv[v + 5])),
@@ -308,52 +260,36 @@ class PhysicsBody(SimBody):
         """Average wall-clock milliseconds spent stepping physics per simulated second."""
         return 1000.0 * self._perf_wall_s / self._perf_sim_s if self._perf_sim_s > 0 else 0.0
 
-    def sensors(self) -> SensorReadings:
-        self._refresh_sensors()
-        return dataclasses.replace(self._sensors)
-
     def set_estop(self, active: bool) -> None:
         super().set_estop(active)
         if active:
             self._halt_actuators()
 
-    async def cancel(self, command_id: str | None = None) -> None:
-        if command_id is None or command_id == self._active_cmd_id:
-            self._halt_actuators()
-        await super().cancel(command_id)
-
-    def attach_sensor_model(self, model) -> None:
-        """Sample the sandbox raycasts with ground truth and keep its objects in sync with physics."""
-        super().attach_sensor_model(model)
-        if self._sandbox is None and hasattr(model, "list_objects") and hasattr(model, "move_object"):
-            self.bind_sandbox(model)
-
-    def bind_sandbox(self, sandbox: Any) -> None:
-        """Mirror the sandbox object list into physics and report pushed objects back to it."""
-        self._sandbox = sandbox
+    def bind_world(self, sandbox: Any) -> None:
+        """Sample its raycasts from ground truth, mirror its objects into physics, report pushed ones back."""
+        super().bind_world(sandbox)
         self._sync_world()
 
-    def set_sandbox_sensors(self, front_tof_mm: float | None = None, cliff: bool | None = None) -> None:
-        """Accept pushed raycast values only without an attached sensor model.
+    def set_head(self, tilt_deg: float) -> None:
+        self._head_target = self._caps.clamp_head(tilt_deg)
+        self._wake()
 
-        With a model attached, every sensor read samples it with `true_pose()`, so values the
-        sandbox computes from the odometry estimate (its `body.pose` subscriber) are ignored.
-        """
-        if self._sensor_model is None:
-            super().set_sandbox_sensors(front_tof_mm=front_tof_mm, cliff=cliff)
+    async def halt(self) -> None:
+        self._halt_actuators()
+        await super().halt()
 
     def _refresh_sensors(self) -> None:
         if self._data is None:
             return
         truth = self.true_pose()
-        if self._sensor_model is not None:
-            tof = float(self._sensor_model.compute_front_tof_mm(truth))
-            cliff: bool | None = bool(self._sensor_model.check_cliff_triggered(truth))
+        if self._world is not None:
+            tof = float(self._world.compute_front_tof_mm(truth))
+            cliff = bool(self._world.check_cliff_triggered(truth))
         else:
-            tof, cliff = self._raycast_tof_mm(), None
+            tof, cliff = self._raycast_tof_mm(), False
         if self.noise.tof_mm > 0:
             tof = max(0.0, tof + float(self._rng.normal(0.0, self.noise.tof_mm)))
-        super().set_sandbox_sensors(front_tof_mm=round(tof, 1), cliff=cliff)
+        self._apply_ranges(round(tof, 1), cliff)
         self._update_battery(truth)
 
     def _update_battery(self, truth: BodyPose) -> None:
@@ -361,8 +297,7 @@ class PhysicsBody(SimBody):
         now = self.bus.clock.monotonic()
         dt, self._battery_ref = max(0.0, now - self._battery_ref), now
         travel_m, self._battery_travel_mm = self._battery_travel_mm / 1000.0, 0.0
-        is_charging = getattr(self._sensor_model, "is_charging", None)
-        charging = bool(is_charging(truth)) if callable(is_charging) else False
+        charging = self._world is not None and self._world.is_charging(truth)
         pct = self._sensors.battery_pct - self.battery_pct_per_m * travel_m
         if charging:
             pct += self.charge_pct_per_min * dt / 60.0
@@ -371,165 +306,28 @@ class PhysicsBody(SimBody):
         self._sensors.battery_pct = min(100.0, max(0.0, pct))
         self._sensors.charging = charging
 
-    def _sensor_dict(self) -> dict[str, Any]:
-        sensors = self._sensors.to_dict()
-        sensors.setdefault("battery_pct", round(self._sensors.battery_pct, 1))
-        sensors.setdefault("charging", self._sensors.charging)
-        return sensors
-
-    async def _emit_pose(self) -> None:
-        self._refresh_sensors()
-        await self.bus.emit(
-            "body.pose",
-            source=self.name,
-            payload={
-                "command_id": self._active_cmd_id,
-                "pose": self._pose.to_dict(),
-                "sensors": self._sensor_dict(),
-                "true_pose": self.true_pose().to_dict(),
-            },
-            priority=EventPriority.TELEMETRY,
-        )
-
-    async def _safety_result(
-        self, cmd: BodyCommand, *, base: bool = False, forward: bool = False
-    ) -> CommandResult | None:
-        """SimBody's reflex checks on freshly sampled sensors; a reflex also de-energises the motors.
-
-        Collisions are not taken from the sandbox geometry: physical contact is the bumper.
-        """
-        self._refresh_sensors()
-        reason = None
-        if self._sensors.estop_active:
-            reason = ("estop_active", "Emergency stop is active")
-        elif self._cancel_requested:
-            return self._cancelled_result(cmd)
-        elif base and self._sensors.picked_up:
-            reason = ("picked_up", "Robot was picked up")
-        elif base and self._sensors.cliff_triggered:
-            reason = ("cliff_detected", "Cliff sensor triggered")
-        elif forward and (
-            not math.isfinite(self._sensors.front_tof_mm)
-            or self._sensors.front_tof_mm <= self._caps.min_front_tof_stop_mm
-        ):
-            reason = ("obstacle_stop", "Front obstacle or invalid range reading")
-        if reason:
-            self._halt_actuators()
-            await self._emit_reflex(*reason)
-            await self._emit_pose()
-            return CommandResult(cmd.id, cmd.tool, False, "reflex_stopped", reason[1], self._pose.to_dict())
-        return None
-
-    async def _move(self, cmd: BodyCommand, amount: float, speed: float, kind: str) -> CommandResult | None:
-        """Hand a set point to the firmware loop and supervise it at the control tick rate."""
-        if abs(amount) <= 1e-8:
-            return None
-        base = kind != "head"
-        forward = kind == "drive" and amount > 0
-        self.advance_to_now()
-        self._fw_reflex = None
-        if kind == "head":
-            spec = self._caps.joints["head_tilt"]
-            self._head_target = max(spec.min_deg, min(spec.max_deg, self._head_setpoint + amount))
-            self._head_speed = speed
-            self._head_settle_s = 0.0
-        else:
-            self._bump_s = self._stall_s = 0.0
-            self._motion = _BaseMotion(
-                kind=kind,
-                sign=-1.0 if amount < 0 else 1.0,
-                target=abs(amount),
-                speed=speed,
-                x0=self._odom.x_mm,
-                y0=self._odom.y_mm,
-                heading0=self._odom.heading_deg,
-                yaw0=self._yaw_est,
-                timeout_s=3.0 * abs(amount) / speed + 3.0,
-            )
-        motion = self._motion
-        serial = self._halt_serial
-        try:
-            while True:
-                result = await self._safety_result(cmd, base=base, forward=forward)
-                if result:
-                    return result
-                if self._head_done() if kind == "head" else motion.done:
-                    break
-                await self.bus.clock.sleep(self.step_dt_s)
-                self.advance_to_now()
-                result = await self._firmware_reflex_result(cmd)
-                if result:
-                    return result
-                result = await self._safety_result(cmd, base=base, forward=forward)
-                if result:
-                    return result
-                if self._halt_serial != serial:  # interrupted by reset_pose()
-                    return self._cancelled_result(cmd)
-                await self._emit_pose()
-            if motion is not None and motion.timed_out:
-                return CommandResult(
-                    cmd.id,
-                    cmd.tool,
-                    False,
-                    "failed",
-                    "Motion did not converge: wheels slipping or base obstructed.",
-                    self._pose.to_dict(),
-                )
-            return None
-        finally:
-            # Also reached when the awaiting task is cancelled: never leave the motors energised.
-            if kind == "head":
-                self._head_target = self._head_setpoint
-            elif self._motion is motion:
-                self._motion = None
-                self._data.ctrl[self._motor_ids] = 0.0
-            self._wake()
-
-    async def update_motion(self) -> str | None:
-        """Run the physics and firmware up to now and report the reflex limiting speed control, if any."""
-        if self._active_cmd_id is not None:
-            return None
+    async def update_motion(self) -> Reflex | None:
         self.advance_to_now()
         self._refresh_sensors()
-        reason: tuple[str, str] | None = None
+        reflex: Reflex | None = None
         if self._fw_reflex is not None:
-            reason, self._fw_reflex = self._fw_reflex, None
+            reflex, self._fw_reflex = self._fw_reflex, None
         elif self._sensors.estop_active:
-            reason = ("estop_active", "Emergency stop is active")
+            reflex = Reflex.ESTOP
         elif self._sensors.cliff_triggered or self._sensors.picked_up:
-            reason = ("cliff_detected", "Cliff sensor triggered")
+            reflex = Reflex.CLIFF
         elif self._fw_blocked:
-            reason = ("obstacle_stop", "Front obstacle or invalid range reading")
-        if reason is not None and reason[0] != "obstacle_stop":
+            reflex = Reflex.OBSTACLE_AHEAD
+        if reflex is not None and reflex.halts:
             self._halt_actuators()
-        if reason is not None and reason[0] != self._vel_reflex:
-            await self._emit_reflex(*reason)
-        self._vel_reflex = reason[0] if reason else None
-        if self._velocity_active() or reason is not None:
-            await self._emit_pose()
-        return reason[0] if reason else None
-
-    async def _firmware_reflex_result(self, cmd: BodyCommand) -> CommandResult | None:
-        if self._fw_reflex is None:
-            return None
-        reflex, reason = self._fw_reflex
-        self._fw_reflex = None
-        self._refresh_sensors()
-        await self._emit_reflex(reflex, reason)
-        await self._emit_pose()
-        return CommandResult(
-            cmd.id, cmd.tool, False, "reflex_stopped", reason, self._pose.to_dict(), {"reflex": reflex}
-        )
-
-    def _head_done(self) -> bool:
-        if self._head_setpoint != self._head_target:
-            return False
-        error = abs(math.degrees(float(self._data.qpos[self._head_qadr])) - self._head_target)
-        return error <= self.HEAD_TOLERANCE_DEG or self._head_settle_s >= 0.3
+        if reflex is not None and reflex != self._vel_reflex:
+            await self._emit_reflex(reflex)
+        self._vel_reflex = reflex
+        if self._velocity_active() or reflex is not None or self._head_setpoint != self._head_target:
+            await self.publish_state()
+        return reflex
 
     def _halt_actuators(self) -> None:
-        self._halt_serial += 1
-        self._motion = None
         self._vel_target, self._vel_until = (0.0, 0.0), self.bus.clock.monotonic()
         self._fw_v = self._fw_w = self._fw_w_i = 0.0
         self._head_target = self._head_setpoint
@@ -541,11 +339,10 @@ class PhysicsBody(SimBody):
     async def _idle_loop(self) -> None:
         while True:
             await asyncio.sleep(self.IDLE_PERIOD_S)
-            if self._active_cmd_id is None:
-                try:
-                    self.advance_to_now()
-                except Exception:
-                    logger.exception("Idle physics step failed")
+            try:
+                self.advance_to_now()
+            except Exception:
+                logger.exception("Idle physics step failed")
 
     def _wake(self, seconds: float = 1.0) -> None:
         self._awake_until = max(self._awake_until, self._sim_time + seconds)
@@ -585,8 +382,7 @@ class PhysicsBody(SimBody):
 
     def _at_rest(self) -> bool:
         return (
-            self._motion is None
-            and not self._velocity_active()
+            not self._velocity_active()
             and self._head_setpoint == self._head_target
             and self._sim_time >= self._awake_until
             and float(np.max(np.abs(self._data.qvel))) < 1e-3
@@ -622,12 +418,12 @@ class PhysicsBody(SimBody):
         self._battery_travel_mm += 0.5 * (abs(dl) + abs(dr))
         # IMU reports the mean rate over the sample (internally integrated at a high rate).
         yaw = self._true_yaw_deg()
-        gyro = _normalize_angle_deg(yaw - self._imu_yaw_ref) / dt + self._gyro_bias
+        gyro = wrap_deg(yaw - self._imu_yaw_ref) / dt + self._gyro_bias
         self._imu_yaw_ref = yaw
         if self.noise.gyro_noise_deg_s > 0:
             gyro += float(self._rng.normal(0.0, self.noise.gyro_noise_deg_s))
         # Zero-velocity gating: a stationary robot does not integrate gyro bias into its heading.
-        if self._motion is not None or dl or dr or abs(gyro) > 1.0:
+        if dl or dr or abs(gyro) > 1.0:
             dyaw = gyro * dt
         else:
             dyaw = gyro = 0.0
@@ -637,13 +433,13 @@ class PhysicsBody(SimBody):
         odom = self._odom
         odom.x_mm += ds * math.cos(mid)
         odom.y_mm += ds * math.sin(mid)
-        odom.heading_deg = _normalize_angle_deg(self._yaw_est)
+        odom.heading_deg = wrap_deg(self._yaw_est)
         odom.linear_vel_mm_s += 0.3 * (ds / dt - odom.linear_vel_mm_s)
         odom.angular_vel_deg_s += 0.3 * (gyro - odom.angular_vel_deg_s)
         self._sensors.wheel_ticks_left, self._sensors.wheel_ticks_right = ticks
         self._sensors.imu_yaw_deg = odom.heading_deg
 
-        v_left, v_right = self._motion_control(dt, gyro)
+        v_left, v_right = self._velocity_control(dt, gyro)
         d.ctrl[self._left_motors] = v_left / self._r_nominal_m
         d.ctrl[self._right_motors] = v_right / self._r_nominal_m
         self._servo_tick(dt)
@@ -672,59 +468,11 @@ class PhysicsBody(SimBody):
         turn = math.radians(omega) * self._half_track_m
         return self._fw_v / 1000.0 - turn, self._fw_v / 1000.0 + turn
 
-    def _motion_control(self, dt: float, gyro_deg_s: float) -> tuple[float, float]:
-        """Trapezoidal distance/heading tracking on the odometry estimate -> wheel surface speeds (m/s)."""
-        mo = self._motion
-        if mo is None:
-            return self._velocity_control(dt, gyro_deg_s)
-        odom = self._odom
-        linear, omega = 0.0, 0.0
-        if mo.kind == "drive":
-            h0 = math.radians(mo.heading0)
-            dx, dy = odom.x_mm - mo.x0, odom.y_mm - mo.y0
-            remaining = mo.target - mo.sign * (dx * math.cos(h0) + dy * math.sin(h0))
-            lateral = -dx * math.sin(h0) + dy * math.cos(h0)
-            if not mo.arrived and remaining <= self.DRIVE_TOLERANCE_MM:
-                mo.arrived = True
-            if not mo.arrived:
-                brake = math.sqrt(2.0 * self.LINEAR_DECEL_MM_S2 * remaining)
-                ramp = min(mo.rate + self.LINEAR_ACCEL_MM_S2 * dt, brake)
-                mo.rate = min(mo.speed, max(self.CREEP_MM_S, ramp))
-                correction = max(-8.0, min(8.0, self.CROSS_TRACK_GAIN_DEG_MM * lateral))
-                heading_ref = mo.heading0 - mo.sign * correction
-                omega = self.HEADING_GAIN * _normalize_angle_deg(heading_ref - self._yaw_est)
-                omega = max(-45.0, min(45.0, omega))
-                linear = mo.sign * mo.rate
-        else:
-            remaining = mo.target - mo.sign * (self._yaw_est - mo.yaw0)
-            if not mo.arrived and remaining <= self.SPIN_TOLERANCE_DEG:
-                mo.arrived = True
-            if not mo.arrived:
-                brake = math.sqrt(2.0 * self.ANGULAR_ACCEL_DEG_S2 * remaining)
-                ramp = min(mo.rate + self.ANGULAR_ACCEL_DEG_S2 * dt, brake)
-                mo.rate = min(mo.speed, max(self.CREEP_DEG_S, ramp))
-                command = mo.sign * mo.rate
-                error = command - gyro_deg_s
-                mo.rate_i = max(-30.0, min(30.0, mo.rate_i + error * dt))
-                omega = command + self.RATE_P * error + self.RATE_I * mo.rate_i
-        mo.elapsed_s += dt
-        if mo.arrived:
-            mo.settle_s += dt
-            still = abs(odom.linear_vel_mm_s) < 5.0 and abs(gyro_deg_s) < 3.0
-            mo.done = still or mo.settle_s >= 0.5
-        elif mo.elapsed_s >= mo.timeout_s:
-            mo.done = mo.timed_out = True
-        if mo.arrived or mo.done:
-            return 0.0, 0.0
-        turn = math.radians(omega) * self._half_track_m
-        return linear / 1000.0 - turn, linear / 1000.0 + turn
-
     def _servo_tick(self, dt: float) -> None:
         step = self._head_speed * dt
         delta = self._head_target - self._head_setpoint
         if abs(delta) <= step:
             self._head_setpoint = self._head_target
-            self._head_settle_s += dt
         else:
             self._head_setpoint += math.copysign(step, delta)
         self._data.ctrl[self._servo_id] = math.radians(self._head_setpoint)
@@ -734,7 +482,7 @@ class PhysicsBody(SimBody):
 
     def _monitor_bumper(self, dt: float, v_left: float, v_right: float) -> None:
         """Latch a bumper reflex on sustained chassis contact force or on stalled drive wheels."""
-        if self._motion is None and not self._velocity_active():
+        if not self._velocity_active():
             self._bump_s = self._stall_s = 0.0
             return
         force = self._external_contact_force_n()
@@ -747,9 +495,9 @@ class PhysicsBody(SimBody):
         )
         self._stall_s = self._stall_s + dt if stalled else 0.0
         if self._bump_s >= self.BUMPER_HOLD_S:
-            self._fw_reflex = ("bumper", f"Bumper contact ({force:.0f} N): pushing against an obstacle")
+            self._fw_reflex = Reflex.BUMPER
         elif self._stall_s >= self.STALL_HOLD_S:
-            self._fw_reflex = ("bumper", "Drive wheels stalled against an obstacle")
+            self._fw_reflex = Reflex.BUMPER
         else:
             return
         self._halt_actuators()
@@ -836,9 +584,9 @@ class PhysicsBody(SimBody):
 
     def _sync_world(self) -> None:
         """Sandbox edits (add/remove/drag/reset) move physics bodies; pushed bodies move sandbox objects."""
-        if self._sandbox is None or self._data is None:
+        if self._world is None or self._data is None:
             return
-        listing = {o["id"]: o for o in self._sandbox.list_objects()}
+        listing = {o["id"]: o for o in self._world.list_objects()}
         changed = self._reconcile_bodies(listing)
         for obj_id, obj in self._active_objects().items():
             o = listing[obj_id]
@@ -850,7 +598,7 @@ class PhysicsBody(SimBody):
             elif obj.free:
                 physics_xy = self._object_xy_mm(obj)
                 if math.dist(physics_xy, obj.physics_xy) > self.OBJECT_SYNC_MM:
-                    moved = self._sandbox.move_object(obj_id, *physics_xy)
+                    moved = self._world.move_object(obj_id, *physics_xy)
                     obj.physics_xy = physics_xy
                     if moved is not None:
                         obj.sandbox_xy = (round(moved.x_mm, 1), round(moved.y_mm, 1))

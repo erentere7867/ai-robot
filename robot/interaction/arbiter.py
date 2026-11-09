@@ -4,34 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import uuid
 from collections import deque
 from typing import Any
 
-from robot.behavior.emotion import EmotionEngine
-from robot.behavior.fsm import InteractionFSM, InteractionState
 from robot.cognition.agent import AgentLoop, TurnResult
 from robot.cognition.prompts import PromptBuilder
 from robot.core.bus import EventBus
-from robot.core.clock import RealClock
-from robot.core.config import AgentConfig
-from robot.core.events import Event, EventPriority
+from robot.core.events import CancelReason, Event, EventPriority
+from robot.interaction.drives import DriveSystem
+from robot.interaction.emotion import EmotionEngine
+from robot.interaction.fsm import InteractionFSM, InteractionState
+from robot.interaction.pacing import SpeechPacer
 from robot.memory.consolidator import MemoryConsolidator
 from robot.memory.policy import extract_explicit_memory_proposals
 from robot.memory.store import MemoryStore
 from robot.skills.base import SkillContext
 from robot.world.spatial_map import ASKED_PLACE
-from robot.world.state import WorldState
 
 logger = logging.getLogger(__name__)
 
 _EMPTY_REPLIES = {"", ".", "...", "(empty)", "(no reply)", "empty", "none", "(silence)", "\"\""}
-
-
-# Said on its own, these halt all motion at once, before the language model has even read the message.
-STOP_WORDS = re.compile(r"^\W*(?:(?:please|hey|ok|okay|no)\W+)?(?:stop|halt|freeze|stay|wait|don'?t move)"
-                        r"(?:\W+(?:it|now|there|moving|right now|please))*\W*$", re.I)
 
 
 class BehaviorArbiter:
@@ -46,9 +39,9 @@ class BehaviorArbiter:
         agent: AgentLoop,
         skill_context: SkillContext,
         memory: MemoryStore,
-        world: WorldState,
+        drives: DriveSystem,
+        pacer: SpeechPacer,
         consolidator: MemoryConsolidator | None = None,
-        agent_config: AgentConfig | None = None,
     ) -> None:
         self.bus = bus
         self.fsm = fsm
@@ -57,11 +50,9 @@ class BehaviorArbiter:
         self.agent = agent
         self.ctx = skill_context
         self.memory = memory
-        self.world = world
         self.consolidator = consolidator
-        self.agent_config = agent_config or AgentConfig()
-        self.autonomy = None
-        self.drives = None
+        self.drives = drives
+        self.pacer = pacer
         self.active_goal: dict[str, Any] | None = None
         self.recent_activity: deque[tuple[float, str]] = deque(maxlen=6)
         self._sub_ids: list[str] = []
@@ -103,7 +94,7 @@ class BehaviorArbiter:
             self.active_goal.update(status="cancelled")
         if self._active_turn and not self._active_turn.done():
             self._active_turn.cancel()
-        for event_type in ("attention.engaged", "action.request", "robot.response"):
+        for event_type in ("attention.engaged", "robot.response"):
             self.bus.discard_pending(event_type)
 
     @property
@@ -111,15 +102,22 @@ class BehaviorArbiter:
         return bool((self._active_turn and not self._active_turn.done())
                     or (self._input_task and not self._input_task.done()))
 
+    def owns_request(self, correlation_id: str) -> bool:
+        return self._input_correlation_id == correlation_id
+
+    async def wait_stopped(self, timeout_s: float) -> None:
+        if self._active_turn:
+            await asyncio.wait({self._active_turn}, timeout=timeout_s)
+
     async def _on_cancel(self, event: Event) -> None:
-        reason = event.payload.get("reason")
-        if reason in ("new_turn", "autonomous_start"):
+        reason = CancelReason(event.payload.get("reason", CancelReason.OTHER))
+        if not reason.ends_turn:
             return
         self.cancel_active()
         if self._input_task and not self._input_task.done():
             self._input_task.cancel()
             await self.bus.emit("turn.cancelled", "arbiter", {}, correlation_id=self._input_correlation_id)
-        barge_in = reason == "user_barge_in"
+        barge_in = reason is CancelReason.BARGE_IN
         self.fsm.transition(InteractionState.ATTENDING if barge_in else InteractionState.IDLE)
         snap = self.emotion.set_activity("listening" if barge_in else "idle")
         await self.bus.emit("expression.updated", "arbiter", snap.to_dict(), priority=EventPriority.CRITICAL)
@@ -158,7 +156,7 @@ class BehaviorArbiter:
                 if not done:
                     raise RuntimeError("Previous turn is still stopping; try again")
             await self.bus.emit("action.cancel", "arbiter",
-                                {"reason": "autonomous_start" if autonomous else "new_turn"},
+                                {"reason": CancelReason.AUTONOMOUS_START if autonomous else CancelReason.NEW_TURN},
                                 priority=EventPriority.CRITICAL)
             epoch = self._epoch
             if plan is not None and autonomous:
@@ -178,7 +176,7 @@ class BehaviorArbiter:
             return TurnResult(say="", status="cancelled", backend_name="cancelled")
         except Exception:
             logger.exception("Turn failed")
-            await self.ctx.executor.cancel_all()
+            self.ctx.fast.cancel_behavior(reason="something went wrong")
             if self.active_goal:
                 self.active_goal.update(status="error")
             self.fsm.transition(InteractionState.IDLE)
@@ -215,7 +213,6 @@ class BehaviorArbiter:
                         hint: str) -> TurnResult:
         self.active_goal = {"objective": text[:200], "status": "running", "step": 0,
                             "correlation_id": correlation_id, "origin": "autonomous" if autonomous else "user"}
-        self.world.task_state = dict(self.active_goal)
         self.fsm.transition(InteractionState.ATTENDING)
         self.emotion.clear_manual_override()
         if self.emotion.snapshot().emotion == "sleepy":
@@ -239,37 +236,29 @@ class BehaviorArbiter:
             await self.bus.emit("memory.retrieved", "arbiter",
                                 {"query": text, "count": len(found), "memories": [m.to_dict() for m in found]},
                                 correlation_id=correlation_id)
-        core = [m.content for m in self.memory.core_facts(limit=5)] if hasattr(self.memory, "core_facts") else []
+        core = [m.content for m in self.memory.core_facts(limit=5)]
         memories = [m for m in memories if m not in core]
         pose = self.ctx.pose()
         if not autonomous:
             self.ctx.spatial_map.places[ASKED_PLACE] = (pose.x_mm, pose.y_mm)
-        battery = getattr(self.ctx.body.sensors(), "battery_pct", None)
         situation = self.prompts.situation(
             world=self.ctx.spatial_map.render_for_prompt(pose), core_facts=core, memories=memories,
-            recent=self._recent_lines(), battery_pct=battery, extra=hint)
+            recent=self._recent_lines(), battery_pct=self.ctx.body.sensors().battery_pct, extra=hint)
         messages = self.prompts.build(text, situation, background=autonomous)
 
         self.fsm.transition(InteractionState.THINKING)
         snap = self.emotion.set_activity("thinking", gaze_target="speaker")
         await self.bus.emit("expression.updated", "arbiter", snap.to_dict(), correlation_id=correlation_id)
 
-        ctx = self.ctx
-        ctx.correlation_id = correlation_id
-        ctx.cancelled = lambda: epoch != self._epoch
-        ctx.attached_image = None
-        ctx.wake_request_s = None
-        ctx.expression = {}
-        ctx.turn_cache = {}
-        result = await self.agent.run(messages, ctx, background=autonomous)
+        self.ctx.begin_turn(correlation_id, lambda: epoch != self._epoch)
+        result = await self.agent.run(messages, self.ctx, request="" if autonomous else text)
         if epoch != self._epoch:
             raise asyncio.CancelledError
         if autonomous and (result.say.strip().lower() in _EMPTY_REPLIES
-                           or (self.autonomy is not None and not self.autonomy.allow_speech(result.say))):
+                           or not self.pacer.allow(result.say)):
             result.say = ""
 
         self.active_goal.update(status=result.status, step=result.steps)
-        self.world.task_state = dict(self.active_goal)
         notes = result.action_notes()
         if result.tool_log:
             prefix = "on my own: " if autonomous else ""
@@ -285,8 +274,7 @@ class BehaviorArbiter:
                 kind="autonomous" if autonomous else "conversation",
                 details={"tools": [e["tool"] for e in result.tool_log], "status": result.status},
             )
-        if self.drives is not None:
-            self.drives.on_turn(result, autonomous=autonomous)
+        self.drives.on_turn(result, autonomous=autonomous)
         await self._emit_response(result, correlation_id, autonomous)
         return result
 
@@ -295,15 +283,8 @@ class BehaviorArbiter:
         """A background behaviour chosen without the model: skills run as they would for it, cancellable."""
         self.active_goal = {"objective": reason[:200], "status": "running", "step": 0,
                             "correlation_id": correlation_id, "origin": "autonomous"}
-        self.world.task_state = dict(self.active_goal)
         ctx = self.ctx
-        ctx.correlation_id = correlation_id
-        ctx.cancelled = lambda: epoch != self._epoch
-        ctx.attached_image = None
-        ctx.wake_request_s = None
-        ctx.expression = {}
-        ctx.turn_cache = {}
-        ctx.request = ""
+        ctx.begin_turn(correlation_id, lambda: epoch != self._epoch)
         result = TurnResult(say="", backend_name="autonomy_policy")
         for name, args in plan:
             ctx.check()
@@ -322,13 +303,11 @@ class BehaviorArbiter:
         result.steps = len(result.tool_log)
         result.expression = dict(ctx.expression)
         self.active_goal.update(status=result.status, step=result.steps)
-        self.world.task_state = dict(self.active_goal)
         notes = result.action_notes()
         self.recent_activity.append((self.bus.clock.monotonic(), "on my own: " + "; ".join(notes[-3:])))
         self.memory.log_episode(summary=f"On my own: {'; '.join(notes[-3:])}", kind="autonomous",
                                 details={"tools": [e["tool"] for e in result.tool_log], "status": result.status})
-        if self.drives is not None:
-            self.drives.on_turn(result, autonomous=True)
+        self.drives.on_turn(result, autonomous=True)
         await self._emit_response(result, correlation_id, True)
         return result
 
@@ -353,7 +332,7 @@ class BehaviorArbiter:
             "next_wake_s": result.next_wake_s, "final": True,
             "origin": "autonomous" if autonomous else "user", "goal_state": dict(self.active_goal or {}),
         }, priority=EventPriority.HIGH, correlation_id=correlation_id)
-        if not isinstance(self.bus.clock, RealClock) or not result.say:
+        if not result.say:
             self.fsm.transition(InteractionState.FOLLOW_UP)
 
     # ---- events ------------------------------------------------------------------------------------
@@ -361,10 +340,6 @@ class BehaviorArbiter:
         text = str(event.payload.get("text", "")).strip()
         if not text:
             return
-        if STOP_WORDS.match(text):
-            # Reflex: halt now. The model still gets the message, to acknowledge it.
-            await self.bus.emit("action.cancel", "arbiter", {"reason": "user_stop"},
-                                priority=EventPriority.CRITICAL)
         if self._input_task and not self._input_task.done():
             self._input_task.cancel()
             await self.bus.emit("turn.cancelled", "arbiter", {}, correlation_id=self._input_correlation_id)
@@ -385,7 +360,7 @@ class BehaviorArbiter:
     async def _on_behavior_finished(self, event: Event) -> None:
         """A behaviour that outlives its turn (following) ended on its own: let the robot react to it."""
         p = event.payload
-        if not p.get("persistent") or p.get("ok") or "Stopped" in str(p.get("message", "")) or self.busy:
+        if not p.get("persistent") or p.get("ok") or p.get("cancelled") or self.busy:
             return
         task = asyncio.create_task(self.handle_user_turn(str(p.get("message", ""))[:200] + ".", autonomous=True),
                                    name="arbiter:behavior_event")

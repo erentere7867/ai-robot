@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from robot.core.angles import wrap_deg
 from robot.core.config import PROJECT_ROOT, RobotConfig
 from robot.core.events import Event
 from robot.eval.scenarios import Grade, Scenario, ScenarioRun, TurnRecord, default_cameras, plan_layout
@@ -61,11 +62,11 @@ class ScenarioResult:
 
     @property
     def actions_ok(self) -> int:
-        return sum(1 for t in self.run.turns for a in t.actions if a.get("ok"))
+        return sum(1 for t in self.run.turns for a in t.skills if a.get("ok"))
 
     @property
     def actions_failed(self) -> int:
-        return sum(1 for t in self.run.turns for a in t.actions if not a.get("ok"))
+        return sum(1 for t in self.run.turns for a in t.skills if not a.get("ok"))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,12 +89,9 @@ class ScenarioResult:
 
 
 def truth_pose(body: Any) -> dict[str, float]:
-    """Ground-truth robot pose: `true_pose()` when the body models odometry error, else `pose()`."""
-    getter = getattr(body, "true_pose", None)
-    pose = getter() if callable(getter) else body.pose()
-    if isinstance(pose, Mapping):
-        return {k: round(float(pose.get(k, 0.0)), 1) for k in POSE_KEYS}
-    return {k: round(float(getattr(pose, k, 0.0)), 1) for k in POSE_KEYS}
+    """Ground-truth robot pose."""
+    pose = body.true_pose()
+    return {k: round(float(getattr(pose, k)), 1) for k in POSE_KEYS}
 
 
 def snapshot_objects(sandbox: Any) -> list[dict[str, Any]]:
@@ -104,15 +102,13 @@ def apply_scene(sandbox: Any, scenario: Scenario, seed: int) -> None:
     """Reset the room, then apply the scenario's removals and the seeded, jittered layout.
 
     The person is in the room only for scenarios that place them; they stand facing the robot's start."""
-    reset = getattr(sandbox, "reset_default_scene", None)
-    if callable(reset):
-        reset()
+    sandbox.reset_default_scene()
     for obj_id in scenario.setup.remove:
         sandbox.remove_object(obj_id)
     if "person" not in scenario.setup.overrides:
         sandbox.remove_object("person")
-    room_half = float(getattr(sandbox, "room_half_extent_mm", 1500.0))
-    for obj_id, (x, y) in plan_layout(sandbox.list_objects(), seed, scenario.setup, room_half_mm=room_half).items():
+    layout = plan_layout(sandbox.list_objects(), seed, scenario.setup, room_half_mm=sandbox.room_half_extent_mm)
+    for obj_id, (x, y) in layout.items():
         if obj_id == "person":
             sandbox.move_object(obj_id, x, y, yaw_deg=math.degrees(math.atan2(-y, -x)))
         else:
@@ -123,8 +119,7 @@ def build_config(options: RunOptions, db_path: Path) -> RobotConfig:
     cfg = RobotConfig.from_yaml(options.config_path)
     cfg.database_path = db_path
     # The spatial map is persisted on shutdown; sharing it would leak one scene's objects into the next.
-    if hasattr(cfg, "spatial_map_path"):
-        cfg.spatial_map_path = db_path.with_name(db_path.stem + "_map.json")
+    cfg.spatial_map_path = db_path.with_name(db_path.stem + "_map.json")
     cfg.record_events = False
     cfg.autonomy.enabled = False
     if options.backend:
@@ -141,7 +136,6 @@ class _Probe:
         self.harness = harness
         self.turn: TurnRecord | None = None
         self.last_response: dict[str, Any] | None = None
-        self._action_args: dict[str, Any] = {}
         self._subs: list[str] = []
 
     def attach(self) -> None:
@@ -149,9 +143,6 @@ class _Probe:
             "robot.response": self._on_response,
             "cognition.model_call": self._on_model_call,
             "skill.completed": self._on_skill,
-            "action.started": self._on_action_started,
-            "action.completed": self._on_action_done,
-            "action.failed": self._on_action_done,
             "reflex.triggered": self._on_reflex,
             "body.pose": self._on_pose,
         }
@@ -197,25 +188,7 @@ class _Probe:
         if self.turn is not None:
             p = event.payload
             self.turn.skills.append({"tool": p.get("tool"), "args": p.get("args"), "ok": p.get("ok"),
-                                     "message": str(p.get("message", ""))[:240]})
-
-    def _on_action_started(self, event: Event) -> None:
-        if self.turn is not None:
-            self._action_args[str(event.payload.get("command_id"))] = event.payload.get("args", {})
-
-    def _on_action_done(self, event: Event) -> None:
-        if self.turn is None:
-            return
-        payload = event.payload
-        self.turn.actions.append(
-            {
-                "tool": payload.get("tool"),
-                "args": self._action_args.pop(str(payload.get("command_id")), None),
-                "ok": event.type == "action.completed",
-                "status": payload.get("status"),
-                "message": str(payload.get("message", ""))[:200],
-            }
-        )
+                                     "status": p.get("status"), "message": str(p.get("message", ""))[:240]})
 
     def _on_reflex(self, event: Event) -> None:
         if self.turn is not None:
@@ -240,7 +213,7 @@ class _Probe:
         last = turn.trajectory[-1] if turn.trajectory else turn.pose_before
         if (
             math.hypot(pose["x_mm"] - last["x_mm"], pose["y_mm"] - last["y_mm"]) >= 20.0
-            or abs((pose["heading_deg"] - last["heading_deg"] + 180.0) % 360.0 - 180.0) >= 4.0
+            or abs(wrap_deg(pose["heading_deg"] - last["heading_deg"])) >= 4.0
             or abs(pose["head_tilt_deg"] - last["head_tilt_deg"]) >= 3.0
         ):
             turn.trajectory.append(pose)
@@ -300,7 +273,7 @@ class _Session:
         try:
             await asyncio.wait_for(harness.start(), timeout=start_timeout_s)
             apply_scene(harness.sandbox, scenario, seed)
-            harness.spatial_map.forget_range_hits()  # hits recorded before the scene was arranged
+            harness.spatial_map.grid.clear_hits()  # hits recorded before the scene was arranged
             session.probe.attach()
             session.start_motions(scenario)
         except BaseException:

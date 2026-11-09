@@ -3,7 +3,7 @@
     python scripts/ventuno/mcu_check.py              # 5 s of telemetry: rate, pose, range, faults, battery
     python scripts/ventuno/mcu_check.py --wiggle     # also turn left then right for a second each (wheels up!)
 
-Uses the same link as the robot (robot/body/ventuno_body.py: msgpack-RPC over the Arduino Router socket).
+Uses the same link as the robot (robot/hardware/ventuno_body.py: msgpack-RPC over the Arduino Router socket).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from robot.body.ventuno_body import ROUTER_SOCKET, RouterLink  # noqa: E402
+from robot.hardware.ventuno_body import ROUTER_SOCKET, RouterLink  # noqa: E402
 
 FLAGS = {1: "bumper", 2: "cliff", 4: "estop", 8: "picked up", 16: "charging", 32: "forward blocked",
          64: "wheel stall", 128: "IMU fault", 256: "range sensor fault", 512: "battery low"}

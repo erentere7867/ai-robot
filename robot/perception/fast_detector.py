@@ -9,7 +9,6 @@ the slow layer (the VLM) can name it when that matters.
 from __future__ import annotations
 
 import atexit
-import logging
 import threading
 import time
 import weakref
@@ -18,10 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from robot.perception.camera import Frame
-from robot.perception.detector import Detection
-
-logger = logging.getLogger(__name__)
-
+from robot.perception.detection import Detection
 
 CATCH_ALL = "object"
 
@@ -42,70 +38,6 @@ def suppress_catch_all(dets: list[Detection], threshold: float = 0.6) -> list[De
     """
     named = [d for d in dets if d.label != CATCH_ALL]
     return [d for d in dets if d.label != CATCH_ALL or all(_overlap(d.bbox, n.bbox) < threshold for n in named)]
-
-
-class FastDetector:
-    def __init__(self, weights: Path | str, *, imgsz: int = 320, conf: float = 0.4, device: str | None = None
-                 ) -> None:
-        from ultralytics import YOLO
-
-        self.weights = Path(weights)
-        self.imgsz = imgsz
-        self.conf = conf
-        self._model = YOLO(str(self.weights), task="detect")
-        self.device = device
-        if device is None and self.weights.suffix == ".pt":
-            try:
-                import torch
-
-                self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                self.device = "cpu"
-        self.labels = [str(self._model.names[i]) for i in sorted(self._model.names)]
-        self.vocabulary = [label for label in self.labels if label != CATCH_ALL]  # what it can search for
-        self._lock = threading.Lock()  # one inference at a time; the model is not re-entrant
-        self.last_ms = 0.0
-        self.warm()
-
-    @classmethod
-    def load_default(cls, models_dir: Path, *, prefer_ncnn: bool = False, **kwargs) -> FastDetector | None:
-        """The trained detector from ~/robot-runtime/models, or None if it has not been trained yet."""
-        candidates = [models_dir / "fast_detector_ncnn_model", models_dir / "fast_detector.pt"]
-        if not prefer_ncnn:
-            candidates.reverse()
-        for path in candidates:
-            if path.exists():
-                try:
-                    if path.is_dir():  # NCNN export: run it without PyTorch
-                        return NcnnDetector(path, **{k: v for k, v in kwargs.items() if k != "imgsz"})
-                    return cls(path, **{k: v for k, v in kwargs.items() if k in ("imgsz", "conf", "device")})
-                except Exception:
-                    logger.warning("Could not load the fast detector from %s", path, exc_info=True)
-        return None
-
-    def warm(self) -> None:
-        self.detect_rgb(np.zeros((240, 320, 3), dtype=np.uint8))
-
-    def detect_rgb(self, rgb: np.ndarray) -> list[Detection]:
-        """Detections with normalized boxes for an (H, W, 3) RGB image. Thread-safe; blocking."""
-        h, w = rgb.shape[:2]
-        with self._lock:
-            started = time.perf_counter()
-            result = self._model.predict(np.ascontiguousarray(rgb[:, :, ::-1]), imgsz=self.imgsz, conf=self.conf,
-                                         device=self.device, verbose=False)[0]
-            self.last_ms = 1000.0 * (time.perf_counter() - started)
-        boxes = result.boxes
-        out = []
-        for (x1, y1, x2, y2), cls, score in zip(boxes.xyxy.tolist(), boxes.cls.tolist(), boxes.conf.tolist(),
-                                                 strict=True):
-            out.append(Detection(self.labels[int(cls)], (max(0.0, x1 / w), max(0.0, y1 / h), min(1.0, x2 / w),
-                                                          min(1.0, y2 / h)), float(score)))
-        return suppress_catch_all(out)
-
-    def detect_frame(self, frame: Frame) -> list[Detection]:
-        if frame.rgb is None:
-            return []
-        return self.detect_rgb(frame.rgb)
 
 
 _GPU_NETS: weakref.WeakSet = weakref.WeakSet()
@@ -134,7 +66,7 @@ class NcnnDetector:
     """
 
     def __init__(self, model_dir: Path | str, *, conf: float = 0.4, iou: float = 0.5, threads: int = 4,
-                 gpu: bool = False, **_: object) -> None:
+                 gpu: bool = False) -> None:
         import ncnn
         import yaml
 

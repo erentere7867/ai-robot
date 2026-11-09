@@ -20,154 +20,35 @@ from typing import Any
 import numpy as np
 
 from robot.body.hal import BodyPose
+from robot.core.angles import wrap_deg, wrap_deg_array
 from robot.core.clock import Clock
 from robot.navigation.planner import CircleObstacle
-from robot.perception.detector import Detection
+from robot.perception.detection import Detection
 from robot.perception.geometry import CameraModel
+from robot.perception.lidar import Scan
+from robot.world.labels import (
+    PERSON_WORDS,
+    SPEAKER_WORDS,
+    _associates,
+    _colors,
+    _colors_compatible,
+    _nouns,
+    _tokens,
+    age_words,
+    direction_words,
+    head_noun,
+    label_score,
+    labels_match,
+    parse_reference,
+)
+from robot.world.occupancy import OccupancyGrid
 
-COLORS = {
-    "red", "blue", "green", "yellow", "orange", "brown", "purple", "violet", "pink", "white", "black",
-    "gray", "grey", "teal", "cyan", "tan", "beige", "gold", "silver", "magenta", "lavender",
-}
-# The VLM is not consistent about colour names (the same ball is "red" one time, "pink" the next).
-COLOR_GROUPS = [{"brown", "tan", "beige", "orange", "cardboard", "gold"}, {"purple", "violet", "lavender", "magenta"},
-                {"gray", "grey", "silver"}, {"teal", "cyan", "green"}, {"teal", "cyan", "blue"},
-                {"red", "pink", "magenta", "crimson", "rose"}, {"yellow", "gold", "orange"}]
-SYNONYMS = [
-    {"box", "carton", "crate", "package", "cube", "block"},
-    {"ball", "sphere", "orb"},
-    {"mug", "cup", "cylinder", "can", "glass", "jar", "bottle"},
-    {"duck", "duckling", "bird", "toy"},
-    {"dock", "charger", "station", "pad", "base", "platform"},
-    {"person", "human", "man", "woman", "people", "child", "kid"},
-]
-FILLER = {"a", "an", "the", "small", "large", "big", "little", "tiny", "toy", "object", "shaped", "colored",
-          "coloured", "plastic", "wooden", "rubber", "my", "your", "that", "this", "of", "on", "with", "and"}
-
-CELL_MM = 50.0
 ASKED_PLACE = "where_asked"  # where I was when the current request came: what "come back" means
 PLACE_NOTES = {"start": " (where I was switched on)", ASKED_PLACE: " (where I was when the human asked)"}
-# Words for the human who is talking. The model is told the human is "me"; people say "come here".
-SPEAKER_WORDS = {"me", "you", "user", "human", "the human", "the user", "person talking", "speaker", "here",
-                 "over here", "to me", "the person talking to you", "whoever is talking"}
-PERSON_WORDS = {"person", "human", "man", "woman", "people", "child", "kid"}
 # How far beyond the visible bottom edge an object's centre is. Round things: one radius. A person's box is
 # as wide as their arms, but they stand on their feet: the centre is just behind the toes.
 FOOTPRINT_DEPTH_MM = {"person": 110.0}
 LIDAR_DEPTH_MM = {"person": 40.0}  # from the lidar's returns to the centre: it sees the fronts of the legs
-
-
-def _tokens(label: str) -> list[str]:
-    return re.findall(r"[a-z]+", label.lower())
-
-
-def _colors(tokens: list[str]) -> set[str]:
-    found = {t for t in tokens if t in COLORS}
-    if "cardboard" in tokens:
-        found.add("brown")
-    return found
-
-
-def _nouns(tokens: list[str]) -> set[str]:
-    return {t for t in tokens if t not in COLORS and t not in FILLER}
-
-
-def _colors_compatible(a: set[str], b: set[str]) -> bool:
-    if not a or not b or a & b:
-        return True
-    return any(a & g and b & g for g in COLOR_GROUPS)
-
-
-def _nouns_compatible(a: set[str], b: set[str]) -> bool:
-    if a & b:
-        return True
-    return any(a & g and b & g for g in SYNONYMS)
-
-
-def labels_match(a: str, b: str) -> bool:
-    return label_score(a, b) > 0
-
-
-def _near_miss(a: str, b: str) -> bool:
-    """One typo apart ("boz" for "box"): same first letter, one letter changed, added or dropped."""
-    if a[0] != b[0] or min(len(a), len(b)) < 3 or abs(len(a) - len(b)) > 1:
-        return False
-    if len(a) == len(b):
-        return sum(x != y for x, y in zip(a, b, strict=True)) == 1
-    short, long = sorted((a, b), key=len)
-    return any(long[:i] + long[i + 1:] == short for i in range(len(long)))
-
-
-def label_score(a: str, b: str) -> int:
-    """2 = same kind of thing (shared noun), 1 = synonym (box~cube) or a typo of one, 0 = different;
-    colours must agree."""
-    ta, tb = _tokens(a), _tokens(b)
-    if not _colors_compatible(_colors(ta), _colors(tb)):
-        return 0
-    na, nb = _nouns(ta), _nouns(tb)
-    if na & nb:
-        return 2
-    if _nouns_compatible(na, nb):
-        return 1
-    return 1 if any(_near_miss(x, y) for x in na for y in nb) else 0
-
-
-# Referring to things by where they are or how they compare: "the thing behind you", "the closest box",
-# "whichever one is nearest". Egocentric directions are (centre bearing, half width) in degrees, + = left.
-_SECTORS = {"behind": (180.0, 65.0), "back": (180.0, 65.0), "left": (90.0, 60.0), "right": (-90.0, 60.0),
-            "front": (0.0, 45.0), "ahead": (0.0, 45.0)}
-_SUPERLATIVES = {"closest": "near", "nearest": "near", "farthest": "far", "furthest": "far", "biggest": "big",
-                 "largest": "big", "smallest": "small", "tiniest": "small"}
-_REFERRING = {"you", "me", "i", "of", "to", "in", "at", "side", "thing", "things", "one", "ones", "which",
-              "whichever", "is", "are", "over", "there", "here", "it", "stuff", "item", "whatever", "something",
-              "next", "now", "currently", "just", "right", "most"} | set(_SECTORS) | set(_SUPERLATIVES)
-
-
-def parse_reference(text: str) -> tuple[str, tuple[float, float] | None, str | None]:
-    """("box", sector, "near") for "the closest box behind you": what kind, where, which of several."""
-    words = _tokens(text)
-    sectors = [_SECTORS[w] for w in words if w in _SECTORS]
-    superlative = next((_SUPERLATIVES[w] for w in words if w in _SUPERLATIVES), None)
-    kind = " ".join(w for w in words if w not in _REFERRING and w not in FILLER)
-    return kind, sectors[0] if len(sectors) == 1 else None, superlative
-
-
-def _associates(track_label: str, det_label: str) -> bool:
-    """Can this detection be this track? A catch-all "object" box can be anything (by position), including a
-    thing the VLM has since named ("keys")."""
-    return det_label == "object" or labels_match(track_label, det_label)
-
-
-def head_noun(label: str) -> str:
-    nouns = [t for t in _tokens(label) if t not in COLORS and t not in FILLER]
-    return (nouns[-1] if nouns else "object")[:16]
-
-
-def direction_words(rel_bearing_deg: float) -> str:
-    a = (rel_bearing_deg + 180.0) % 360.0 - 180.0
-    side = "left" if a > 0 else "right"
-    b = abs(a)
-    if b < 10:
-        return "straight ahead"
-    if b < 35:
-        return f"ahead, slightly {side}"
-    if b < 70:
-        return f"front-{side}"
-    if b < 110:
-        return f"to my {side}"
-    if b < 160:
-        return f"behind-{side}"
-    return "behind me"
-
-
-def age_words(age_s: float) -> str:
-    if age_s < 20:
-        return "seen just now"
-    if age_s < 90:
-        return f"seen {age_s:.0f}s ago"
-    if age_s < 5400:
-        return f"seen {age_s / 60:.0f} min ago"
-    return f"seen {age_s / 3600:.0f} h ago"
 
 
 @dataclass
@@ -201,7 +82,7 @@ class TrackedObject:
     def relative(self, pose: BodyPose) -> tuple[float, float]:
         dx, dy = self.x_mm - pose.x_mm, self.y_mm - pose.y_mm
         bearing = math.degrees(math.atan2(dy, dx)) - pose.heading_deg
-        return math.hypot(dx, dy), (bearing + 180.0) % 360.0 - 180.0
+        return math.hypot(dx, dy), wrap_deg(bearing)
 
     @property
     def is_person(self) -> bool:
@@ -218,19 +99,6 @@ class Speaker:
     track: str | None = None  # the person it matched (a TrackedObject id)
     point: tuple[float, float] | None = None  # where they are (track, lidar or a guess)
     how: str = "voice"  # "seen" (matched a person I see), "lidar" (something solid there), "voice" (a guess)
-
-
-def scan_points(scan: Any) -> np.ndarray:
-    """A lidar scan's returns as world points (N, 2), from the lidar's mount on the mast."""
-    ranges = np.asarray(scan.ranges_mm, dtype=np.float64)
-    ok = np.isfinite(ranges)
-    if not ok.any():
-        return np.zeros((0, 2))
-    h = math.radians(scan.pose.heading_deg)
-    mount = getattr(scan, "mount_x_mm", -105.0)
-    ox, oy = scan.pose.x_mm + mount * math.cos(h), scan.pose.y_mm + mount * math.sin(h)
-    th = h + np.radians(np.asarray(scan.angles_deg, dtype=np.float64)[ok])
-    return np.stack([ox + ranges[ok] * np.cos(th), oy + ranges[ok] * np.sin(th)], axis=1)
 
 
 REFERENCE_FOCAL_PX = 400.0  # the lens the error model below was measured with
@@ -323,18 +191,12 @@ class SpatialMap:
     def __init__(self, clock: Clock, *, half_extent_mm: float = 3000.0, max_objects: int = 48) -> None:
         self.lock = threading.RLock()
         self.clock = clock
-        self.half = float(half_extent_mm)
         self.max_objects = max_objects
-        self.n = int(math.ceil(2 * self.half / CELL_MM))
         self.objects: ObjectTable = ObjectTable()
         self.places: dict[str, tuple[float, float]] = {}
         self.speaker: Speaker | None = None
-        self.occupancy = np.zeros((self.n, self.n), dtype=np.float32)  # log-odds-like evidence
-        self.seen = np.zeros((self.n, self.n), dtype=bool)  # floor cells the camera has looked at
+        self.grid = OccupancyGrid(half_extent_mm)
         self._counters: dict[str, int] = {}
-        centers = -self.half + (np.arange(self.n) + 0.5) * CELL_MM
-        self._xs = np.broadcast_to(centers[:, None], (self.n, self.n))
-        self._ys = np.broadcast_to(centers[None, :], (self.n, self.n))
 
     # ---- objects -------------------------------------------------------------------------------
     def _new_id(self, label: str) -> str:
@@ -355,7 +217,7 @@ class SpatialMap:
             if obj.id in matched or not _associates(obj.label, det.label):
                 continue
             dist, rel = obj.relative(pose)
-            err = abs((rel - bearing + 180.0) % 360.0 - 180.0)
+            err = abs(wrap_deg(rel - bearing))
             if dist < max_dist_mm and err < best_err:
                 best, best_err = obj, err
         return best
@@ -368,14 +230,14 @@ class SpatialMap:
         if scan is None:
             return None
         cx, cy, _, _, _ = model.extrinsics(pose)
-        pts = scan_points(scan)
+        pts = scan.world_points()
         if not len(pts):
             return None
         lo, hi = sorted((model.bearing_deg(bbox[0] + 0.15 * (bbox[2] - bbox[0])),
                          model.bearing_deg(bbox[2] - 0.15 * (bbox[2] - bbox[0]))))
-        rel = (np.degrees(np.arctan2(pts[:, 1] - cy, pts[:, 0] - cx)) - pose.heading_deg + 180.0) % 360.0 - 180.0
+        rel = wrap_deg_array(np.degrees(np.arctan2(pts[:, 1] - cy, pts[:, 0] - cx)) - pose.heading_deg)
         mid = 0.5 * (lo + hi)
-        inside = np.abs((rel - mid + 180.0) % 360.0 - 180.0) <= 0.5 * (hi - lo) + 1.0
+        inside = np.abs(wrap_deg_array(rel - mid)) <= 0.5 * (hi - lo) + 1.0
         if not inside.any():
             return None
         near, d = pts[inside], np.hypot(pts[inside, 0] - cx, pts[inside, 1] - cy)
@@ -529,7 +391,7 @@ class SpatialMap:
             if obj.confidence < 0.15:
                 del self.objects[obj.id]
                 update.lost.append(obj)
-        self.mark_coverage(pose, model)
+        self.grid.mark_coverage(pose, model)
         if self.speaker is not None and self.speaker.how != "seen":
             self.speaker_track()  # re-bind a heard speaker to the person this view may have shown
         return update
@@ -556,7 +418,7 @@ class SpatialMap:
 
     # ---- people and the voice ------------------------------------------------------------------------
     @_locked
-    def hear_voice(self, pose: BodyPose, bearing_deg: float, *, scan: Any = None, origin_mm: float = 25.0
+    def hear_voice(self, pose: BodyPose, bearing_deg: float, *, origin_mm: float, scan: Scan | None = None
                    ) -> Speaker:
         """Someone spoke from `bearing_deg` (relative to my heading, from the microphone array above the head
         pivot). Find who: a person I see in that direction; else note where they probably are (something solid
@@ -564,10 +426,10 @@ class SpatialMap:
         now = self.clock.monotonic()
         h = math.radians(pose.heading_deg)
         ox, oy = pose.x_mm + origin_mm * math.cos(h), pose.y_mm + origin_mm * math.sin(h)
-        world = (pose.heading_deg + bearing_deg + 180.0) % 360.0 - 180.0
+        world = wrap_deg(pose.heading_deg + bearing_deg)
 
         def off(x: float, y: float) -> float:
-            return abs((math.degrees(math.atan2(y - oy, x - ox)) - world + 180.0) % 360.0 - 180.0)
+            return abs(wrap_deg(math.degrees(math.atan2(y - oy, x - ox)) - world))
 
         people = [o for o in self.objects.values() if o.is_person and o.confidence >= 0.3
                   and now - o.last_seen < 60.0 and off(o.x_mm, o.y_mm) < 25.0]
@@ -577,10 +439,10 @@ class SpatialMap:
             speaker.track, speaker.point, speaker.how = best.id, (best.x_mm, best.y_mm), "seen"
         else:
             hit = None
-            pts = scan_points(scan) if scan is not None else np.zeros((0, 2))
+            pts = scan.world_points() if scan is not None else np.zeros((0, 2))
             if len(pts):
                 d = np.hypot(pts[:, 0] - ox, pts[:, 1] - oy)
-                ang = np.abs((np.degrees(np.arctan2(pts[:, 1] - oy, pts[:, 0] - ox)) - world + 180.0) % 360.0 - 180.0)
+                ang = np.abs(wrap_deg_array(np.degrees(np.arctan2(pts[:, 1] - oy, pts[:, 0] - ox)) - world))
                 near = (ang < 8.0) & (d > 250.0) & (d < 5000.0)
                 if near.any():
                     r = float(np.min(d[near])) + 100.0  # legs: the person stands just behind the nearest return
@@ -594,7 +456,7 @@ class SpatialMap:
         return speaker
 
     def _clip(self, x: float, y: float) -> tuple[float, float]:
-        lim = self.half - 100.0
+        lim = self.grid.half - 100.0
         return max(-lim, min(lim, x)), max(-lim, min(lim, y))
 
     @_locked
@@ -606,8 +468,8 @@ class SpatialMap:
         if sp is not None and sp.how != "seen":
             ox, oy = sp.origin
             seen = [o for o in self.objects.values() if o.is_person and o.seen_count >= 2
-                    and o.last_seen >= sp.heard_at - 1.0 and abs((math.degrees(math.atan2(o.y_mm - oy, o.x_mm - ox))
-                                                                   - sp.bearing_deg + 180.0) % 360.0 - 180.0) < 25.0]
+                    and o.last_seen >= sp.heard_at - 1.0
+                    and abs(wrap_deg(math.degrees(math.atan2(o.y_mm - oy, o.x_mm - ox)) - sp.bearing_deg)) < 25.0]
             if seen:
                 best = min(seen, key=lambda o: math.hypot(o.x_mm - ox, o.y_mm - oy))
                 sp.track, sp.point, sp.how = best.id, (best.x_mm, best.y_mm), "seen"
@@ -658,7 +520,7 @@ class SpatialMap:
         if sector is not None and pose is not None:
             centre, half = sector
             candidates = [o for o in candidates
-                          if abs((o.relative(pose)[1] - centre + 180.0) % 360.0 - 180.0) <= half]
+                          if abs(wrap_deg(o.relative(pose)[1] - centre)) <= half]
         candidates = [o for o in candidates if o.confidence >= 0.2] or candidates
         if not candidates:
             return None
@@ -713,100 +575,14 @@ class SpatialMap:
         return [CircleObstacle(o.x_mm, o.y_mm, 1.42 * o.radius_mm + 10.0, o.id) for o in self.objects.values()
                 if o.id not in exclude and o.confidence >= 0.3]
 
-    def occupied_mask(self) -> np.ndarray:
-        return self.occupancy > 0.6
-
-    def to_cell(self, x_mm: float, y_mm: float) -> tuple[int, int] | None:
-        i, j = int((x_mm + self.half) // CELL_MM), int((y_mm + self.half) // CELL_MM)
-        return (i, j) if 0 <= i < self.n and 0 <= j < self.n else None
-
-    @_locked
-    def forget_range_hits(self) -> None:
-        """Clear range-sensor occupancy (after the room is rearranged, old hits would be ghost obstacles)."""
-        self.occupancy[:] = 0.0
-
-    @_locked
-    def update_range(self, pose: BodyPose, range_mm: float, *, offset_mm: float = 141.0,
-                     max_range_mm: float = 2400.0) -> None:
-        """Integrate one forward range reading: free space along the beam, an obstacle at its end."""
-        if not math.isfinite(range_mm) or range_mm <= 0:
-            return
-        yaw = math.radians(pose.heading_deg)
-        c, s = math.cos(yaw), math.sin(yaw)
-        ox, oy = pose.x_mm + offset_mm * c, pose.y_mm + offset_mm * s
-        hit = range_mm < max_range_mm
-        length = min(range_mm, max_range_mm)
-        steps = int(length // (CELL_MM * 0.7))
-        last = None
-        for k in range(steps):
-            d = k * CELL_MM * 0.7
-            cell = self.to_cell(ox + d * c, oy + d * s)
-            if cell is None:
-                break
-            if cell != last and d < length - CELL_MM:
-                self.occupancy[cell] = max(-2.0, self.occupancy[cell] - 0.35)
-            last = cell
-        if hit:
-            self.add_obstacle_point(ox + range_mm * c, oy + range_mm * s, weight=0.9)
-
-    @_locked
-    def update_scan(self, pose: BodyPose, angles_deg: np.ndarray, ranges_mm: np.ndarray, *,
-                    max_range_mm: float = 4000.0, hit_weight: float = 0.7, free_weight: float = 0.25,
-                    mount_x_mm: float = -105.0) -> None:
-        """Integrate a 360-degree scan: free space along the beams, an obstacle where each one ends.
-
-        Vectorised, ~1 ms: free space is traced on every second beam (neighbours cover the same cells at
-        this grid size), hits on all of them; the same evidence rules as a single range reading."""
-        ranges = np.asarray(ranges_mm, dtype=np.float64)
-        th = np.radians(pose.heading_deg + np.asarray(angles_deg, dtype=np.float64))
-        yaw = math.radians(pose.heading_deg)
-        pose = BodyPose(pose.x_mm + mount_x_mm * math.cos(yaw), pose.y_mm + mount_x_mm * math.sin(yaw),
-                        pose.heading_deg)  # rays start at the lidar, not the robot's centre
-        occ = self.occupancy.reshape(-1)
-        stride = 2 if len(ranges) >= 180 else 1
-        r_free, th_free = ranges[::stride], th[::stride]
-        length = np.minimum(np.where(np.isfinite(r_free), r_free, max_range_mm), max_range_mm)
-        d = np.arange(0.0, float(length.max(initial=0.0)), CELL_MM)
-        free = d[None, :] < (length[:, None] - CELL_MM)
-        cells = self._cells((pose.x_mm + d[None, :] * np.cos(th_free)[:, None])[free],
-                            (pose.y_mm + d[None, :] * np.sin(th_free)[:, None])[free])
-        mask = np.zeros(occ.size, dtype=bool)
-        mask[cells] = True
-        occ[mask] = np.maximum(-2.0, occ[mask] - free_weight)
-        hit = np.isfinite(ranges) & (ranges < max_range_mm)
-        if hit.any():
-            mask[:] = False
-            mask[self._cells(pose.x_mm + ranges[hit] * np.cos(th[hit]),
-                             pose.y_mm + ranges[hit] * np.sin(th[hit]))] = True
-            occ[mask] = np.minimum(3.0, occ[mask] + hit_weight)
-
-    def _cells(self, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
-        """Flat grid indices of points inside the map."""
-        i = np.floor((xs + self.half) / CELL_MM).astype(np.int64)
-        j = np.floor((ys + self.half) / CELL_MM).astype(np.int64)
-        inside = (i >= 0) & (i < self.n) & (j >= 0) & (j < self.n)
-        return i[inside] * self.n + j[inside]
-
-    @_locked
-    def add_obstacle_point(self, x_mm: float, y_mm: float, *, weight: float = 1.5) -> None:
-        cell = self.to_cell(x_mm, y_mm)
-        if cell is not None:
-            self.occupancy[cell] = min(3.0, self.occupancy[cell] + weight)
-
-    @_locked
-    def mark_coverage(self, pose: BodyPose, model: CameraModel, *, range_mm: float = 2200.0) -> None:
-        cx, cy, _, yaw, _ = model.extrinsics(pose)
-        dx, dy = self._xs - cx, self._ys - cy
-        dist = np.hypot(dx, dy)
-        ang = (np.degrees(np.arctan2(dy, dx) - yaw) + 180.0) % 360.0 - 180.0
-        self.seen |= (dist <= range_mm) & (dist >= 250.0) & (np.abs(ang) <= 0.5 * model.hfov_deg - 2)
-
-    @_locked
-    def unseen_fraction_near(self, x_mm: float, y_mm: float, radius_mm: float = 1500.0) -> float:
-        mask = (self._xs - x_mm) ** 2 + (self._ys - y_mm) ** 2 <= radius_mm ** 2
-        free = mask & ~(self.occupancy > 0.6)
-        total = int(free.sum())
-        return float((free & ~self.seen).sum()) / total if total else 0.0
+    def occupied_points(self, exclude: set[str]) -> np.ndarray:
+        """Range-sensor hits as planner points, minus those on objects I am allowed to approach."""
+        points = self.grid.occupied_points()
+        for obj_id in exclude:
+            obj = self.objects.get(obj_id)
+            if obj is not None:
+                points = points[np.hypot(points[:, 0] - obj.x_mm, points[:, 1] - obj.y_mm) > obj.radius_mm + 120.0]
+        return points
 
     # ---- persistence -----------------------------------------------------------------------------
     @_locked
@@ -817,9 +593,8 @@ class SpatialMap:
                          "bearing_deg": round(o.relative(pose)[1], 1), "age_s": round(now - o.last_seen, 1)}
                         for o in self.objects.values()],
             "places": {k: [round(v[0]), round(v[1])] for k, v in self.places.items()},
-            "occupied_cells": [[round(float(self._xs[i, j])), round(float(self._ys[i, j]))]
-                               for i, j in zip(*np.nonzero(self.occupied_mask()), strict=True)][:2000],
-            "coverage": round(float(self.seen.mean()), 3),
+            "occupied_cells": [[round(float(x)), round(float(y))] for x, y in self.grid.occupied_points()][:2000],
+            "coverage": round(self.grid.coverage(), 3),
         }
 
     @_locked

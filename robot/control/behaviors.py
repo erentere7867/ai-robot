@@ -1,4 +1,4 @@
-"""Continuous behaviours: closed-loop controllers the fast loop ticks about 20 times a second.
+"""Continuous behaviours: closed-loop controllers the fast loop ticks 20-50 times a second.
 
 A behaviour reads the live world (pose, range sensor, the spatial map that perception keeps current)
 and returns a speed command, or Done when it has succeeded or failed. Goals are recomputed every tick
@@ -14,11 +14,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
-
-from robot.body.hal import BodyPose
+from robot.body.hal import BodyPose, GestureSpec, Reflex
+from robot.core.angles import wrap_deg as wrap
 from robot.navigation.planner import GridPlanner
-from robot.world.spatial_map import SpatialMap, TrackedObject, label_score
+from robot.world.labels import label_score
+from robot.world.spatial_map import SpatialMap, TrackedObject
 
 ROBOT_CLEARANCE_MM = 300.0  # object surface to my centre when I stop "near" it
 ARRIVE_MM = 60.0
@@ -26,14 +26,6 @@ WAYPOINT_MM = 150.0
 FACE_TOLERANCE_DEG = 3.0
 MAX_V = 320.0
 MAX_W = 120.0
-REFLEX_WORDS = {"obstacle_stop": "something is right in front of me",
-                "obstacle_behind": "something is right behind me",
-                "bumper": "Bumper pressed: I bumped into something", "cliff_detected": "there is a drop ahead",
-                "estop_active": "the emergency stop is on"}
-
-
-def wrap(deg: float) -> float:
-    return (deg + 180.0) % 360.0 - 180.0
 
 
 def bearing_to(pose: BodyPose, x: float, y: float) -> float:
@@ -46,7 +38,7 @@ class Tick:
     dt: float
     pose: BodyPose
     tof_mm: float
-    blocked: str | None  # reflex that limited the last speed command
+    blocked: Reflex | None  # what limited the last speed command
     world: SpatialMap
     planner: GridPlanner
 
@@ -55,6 +47,7 @@ class Tick:
 class Drive:
     v: float  # mm/s
     w: float  # deg/s (+ = left)
+    head_deg: float | None = None  # head tilt to move to; None leaves it where it is
 
 
 @dataclass
@@ -62,6 +55,15 @@ class Done:
     ok: bool
     message: str
     data: dict[str, Any] = field(default_factory=dict)
+    cancelled: bool = False  # stopped from outside rather than succeeding or failing on its own
+
+
+@dataclass
+class NoWay:
+    """Why a path could not be driven; `words` finishes "I couldn't get there: ..."."""
+
+    words: str
+    contact: bool = False  # the robot keeps physically running into something
 
 
 def turn_rate(error_deg: float, *, gain: float = 3.0, min_rate: float = 0.0) -> float:
@@ -79,20 +81,6 @@ def steer_to(pose: BodyPose, x: float, y: float, *, v_max: float, slow_mm: float
         return Drive(0.0, turn_rate(err))
     v = v_max * min(1.0, dist / max(1.0, slow_mm)) * math.cos(math.radians(err)) ** 2
     return Drive(max(40.0, v) if dist > 20.0 else 0.0, turn_rate(err))
-
-
-def occupied_points(world: SpatialMap, exclude: set[str]) -> np.ndarray:
-    """Range-sensor hits as planner points, minus those on objects I am allowed to approach."""
-    idx = np.nonzero(world.occupied_mask())
-    if not len(idx[0]):
-        return np.zeros((0, 2))
-    cell = 50.0
-    points = np.stack([-world.half + (idx[0] + 0.5) * cell, -world.half + (idx[1] + 0.5) * cell], axis=1)
-    for obj_id in exclude:
-        obj = world.objects.get(obj_id)
-        if obj is not None:
-            points = points[np.hypot(points[:, 0] - obj.x_mm, points[:, 1] - obj.y_mm) > obj.radius_mm + 120.0]
-    return points
 
 
 class PathFollower:
@@ -115,22 +103,22 @@ class PathFollower:
         return self.end is not None and math.hypot(pose.x_mm - self.end[0], pose.y_mm - self.end[1]) <= ARRIVE_MM
 
     def drive(self, t: Tick, goal: tuple[float, float], *, v_max: float = MAX_V, slow_mm: float = 350.0,
-              fallbacks: list[tuple[float, float]] | None = None) -> Drive | str:
+              fallbacks: list[tuple[float, float]] | None = None) -> Drive | NoWay:
         """`fallbacks` are acceptable alternatives (in order) for when the goal itself is blocked."""
         pose = t.pose
-        if t.blocked == "obstacle_stop":
+        if t.blocked is Reflex.OBSTACLE_AHEAD:
             # Something is right in front that the map did not know: remember it so the plan goes around.
             self.blocked_count += 1
             if self.blocked_count > 8:
-                return "the way is blocked by something I keep running into"
+                return NoWay("the way is blocked by something I keep running into", contact=True)
             yaw = math.radians(pose.heading_deg)
             for lateral in (-60.0, 0.0, 60.0):
-                t.world.add_obstacle_point(pose.x_mm + 260.0 * math.cos(yaw) - lateral * math.sin(yaw),
+                t.world.grid.add_obstacle_point(pose.x_mm + 260.0 * math.cos(yaw) - lateral * math.sin(yaw),
                                            pose.y_mm + 260.0 * math.sin(yaw) + lateral * math.cos(yaw))
             self.planned_at = -math.inf
-        elif t.blocked in ("bumper", "cliff_detected", "estop_active"):
-            return REFLEX_WORDS[t.blocked]
-        elif t.blocked == "obstacle_behind":  # paths are driven forwards; only a reversing correction meets it
+        elif t.blocked is not None and t.blocked.halts:
+            return NoWay(t.blocked.words, contact=t.blocked is Reflex.BUMPER)
+        elif t.blocked is Reflex.OBSTACLE_BEHIND:  # paths are driven forwards; only a reversing correction meets it
             self.planned_at = -math.inf
         moved = self.goal is None or math.hypot(goal[0] - self.goal[0], goal[1] - self.goal[1]) > 120.0
         if moved or not self.waypoints or t.now - self.planned_at > self.REPLAN_S:
@@ -139,15 +127,14 @@ class PathFollower:
             obstacles = [dataclasses.replace(ob, radius_mm=t.world.objects[ob.label].radius_mm + 10.0)
                          if ob.label in self.ignore_hits_on and ob.label in t.world.objects else ob
                          for ob in t.world.obstacles(exclude=self.exclude)]
-            points = occupied_points(t.world, self.ignore_hits_on)
+            points = t.world.occupied_points(self.ignore_hits_on)
             target = goal
             if fallbacks:
                 target = t.planner.first_free([goal, *fallbacks], obstacles, points=points) or goal
             plan = t.planner.plan((pose.x_mm, pose.y_mm), target, obstacles, points=points)
             if not plan.ok:
-                if "outside" in plan.message:
-                    return "that spot is outside the area I can map"
-                return "every way there is blocked by walls or objects; there may not be room for me"
+                return NoWay("that spot is outside the area I can map" if plan.outside
+                             else "every way there is blocked by walls or objects; there may not be room for me")
             self.waypoints, self.goal, self.planned_at = list(plan.waypoints), goal, t.now
             self.end = self.waypoints[-1] if self.waypoints else goal
         while len(self.waypoints) > 1 and math.hypot(pose.x_mm - self.waypoints[0][0],
@@ -202,6 +189,48 @@ class Turn(Behavior):
         return f"turning {abs(self.angle):.0f} degrees"
 
 
+class TiltHead(Behavior):
+    name = "tilt_head"
+    SETTLE_S = 1.5
+
+    def __init__(self, angle_deg: float) -> None:
+        super().__init__()
+        self.angle = float(angle_deg)
+
+    def step(self, t: Tick) -> Drive | Done:
+        if abs(t.pose.head_tilt_deg - self.angle) < 1.0 or t.now - self.started_at > self.SETTLE_S:
+            return Done(True, f"Tilted head to {self.angle:.1f} degrees.")
+        return Drive(0.0, 0.0, self.angle)
+
+
+class Gesture(Behavior):
+    """Play a short motion from body.yaml; a reflex cuts it short."""
+
+    name = "gesture"
+
+    def __init__(self, spec: GestureSpec) -> None:
+        super().__init__()
+        self.spec = spec
+        self.index = 0
+        self.step_started: float | None = None
+
+    def describe(self) -> str:
+        return f"doing a {self.spec.name}"
+
+    def step(self, t: Tick) -> Drive | Done:
+        if t.blocked is not None and t.blocked.halts:
+            return Done(False, f"A reflex stopped the {self.spec.name}: {t.blocked.words}.")
+        while self.index < len(self.spec.steps):
+            step = self.spec.steps[self.index]
+            if self.step_started is None:
+                self.step_started = t.now
+            if t.now - self.step_started < step.seconds:
+                return Drive(step.v, step.w, step.head_deg)
+            self.index += 1
+            self.step_started = None
+        return Done(True, f"Performed {self.spec.name}.")
+
+
 class Move(Behavior):
     name = "move"
 
@@ -220,9 +249,9 @@ class Move(Behavior):
         direction = "forward" if self.distance > 0 else "backward"
         if abs(remaining) < 10.0:
             return Done(True, f"I moved {direction} {abs(self.distance) / 10:.0f} cm.")
-        if t.blocked and (self.distance > 0 or t.blocked != "obstacle_stop"):
+        if t.blocked and (self.distance > 0 or t.blocked is not Reflex.OBSTACLE_AHEAD):
             return Done(False, f"Moved only {abs(done) / 10:.0f} of {abs(self.distance) / 10:.0f} cm: "
-                               f"{REFLEX_WORDS.get(t.blocked, t.blocked)}.")
+                               f"{t.blocked.words}.")
         speed = math.copysign(min(250.0, max(60.0, 2.0 * abs(remaining))), remaining)
         return Drive(speed, turn_rate(wrap(o.heading_deg - t.pose.heading_deg)))
 
@@ -342,13 +371,13 @@ class GoToObject(Behavior):
                              if g is not None] if self.relation.kind in ("behind", "near", "in_front_of",
                                                                          "left_of", "right_of") else None
                 drive = self.follower.drive(t, goal, fallbacks=fallbacks)
-                if isinstance(drive, str):
-                    if self.relation.kind == "on" and ("keep running into" in drive or "Bumper" in drive) and \
+                if isinstance(drive, NoWay):
+                    if self.relation.kind == "on" and drive.contact and \
                             math.hypot(pose.x_mm - obj.x_mm, pose.y_mm - obj.y_mm) < obj.radius_mm + 450.0:
                         return Done(True, f"{self.obj_id} is solid, so I can't drive onto it; I'm right next to it.",
                                     {"target": self.obj_id})
                     return Done(False, f"I couldn't get {self.relation.kind.replace('_', ' ')} {self.obj_id}: "
-                                       f"{drive}")
+                                       f"{drive.words}")
                 return drive
         if self.phase == "face":
             err = bearing_to(pose, obj.x_mm, obj.y_mm)
@@ -382,7 +411,7 @@ class GoToPoint(Behavior):
         if self.follower.at_end(t.pose) and not self.follower.waypoints[1:]:
             return Done(True, f"I'm as close to {self.label} as the space allows.")
         drive = self.follower.drive(t, self.point)
-        return Done(False, f"I couldn't get to {self.label}: {drive}") if isinstance(drive, str) else drive
+        return Done(False, f"I couldn't get to {self.label}: {drive.words}") if isinstance(drive, NoWay) else drive
 
 
 class Follow(Behavior):
@@ -416,7 +445,7 @@ class Follow(Behavior):
             return Drive(-min(200.0, 1.5 * (keep - dist)), turn_rate(err))
         goal = (obj.x_mm - dx / dist * keep, obj.y_mm - dy / dist * keep)
         drive = self.follower.drive(t, goal, v_max=min(MAX_V + 60.0, 160.0 + 0.6 * (dist - keep)), slow_mm=250.0)
-        return Drive(0.0, turn_rate(err)) if isinstance(drive, str) else drive
+        return Drive(0.0, turn_rate(err)) if isinstance(drive, NoWay) else drive
 
 
 class Search(Behavior):
@@ -520,7 +549,7 @@ class Orbit(Behavior):
                 self.points.pop(0)  # there, or as close as walls allow (a point inside the wall margin)
                 continue
             drive = self.follower.drive(t, target, v_max=240.0, slow_mm=1.0)
-            if isinstance(drive, str):
+            if isinstance(drive, NoWay):
                 self.points.pop(0)
                 self.skipped += 1
                 self.follower = PathFollower()

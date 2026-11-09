@@ -30,13 +30,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from robot.cognition.llamacpp import LlamaCppBackend  # noqa: E402
+from robot.cognition.vlm import VLMDetector  # noqa: E402
 from robot.core.config import RobotConfig  # noqa: E402
 from robot.perception.camera import Frame  # noqa: E402
-from robot.perception.datagen import OBJECT_CLASS, SceneRandomizer  # noqa: E402
-from robot.perception.detector import VLMDetector, _iou  # noqa: E402
-from robot.perception.fast_detector import FastDetector  # noqa: E402
-from robot.world.sandbox import SimulationSandbox  # noqa: E402
-from robot.world.spatial_map import head_noun  # noqa: E402
+from robot.perception.detection import _iou  # noqa: E402
+from robot.platform import load_detector  # noqa: E402
+from robot.sim.datagen import OBJECT_CLASS, SceneRandomizer  # noqa: E402
+from robot.sim.sandbox import SimulationSandbox  # noqa: E402
+from robot.world.labels import head_noun  # noqa: E402
 
 NAMES = {"red_ball": "red ball", "blue_cube": "blue cube", "yellow_duck": "yellow duck", "green_mug": "green mug",
          "cardboard_box": "cardboard box", "charging_dock": "charging dock", "person": "person"}
@@ -77,10 +78,7 @@ async def main() -> int:
     sandbox = SimulationSandbox()
     randomizer = SceneRandomizer(sandbox, args.seed)
     detector = VLMDetector(backend)
-    fast = None
-    for models_dir in (cfg.runtime_dir / "models", Path(__file__).resolve().parents[1] / "models"):
-        fast = fast or FastDetector.load_default(models_dir, prefer_ncnn=cfg.perception.prefer_ncnn,
-                                                 conf=cfg.perception.confidence)
+    fast = load_detector(cfg)
     bands = {name: [0, 0, 0] for _, _, name in BANDS}  # objects, VLM found, fast detector found
     rng = random.Random(args.seed)
 
@@ -94,7 +92,7 @@ async def main() -> int:
             name, pose = randomizer.randomize()
             rgb, labels = sandbox.render_labels(name, pose)
             h, w, _ = rgb.shape
-            frame = Frame(None, pose, sandbox.cameras[name], 0.0, None, rgb)
+            frame = Frame(None, pose, sandbox.cameras[name], 0.0, rgb)
             truth = {oid: _box(lab, w, h) for oid, lab in labels.items() if lab["pixels"] >= args.min_pixels}
             every = {oid: _box(lab, w, h) for oid, lab in labels.items() if lab["pixels"] > 0}
 

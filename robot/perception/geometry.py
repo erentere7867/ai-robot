@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from robot.body.hal import BodyPose
+from robot.core.angles import wrap_deg
+from robot.core.config import PROJECT_ROOT, load_yaml_file
 
 
 @dataclass(frozen=True)
@@ -45,12 +47,6 @@ class CameraModel:
     @property
     def vfov_deg(self) -> float:
         return math.degrees(2.0 * math.atan((0.5 * self.height) / self.focal_px))
-
-    def scaled(self, width: int, height: int) -> CameraModel:
-        """Same optics at another resolution (square pixels, fixed horizontal FOV)."""
-        return CameraModel(self.name, width, height, self.hfov_deg, self.on_head, self.x_mm, self.y_mm, self.z_mm,
-                           self.yaw_deg, self.pitch_deg, self.pivot_x_mm, self.pivot_z_mm, self.max_range_mm,
-                           self.device)
 
     def mount(self, head_tilt_deg: float = 0.0) -> tuple[float, float, float, float]:
         """Camera centre in the robot frame (forward, left, up mm) and optical-axis pitch (rad)."""
@@ -146,14 +142,12 @@ class CameraModel:
 
     def covers(self, bearing_deg: float, margin_deg: float = 0.0) -> bool:
         """Does this camera see the direction `bearing_deg` (relative to the robot's heading)?"""
-        off = (bearing_deg - self.yaw_deg + 180.0) % 360.0 - 180.0
+        off = wrap_deg(bearing_deg - self.yaw_deg)
         return abs(off) <= 0.5 * self.hfov_deg - margin_deg
 
 
 def load_rig(body_yaml: Path | str) -> tuple[CameraModel, ...]:
     """The cameras listed under `sensors.cameras` in body.yaml (the front head camera when none are)."""
-    from robot.core.config import load_yaml_file
-
     raw = load_yaml_file(body_yaml)
     cams = ((raw.get("sensors") or {}).get("cameras")) or []
     if not cams:
@@ -175,11 +169,9 @@ def load_rig(body_yaml: Path | str) -> tuple[CameraModel, ...]:
 
 @functools.cache
 def default_rig() -> tuple[CameraModel, ...]:
-    from robot.core.config import PROJECT_ROOT
-
     return load_rig(PROJECT_ROOT / "config" / "body.yaml")
 
 
 def camera_for(rig: tuple[CameraModel, ...], bearing_deg: float) -> CameraModel:
     """The camera that sees `bearing_deg` best (closest to its optical axis)."""
-    return min(rig, key=lambda c: abs((bearing_deg - c.yaw_deg + 180.0) % 360.0 - 180.0) / (0.5 * c.hfov_deg))
+    return min(rig, key=lambda c: abs(wrap_deg(bearing_deg - c.yaw_deg)) / (0.5 * c.hfov_deg))

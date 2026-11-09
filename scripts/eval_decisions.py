@@ -22,10 +22,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from robot.body.hal import BodyPose  # noqa: E402
-from robot.cognition.agent import recover_text_tool_calls  # noqa: E402
+from robot.body.hal import (
+    BodyPose,  # noqa: E402
+    load_capabilities,  # noqa: E402
+)
 from robot.cognition.llamacpp import LlamaCppBackend  # noqa: E402
 from robot.cognition.prompts import PromptBuilder  # noqa: E402
+from robot.cognition.textcalls import recover_text_tool_calls  # noqa: E402
 from robot.core.clock import RealClock  # noqa: E402
 from robot.core.config import RobotConfig  # noqa: E402
 from robot.face.animator import EYE_COLOR_THEMES  # noqa: E402
@@ -181,18 +184,12 @@ async def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-k", default="", help="only run cases whose name contains this")
     parser.add_argument("--config", default="config/robot.yaml")
     parser.add_argument("--repeat", type=int, default=1)
-    parser.add_argument("--thinking", choices=["on", "off"], help="override llm.thinking")
-    parser.add_argument("--budget", type=int, help="override llm.thinking_budget_tokens (output cap)")
     parser.add_argument("--set", choices=["dev", "heldout", "all"], default="all",
                         help="dev: the cases prompts were tuned on; heldout: rewordings never tuned on")
     parser.add_argument("--start-server", action="store_true", help="start llama-server for this config if needed")
     parser.add_argument("--json", help="write per-case results here")
     args = parser.parse_args(argv)
     cfg = RobotConfig.from_yaml(args.config)
-    if args.thinking:
-        cfg.llm.thinking = args.thinking == "on"
-    if args.budget is not None:
-        cfg.llm.thinking_budget_tokens = args.budget
     backend = LlamaCppBackend(cfg.llm)
     if args.start_server:
         await backend.ensure_server_started()
@@ -200,7 +197,7 @@ async def main(argv: list[str] | None = None) -> int:
         print(f"llama-server is not answering at {cfg.llm.base_url}")
         return 2
     prompts = PromptBuilder(cfg.soul_path, cfg.context_budget, cfg.name)
-    tools = build_default_registry(sorted(EYE_COLOR_THEMES)).tool_schemas()
+    tools = build_default_registry(load_capabilities(), sorted(EYE_COLOR_THEMES)).tool_schemas()
     # Warm the cached system prompt first, as the robot does at start (AgentLoop.warm_up).
     await backend.chat([{"role": "system", "content": prompts.system_prompt}, {"role": "user", "content": "Hello."}],
                        tools=tools, max_tokens=1)

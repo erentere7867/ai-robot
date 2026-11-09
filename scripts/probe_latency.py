@@ -21,13 +21,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from robot.body.hal import BodyPose  # noqa: E402
 from robot.cognition.prompts import PromptBuilder  # noqa: E402
+from robot.cognition.vlm import DETECT_ALL_PROMPT  # noqa: E402
 from robot.core.clock import RealClock  # noqa: E402
 from robot.core.config import RobotConfig  # noqa: E402
 from robot.face.animator import EYE_COLOR_THEMES  # noqa: E402
 from robot.perception.camera import VLM_MAX_WIDTH, encode_png, fit_width  # noqa: E402
-from robot.perception.detector import DETECT_ALL_PROMPT  # noqa: E402
+from robot.sim.sandbox import SimulationSandbox  # noqa: E402
 from robot.skills import build_default_registry  # noqa: E402
-from robot.world.sandbox import SimulationSandbox  # noqa: E402
 from robot.world.spatial_map import SpatialMap  # noqa: E402
 
 

@@ -111,7 +111,7 @@ def test_camera_ground_truth_matches_simulator_detector():
     import random
 
     from robot.body.hal import BodyPose
-    from robot.world.sandbox import SimulationSandbox
+    from robot.sim.sandbox import SimulationSandbox
 
     sandbox = SimulationSandbox(None)
     rng = random.Random(7)

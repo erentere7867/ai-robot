@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+from robot.cognition.prompts import BACKGROUND_HEADER
 
 
 class BackendUnavailable(RuntimeError):
@@ -64,16 +65,6 @@ def message_text(message: dict[str, Any]) -> str:
     return str(content)
 
 
-class UnavailableBackend:
-    name = "inference_unavailable"
-
-    async def is_available(self) -> bool:
-        return False
-
-    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
-        raise BackendUnavailable("No language model is available")
-
-
 class NullBackend:
     """Explicit `--backend null` adapter: talks, never moves. For wiring tests and demos only."""
 
@@ -89,49 +80,7 @@ class NullBackend:
         if last.get("role") == "tool":
             return ChatResult("Done.", backend_name=self.name, latency_ms=1.0)
         text = message_text(last)
-        if "[Background event]" in text:
+        if BACKGROUND_HEADER in text:
             return ChatResult("", backend_name=self.name, latency_ms=1.0)
         return ChatResult("I'm running without my language model, so I can only chat a little.",
                           backend_name=self.name, latency_ms=1.0)
-
-
-Responder = Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], ChatResult | dict[str, Any] | str]
-
-
-class ScriptedBackend:
-    """Deterministic backend for tests: each entry is a reply, or a callable receiving the messages.
-
-    Reply shorthand: a string is plain text; a dict {"call": name, "args": {...}} is one tool call;
-    {"calls": [[name, args], ...]} is several; {"say": text} is plain text.
-    """
-
-    name = "scripted"
-
-    def __init__(self, script: list[Any] | None = None, *, default: Any = "") -> None:
-        self.script = list(script or [])
-        self.default = default
-        self.requests: list[dict[str, Any]] = []
-        self._counter = 0
-
-    async def is_available(self) -> bool:
-        return True
-
-    async def chat(self, messages, *, tools=None, max_tokens=None, tool_choice="auto") -> ChatResult:
-        self.requests.append({"messages": json.loads(json.dumps(messages, default=str)), "tools": tools,
-                              "tool_choice": tool_choice})
-        entry = self.script.pop(0) if self.script else self.default
-        if callable(entry):
-            entry = entry(messages, tools)
-        return self._to_result(entry)
-
-    def _to_result(self, entry: Any) -> ChatResult:
-        if isinstance(entry, ChatResult):
-            return entry
-        if isinstance(entry, str):
-            return ChatResult(entry, backend_name=self.name)
-        calls = []
-        pairs = entry.get("calls") or ([[entry["call"], entry.get("args", {})]] if "call" in entry else [])
-        for name, args in pairs:
-            self._counter += 1
-            calls.append(ToolCall(f"call_{self._counter}", name, dict(args)))
-        return ChatResult(str(entry.get("say", "")), calls, backend_name=self.name)

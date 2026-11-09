@@ -21,25 +21,26 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from robot.body.hal import BodyCapabilities, Reflex
+
 
 @dataclass
 class Limit:
     v: float
     w: float
-    reason: str | None = None  # "obstacle_stop" / "obstacle_behind" when forward / backward travel is blocked
+    reason: Reflex | None = None  # OBSTACLE_AHEAD / OBSTACLE_BEHIND when that travel is blocked
     clearance_mm: float = math.inf
 
 
 class CollisionMonitor:
-    def __init__(self, *, half_length_mm: float = 141.0, half_width_mm: float = 114.0, margin_mm: float = 60.0,
-                 side_margin_mm: float = 40.0, decel_mm_s2: float = 700.0, reaction_s: float = 0.08,
-                 lookahead_mm: float = 900.0, lidar_x_mm: float = -105.0, range_x_mm: float = 141.0) -> None:
-        self.hl, self.hw = half_length_mm, half_width_mm
+    def __init__(self, capabilities: BodyCapabilities, *, margin_mm: float = 60.0, side_margin_mm: float = 40.0,
+                 decel_mm_s2: float = 700.0, reaction_s: float = 0.08, lookahead_mm: float = 900.0) -> None:
+        self.hl, self.hw = capabilities.half_length_mm, capabilities.half_width_mm
         self.margin, self.side = margin_mm, side_margin_mm
         self.decel, self.reaction = decel_mm_s2, reaction_s
         self.lookahead = lookahead_mm
-        self.lidar_x, self.range_x = lidar_x_mm, range_x_mm
-        self.radius = math.hypot(half_length_mm, half_width_mm)
+        self.lidar_x, self.range_x = capabilities.lidar_x_mm, capabilities.front_range_x_mm
+        self.radius = capabilities.radius_mm
 
     def points(self, scan: object | None, range_mm: float) -> np.ndarray:
         """Obstacle points in the robot frame (x forward, y left), from the lidar and the range sensor."""
@@ -84,5 +85,5 @@ class CollisionMonitor:
             if near.any():
                 w *= 0.35  # something brushes the turning circle: turn slowly
         blocked = clearance < self.margin + 1.0
-        reason = ("obstacle_behind" if backward else "obstacle_stop") if blocked else None
+        reason = (Reflex.OBSTACLE_BEHIND if backward else Reflex.OBSTACLE_AHEAD) if blocked else None
         return Limit(v, w, reason, clearance)

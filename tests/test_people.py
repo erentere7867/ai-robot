@@ -6,16 +6,16 @@ import math
 
 import numpy as np
 import pytest
-from robot_fakes import make_harness
+from robot_fakes import make_harness, run_skill
 
-from robot.audio.doa import MicArray, simulate_voice, srp_phat
+from robot.audio.doa import MicArray, srp_phat
 from robot.body.hal import BodyPose
 from robot.core.clock import ReplayClock
-from robot.perception.lidar import SimLidar
-from robot.world.sandbox import SimulationSandbox
+from robot.sim.sandbox import SimulationSandbox
+from robot.sim.sensors import SimLidar, simulate_voice
 from robot.world.spatial_map import SpatialMap, TrackedObject
 
-ARRAY = MicArray(((32.0, 0.0), (0.0, 32.0), (-32.0, 0.0), (0.0, -32.0)))
+ARRAY = MicArray(((32.0, 0.0), (0.0, 32.0), (-32.0, 0.0), (0.0, -32.0)), 25.0)
 
 
 def true_bearing(pose: BodyPose, x: float, y: float) -> float:
@@ -49,7 +49,7 @@ def test_a_voice_matches_the_person_seen_in_that_direction():
     world.objects["person_1"] = TrackedObject("person_1", "person", -1000.0, 600.0, 200.0, now, now)
     world.objects["person_2"] = TrackedObject("person_2", "person", 900.0, -900.0, 200.0, now, now)
     pose = BodyPose(0, 0, 30)
-    speaker = world.hear_voice(pose, true_bearing(pose, -1000.0, 600.0) + 6.0)  # a few degrees off
+    speaker = world.hear_voice(pose, true_bearing(pose, -1000.0, 600.0) + 6.0, origin_mm=25.0)  # a few degrees off
     assert speaker.track == "person_1" and speaker.how == "seen"
     assert world.resolve("me", pose).id == "person_1" and world.resolve("you", pose).id == "person_1"
     assert "the human talking to me" in world.render_for_prompt(pose)
@@ -67,16 +67,18 @@ def test_an_unseen_voice_is_placed_by_the_lidar_then_by_a_guess():
         def pose(self):
             return pose
 
-    scan = SimLidar(sandbox, Body(), ReplayClock(), noise_mm=0.0).latest()
+        true_pose = pose
+
+    scan = SimLidar(sandbox, Body(), ReplayClock(), mount_x_mm=-105.0, height_mm=330.0, noise_mm=0.0).latest()
     world = SpatialMap(ReplayClock())
-    speaker = world.hear_voice(pose, true_bearing(pose, -900.0, 700.0), scan=scan)
+    speaker = world.hear_voice(pose, true_bearing(pose, -900.0, 700.0), scan=scan, origin_mm=25.0)
     assert speaker.how == "lidar" and speaker.track is None  # no made-up track: the cameras must place them
     assert math.hypot(speaker.point[0] + 900.0, speaker.point[1] - 700.0) < 150.0  # the person's legs, not the wall
     now = world.clock.monotonic()
     world.objects["person_1"] = TrackedObject("person_1", "person", -880.0, 690.0, 200.0, now, now, seen_count=3)
     assert world.speaker_track().id == "person_1" and world.speaker.how == "seen"
     blind = SpatialMap(ReplayClock())
-    guess = blind.hear_voice(pose, 90.0)
+    guess = blind.hear_voice(pose, 90.0, origin_mm=25.0)
     assert guess.how == "voice" and "voice came from to my left" in blind.render_for_prompt(pose)
 
 
@@ -87,25 +89,24 @@ async def room(tmp_path):
         for obj in list(harness.sandbox.list_objects()):
             if obj["id"] not in ("person", "cardboard_box"):
                 harness.sandbox.remove_object(obj["id"])
-        harness.spatial_map.forget_range_hits()
+        harness.spatial_map.grid.clear_hits()
         yield harness
 
 
-async def run(h, name, **args):
-    return await h.skills.run(name, args, h.skill_context)
+run = run_skill
 
 
 def heard(h) -> None:
     """The person spoke: the simulated array hears them, the map places them."""
-    voice = h.voice.locate()
-    h.spatial_map.hear_voice(h.body.pose(), voice["bearing_deg"], scan=h.lidar.latest() if h.lidar else None)
+    voice = h.platform.voice.locate()
+    h.spatial_map.hear_voice(h.body.pose(), voice["bearing_deg"], scan=h.lidar.latest() if h.lidar else None, origin_mm=25.0)
 
 
 async def test_come_here_goes_to_the_person_behind_and_faces_them(room):
     room.sandbox.move_object("person", -1000.0, -600.0, yaw_deg=30.0)
     room.sandbox.move_object("cardboard_box", 700.0, 400.0)
     heard(room)
-    room.skill_context.request = "come here"
+    room.asked = "come here"
     result = await run(room, "go_to", target="the box")  # the model's wrong guess, repaired from the words
     assert result.ok and result.message == "I'm here with you.", result.message
     pose, person = room.body.pose(), room.sandbox.get_object("person")
@@ -125,7 +126,7 @@ async def test_come_here_with_nobody_heard_says_so(room):
 async def test_follow_me_starts_following_the_speaker(room):
     room.sandbox.move_object("person", 900.0, -700.0)
     heard(room)
-    room.skill_context.request = "follow me"
+    room.asked = "follow me"
     result = await run(room, "follow", target="me")
     assert result.ok and "following you" in result.message
     assert room.fast.behavior is not None and room.fast.behavior.obj_id == room.spatial_map.speaker.track
@@ -146,7 +147,7 @@ async def test_circle_the_box_behind_you(room):
     """'Do a full circle around the box behind you': resolved from where it was asked, driven all the way."""
     room.sandbox.move_object("cardboard_box", -700.0, 0.0)
     room.sandbox.remove_object("person")
-    room.skill_context.request = "do a full circle around the box behind you"
+    room.asked = "do a full circle around the box behind you"
     result = await run(room, "circle_around", target="the box behind you")
     assert result.ok, result.message
     assert not room.sandbox.check_collision(room.body.pose())

@@ -17,13 +17,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from robot.control.behaviors import GoToPoint  # noqa: E402
+from robot.core.angles import wrap_deg  # noqa: E402
 from robot.core.config import RobotConfig  # noqa: E402
 from robot.main import RobotHarness  # noqa: E402
 
 
 def err(a, b) -> tuple[float, float]:
     d = math.hypot(a.x_mm - b.x_mm, a.y_mm - b.y_mm)
-    h = abs((a.heading_deg - b.heading_deg + 180.0) % 360.0 - 180.0)
+    h = abs(wrap_deg(a.heading_deg - b.heading_deg))
     return d, h
 
 
@@ -41,7 +42,7 @@ async def main() -> int:
         h = RobotHarness(cfg)
         await h.start()
         try:
-            raw, true = h.body.raw, h.body.true_pose
+            true = h.body.true_pose
             await asyncio.sleep(1.5)  # a few scans of the room from the start pose
             waypoints = [(700.0, 0.0), (700.0, 700.0), (-700.0, 700.0), (-700.0, -700.0), (700.0, -700.0)]
             samples, k = [], 0
@@ -52,7 +53,7 @@ async def main() -> int:
                 k += 1
                 done = await h.fast.run(GoToPoint(goal, "a waypoint"))
                 t = true()
-                samples.append({"leg": k, "ok": done.ok, "odom": err(raw.pose(), t), "corrected": err(h.body.pose(), t)})
+                samples.append({"leg": k, "ok": done.ok, "odom": err(h.body.odometry_pose(), t), "corrected": err(h.body.pose(), t)})
             last = samples[-1]
             summary = {
                 "legs": len(samples),

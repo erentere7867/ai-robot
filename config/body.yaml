@@ -12,10 +12,6 @@ drive:
   type: "skid_steer_4wd"
   max_linear_speed_mm_s: 400.0
   max_angular_speed_deg_s: 120.0
-  max_single_move_mm: 2000.0
-  max_single_spin_deg: 360.0
-  default_linear_speed_mm_s: 200.0
-  default_angular_speed_deg_s: 90.0
 
 joints:
   head_tilt:
@@ -24,12 +20,6 @@ joints:
     max_deg: 35.0
     neutral_deg: 0.0
     max_speed_deg_s: 90.0
-
-display:
-  type: "dsi_lcd"
-  width_px: 800
-  height_px: 480
-  size_mm: [122, 76, 8]
 
 sensors:
   wheel_encoders:
@@ -93,69 +83,51 @@ sensors:
     center_x_mm: 25.0
     positions_mm: [[32.0, 0.0], [0.0, 32.0], [-32.0, 0.0], [0.0, -32.0]]
 
-compute:
-  board: "Arduino VENTUNO Q"
-  soc: "Qualcomm Dragonwing IQ8 (IQ-8275): 2x A78C 2.35 GHz + 2x A78C 2.1 GHz + 4x A55, Adreno 623, Hexagon NPU 40 TOPS INT8"
-  memory: "16 GB LPDDR5-6400, 64-bit (~51 GB/s)"
-  realtime_mcu: "STM32H5F5 Cortex-M33 250 MHz (firmware/ventuno_mcu): wheel loops, odometry, reflexes, watchdog"
-
-sounds:
-  allowed:
-    - "none"
-    - "happy_trill"
-    - "curious_chirp"
-    - "soft_beep"
-    - "sleepy_yawn"
-    - "startle_pip"
-    - "ack_chirp"
-    - "sad_whimper"
-    - "angry_grumble"
-    - "giggle"
-    - "purr"
-
+# Every emotion the face can show, and the sound that goes with it.
 emotions:
-  allowed:
-    - "neutral"
-    - "happy"
-    - "excited"
-    - "curious"
-    - "sad"
-    - "angry"
-    - "grumpy"
-    - "confused"
-    - "surprised"
-    - "sleepy"
-    - "concerned"
-    - "proud"
-    - "shy"
-    - "scared"
-    - "love"
+  happy: happy_trill
+  excited: happy_trill
+  curious: curious_chirp
+  sad: sad_whimper
+  angry: angry_grumble
+  grumpy: angry_grumble
+  surprised: startle_pip
+  sleepy: sleepy_yawn
+  love: purr
+  shy: giggle
+  proud: happy_trill
+  scared: startle_pip
+  confused: soft_beep
+  concerned: soft_beep
+  neutral: none
 
-tricks:
+# Short motions the Gesture behaviour plays: each step lasts `s` seconds at speed `v` (mm/s) and turn rate `w`
+# (deg/s, + = left), with the head moved to `head` (degrees) if given.
+gestures:
   nod:
     description: "Nod head up and down in agreement"
-    duration_s: 1.0
+    steps: [{s: 0.3, head: 15}, {s: 0.3, head: 0}]
   shake:
     description: "Small left-right body shimmy to say no or show frustration"
-    duration_s: 1.0
-  curious_tilt:
-    description: "Tilt head up with a curious posture"
-    duration_s: 0.8
+    steps: [{s: 0.15, w: 100}, {s: 0.3, w: -100}, {s: 0.15, w: 100}, {s: 0.15, w: 100}, {s: 0.3, w: -100}, {s: 0.15, w: 100}]
   wiggle:
     description: "Playful in-place left-right wiggle"
-    duration_s: 1.4
+    steps: [{s: 0.25, w: 90}, {s: 0.5, w: -90}, {s: 0.25, w: 90}, {s: 0.25, w: 90}, {s: 0.5, w: -90}, {s: 0.25, w: 90}]
   dance:
     description: "Happy spin-and-nod dance routine"
-    duration_s: 2.5
-  spin:
-    description: "Full 360-degree playful spin in place"
-    duration_s: 2.2
-  sleepy_droop:
-    description: "Droop head down gently when sleepy or sad"
-    duration_s: 1.2
+    steps: [{s: 0.6, w: 120, head: 18}, {s: 0.6, w: -120, head: 5}, {s: 0.3, v: 80}, {s: 0.3, v: -80}, {s: 0.6, w: 120, head: 5}]
   perk_up:
     description: "Perk head up attentively when greeted or excited"
-    duration_s: 0.7
+    steps: [{s: 0.3, head: 14}]
+  curious_tilt:
+    description: "Tilt head up with a curious posture"
+    steps: [{s: 0.35, head: 20}]
+  sleepy_droop:
+    description: "Droop head down gently when sleepy or sad"
+    steps: [{s: 0.5, head: -18}]
+  spin:
+    description: "Full 360-degree playful spin in place"
+    steps: [{s: 3.0, w: 120}]
   stomp:
     description: "Short forward-back stomp when angry or grumpy"
-    duration_s: 1.0
+    steps: [{s: 0.25, v: 120}, {s: 0.25, v: -120}, {s: 0.25, v: 120}, {s: 0.25, v: -120}]

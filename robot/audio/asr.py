@@ -1,4 +1,4 @@
-"""Local Speech-to-Text (ASR) adapters: fast Windows offline ASR and LFM3-Omni mtmd ASR."""
+"""Local speech-to-text: whisper.cpp on the robot, Windows offline recognition on a development laptop."""
 
 from __future__ import annotations
 
@@ -34,17 +34,11 @@ class SpeechRecognizer:
     def __init__(
         self,
         *,
-        mode: str = "auto",  # "auto" | "windows_offline" | "omni_mtmd"
-        model_path: Path | None = None,
-        mmproj_path: Path | None = None,
-        mtmd_bin: Path | None = None,
+        mode: str = "auto",  # "auto" | "whisper_cpp" | "windows_offline"
         whisper_bin: Path | None = None,
         whisper_model: Path | None = None,
     ) -> None:
         self.mode = mode
-        self.model_path = model_path or Path("~/Downloads/LFM3-Omni-2B-Q4_K_M.gguf").expanduser()
-        self.mmproj_path = mmproj_path or Path("~/Downloads/mmproj-LFM3-Omni-2B-Q8_0.gguf").expanduser()
-        self.mtmd_bin = mtmd_bin or Path("~/robot-runtime/llama.cpp/llama-mtmd-cli.exe").expanduser()
         self.whisper_bin = (
             whisper_bin or Path("~/robot-runtime/whisper.cpp/build/bin/whisper-cli").expanduser()
         )
@@ -76,17 +70,6 @@ class SpeechRecognizer:
 
         if self.mode in ("auto", "windows", "windows_offline") and sys.platform == "win32":
             res = self._try_windows_offline_asr(path)
-            if res is not None:
-                return res
-
-        # Loading a second large language model is always an explicit opt-in.
-        if (
-            self.mode == "omni_mtmd"
-            and self.mtmd_bin.exists()
-            and self.model_path.exists()
-            and self.mmproj_path.exists()
-        ):
-            res = self._try_omni_mtmd_asr(path)
             if res is not None:
                 return res
 
@@ -159,52 +142,6 @@ class SpeechRecognizer:
                 )
             return ASRResult(
                 text="", confidence=0.0, latency_ms=round(dt_ms, 1), backend_name="windows_offline_asr"
-            )
-        except Exception:
-            return None
-
-    def _try_omni_mtmd_asr(self, wav_path: Path) -> ASRResult | None:
-        t0 = time.perf_counter()
-        cmd = [
-            str(self.mtmd_bin),
-            "-m",
-            str(self.model_path),
-            "--mmproj",
-            str(self.mmproj_path),
-            "-c",
-            "512",
-            "-b",
-            "256",
-            "-ub",
-            "256",
-            "-ngl",
-            "99",
-            "--audio",
-            str(wav_path),
-            "-sys",
-            "Perform ASR in English.",
-            "-p",
-            "<__media__>",
-            "--temp",
-            "0",
-            "-n",
-            "48",
-        ]
-        try:
-            proc = subprocess.run(
-                cmd, check=True, capture_output=True, text=True, timeout=30.0, creationflags=_NO_WINDOW
-            )
-            dt_ms = (time.perf_counter() - t0) * 1000.0
-            raw = proc.stdout.strip()
-            if "<think></think>" in raw:
-                raw = raw.split("<think></think>", 1)[-1].strip()
-            lines = [ln.strip() for ln in raw.splitlines() if ln.strip() and not ln.startswith("0.")]
-            text = lines[-1] if lines else ""
-            return ASRResult(
-                text=text,
-                confidence=0.9 if text else 0.0,
-                latency_ms=round(dt_ms, 1),
-                backend_name="lfm3_omni_mtmd_asr",
             )
         except Exception:
             return None

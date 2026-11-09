@@ -21,18 +21,19 @@ from typing import Any
 import numpy as np
 
 from robot.body.hal import BodyPose
-from robot.world.spatial_map import CELL_MM
+from robot.core.angles import wrap_deg
+from robot.perception.lidar import Scan
+from robot.world.occupancy import CELL_MM, OccupancyGrid
 
 
 class Localizer:
-    def __init__(self, world: Any, *, search_mm: float = 80.0, step_mm: float = 20.0, search_deg: float = 3.0,
+    def __init__(self, grid: OccupancyGrid, *, search_mm: float = 80.0, step_mm: float = 20.0, search_deg: float = 3.0,
                  step_deg: float = 1.0, gain: float = 0.5, min_support: float = 0.35, margin: float = 1.04,
-                 mount_x_mm: float = -105.0, max_points: int = 180, max_range_mm: float = 4000.0) -> None:
-        self.world = world
+                 max_points: int = 180, max_range_mm: float = 4000.0) -> None:
+        self.grid = grid
         self.shifts = np.arange(-search_mm, search_mm + 1e-6, step_mm)
         self.turns = np.arange(-search_deg, search_deg + 1e-6, step_deg)
         self.gain, self.min_support, self.margin = gain, min_support, margin
-        self.mount_x = mount_x_mm
         self.max_points, self.max_range = max_points, max_range_mm
         self._lock = threading.Lock()
         self.tx = self.ty = self.th = 0.0  # map <- odometry: rotate by th (deg) about the origin, then shift
@@ -47,7 +48,7 @@ class Localizer:
             return pose
         c, s = math.cos(math.radians(th)), math.sin(math.radians(th))
         return BodyPose(c * pose.x_mm - s * pose.y_mm + tx, s * pose.x_mm + c * pose.y_mm + ty,
-                        (pose.heading_deg + th + 180.0) % 360.0 - 180.0, pose.head_tilt_deg,
+                        wrap_deg(pose.heading_deg + th), pose.head_tilt_deg,
                         pose.linear_vel_mm_s, pose.angular_vel_deg_s)
 
     def snapshot(self) -> dict[str, float]:
@@ -55,10 +56,10 @@ class Localizer:
                 "matches": self.matches, "applied": self.applied, "support": round(self.last_support, 2)}
 
     # ---- matching -------------------------------------------------------------------------------
-    def correct(self, pose: BodyPose, angles_deg: np.ndarray, ranges_mm: np.ndarray) -> BodyPose:
+    def correct(self, pose: BodyPose, scan: Scan) -> BodyPose:
         """Match a scan taken at `pose` (map frame) and return the corrected pose (and keep the correction)."""
-        r = np.asarray(ranges_mm, dtype=np.float64)
-        a = np.radians(np.asarray(angles_deg, dtype=np.float64))
+        r = np.asarray(scan.ranges_mm, dtype=np.float64)
+        a = np.radians(np.asarray(scan.angles_deg, dtype=np.float64))
         ok = np.isfinite(r) & (r < self.max_range) & (r > 150.0)
         if ok.sum() < 30:
             return pose
@@ -67,9 +68,9 @@ class Localizer:
             keep = np.linspace(0, len(r) - 1, self.max_points).astype(int)
             r, a = r[keep], a[keep]
         # Scan points in the robot frame (the lidar sits behind the centre).
-        px, py = self.mount_x + r * np.cos(a), r * np.sin(a)
-        occ = np.clip(self.world.occupancy, 0.0, 3.0)
-        n, half = self.world.n, self.world.half
+        px, py = scan.mount_x_mm + r * np.cos(a), r * np.sin(a)
+        occ = np.clip(self.grid.occupancy, 0.0, 3.0)
+        n, half = self.grid.n, self.grid.half
         best = (-1.0, 0.0, 0.0, 0.0)
         zero = 0.0
         for dth in self.turns:
@@ -99,7 +100,7 @@ class Localizer:
         dx, dy, dth = g * best[1], g * best[2], g * best[3]
         self._compose(dx, dy, dth, pose)
         self.applied += 1
-        return BodyPose(pose.x_mm + dx, pose.y_mm + dy, (pose.heading_deg + dth + 180.0) % 360.0 - 180.0,
+        return BodyPose(pose.x_mm + dx, pose.y_mm + dy, wrap_deg(pose.heading_deg + dth),
                         pose.head_tilt_deg, pose.linear_vel_mm_s, pose.angular_vel_deg_s)
 
     def _compose(self, dx: float, dy: float, dth: float, pose: BodyPose) -> None:
@@ -110,25 +111,21 @@ class Localizer:
             ox, oy = self.tx - pose.x_mm, self.ty - pose.y_mm
             self.tx = c * ox - s * oy + pose.x_mm + dx
             self.ty = s * ox + c * oy + pose.y_mm + dy
-            self.th = (self.th + dth + 180.0) % 360.0 - 180.0
+            self.th = wrap_deg(self.th + dth)
 
 
 class LocalizedBody:
     """The body as everything else sees it: same commands, pose in the map frame (corrected odometry)."""
 
     def __init__(self, body: Any, localizer: Localizer) -> None:
-        object.__setattr__(self, "_body", body)
-        object.__setattr__(self, "localizer", localizer)
+        self._body = body
+        self.localizer = localizer
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._body, name)
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        setattr(self._body, name, value)
-
-    @property
-    def raw(self) -> Any:
-        return self._body
-
     def pose(self) -> BodyPose:
         return self.localizer.to_map(self._body.pose())
+
+    def odometry_pose(self) -> BodyPose:
+        return self._body.pose()

@@ -123,13 +123,11 @@ class RobotVoiceStylizer:
         else:
             pitched = samples.astype(np.float32)
 
-        # 2. Subtle metallic/robotic harmonic warmth via gentle ring modulation
         if self.ring_mod_mix > 0.0:
             t = np.arange(len(pitched), dtype=np.float32) / float(sample_rate)
             mod = np.sin(2.0 * math.pi * self.ring_mod_hz * t).astype(np.float32)
             pitched = (1.0 - self.ring_mod_mix) * pitched + self.ring_mod_mix * (pitched * mod)
 
-        # 3. Normalize & soft-clip
         peak = float(np.max(np.abs(pitched)))
         if peak > 1e-4:
             pitched = (pitched / peak) * float(self.master_gain)
@@ -278,18 +276,15 @@ atexit.register(_cleanup_sapi_worker)
 
 
 class RobotTTSEngine:
-    """Synthesizes companion-robot speech via model.q8.gguf (Phonon 40M), LFM3-Omni, SAPI, or warble fallback."""
+    """Synthesizes companion-robot speech via model.q8.gguf (Phonon 40M), SAPI, or warble fallback."""
 
     def __init__(
         self,
         *,
-        mode: str = "auto",  # "auto" | "phonon_q8" | "lfm3_omni" | "sapi" | "warble"
+        mode: str = "auto",  # "auto" | "phonon_q8" | "sapi" | "warble"
         stylizer: RobotVoiceStylizer | None = None,
         q8_model_path: Path | None = None,
         phonon_dir: Path | None = None,
-        model_path: Path | None = None,
-        mmproj_path: Path | None = None,
-        tts_bin: Path | None = None,
     ) -> None:
         self.mode = mode
         self.stylizer = stylizer or RobotVoiceStylizer(
@@ -300,9 +295,6 @@ class RobotTTSEngine:
         )
         self.q8_model_path = q8_model_path or Path("~/Downloads/model.q8.gguf").expanduser()
         self.phonon_dir = phonon_dir or Path("~/robot-runtime/phonon-40m-en").expanduser()
-        self.model_path = model_path or Path("~/Downloads/LFM3-Omni-2B-Q4_K_M.gguf").expanduser()
-        self.mmproj_path = mmproj_path or Path("~/Downloads/mmproj-LFM3-Omni-2B-Q8_0.gguf").expanduser()
-        self.tts_bin = tts_bin or Path("~/robot-runtime/llama.cpp/llama-tts.exe").expanduser()
 
     def synthesize(self, text: str) -> SynthesizedSpeech:
         spoken_text = _clean_text_for_speech(text[:400])
@@ -315,15 +307,6 @@ class RobotTTSEngine:
             if q8_res is not None:
                 samples, sr = self.stylizer.process(*q8_res)
                 backend_used = "phonon_q8_gguf"
-
-        if samples is None and self.mode in ("auto", "lfm3_omni"):
-            omni_res = self._try_lfm3_omni_tts(spoken_text)
-            if omni_res is not None:
-                samples, sr = omni_res
-                peak = float(np.max(np.abs(samples))) if len(samples) else 0.0
-                if peak > 1e-4:
-                    samples = (samples / peak * 0.85).astype(np.float32)
-                backend_used = "lfm3_omni_tts"
 
         if samples is None and self.mode in ("auto", "sapi") and sys.platform == "win32":
             sapi_res = self._try_windows_sapi(spoken_text)
@@ -373,39 +356,6 @@ class RobotTTSEngine:
                 pcm = np.asarray(engine.synth(text), dtype=np.float32)
                 if len(pcm) > 0:
                     return pcm, 24000
-            except Exception:
-                return None
-        return None
-
-    def _try_lfm3_omni_tts(self, text: str) -> tuple[np.ndarray, int] | None:
-        """Synthesize speech using LFM3-Omni-2B native audio decoder (`llama-tts.exe` with `-c 512`)."""
-        if not (self.tts_bin.exists() and self.model_path.exists() and self.mmproj_path.exists()):
-            return None
-        with tempfile.TemporaryDirectory(prefix="sprocket_omni_tts_") as tmpdir:
-            wav_path = Path(tmpdir) / "omni_out.wav"
-            cmd = [
-                str(self.tts_bin),
-                "-m",
-                str(self.model_path),
-                "-mm",
-                str(self.mmproj_path),
-                "-c",
-                "512",
-                "-b",
-                "256",
-                "-ub",
-                "256",
-                "-ngl",
-                "99",
-                "-p",
-                text,
-                "-o",
-                str(wav_path),
-            ]
-            try:
-                subprocess.run(cmd, check=True, capture_output=True, timeout=15.0, creationflags=_NO_WINDOW)
-                if wav_path.exists() and wav_path.stat().st_size > 200:
-                    return _read_wav_mono_float32(wav_path)
             except Exception:
                 return None
         return None

@@ -1,13 +1,14 @@
 """Skills the language model can invoke as tools."""
 
+from robot.body.hal import BodyCapabilities
 from robot.skills import navigation, perception, social
 from robot.skills.base import Skill, SkillContext, SkillError, SkillRegistry, SkillResult
 
 
-def build_default_registry(eye_colors: list[str]) -> SkillRegistry:
+def build_default_registry(capabilities: BodyCapabilities, eye_colors: list[str]) -> SkillRegistry:
     registry = SkillRegistry()
     # Order matters to a small model: the first tools listed get picked more often.
-    for skill in [*navigation.skills(), *social.skills(eye_colors), *perception.skills()]:
+    for skill in [*navigation.skills(), *social.skills(capabilities, eye_colors), *perception.skills()]:
         registry.add(skill)
     return registry
 

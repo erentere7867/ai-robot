@@ -36,10 +36,6 @@ class MemoryRecord:
     updated_at: float = 0.0
     importance: float = 0.5
 
-    @property
-    def is_active(self) -> bool:
-        return self.valid_to is None
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,

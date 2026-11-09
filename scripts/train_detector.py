@@ -58,7 +58,7 @@ def main() -> int:
         return 0
     data = args.dataset / "data.yaml"
     if not data.exists():
-        from robot.perception.datagen import write_dataset
+        from robot.sim.datagen import write_dataset
 
         print(f"Rendering {args.train} + {args.val} labelled frames into {args.dataset} ...")
         data = write_dataset(args.dataset, args.train, args.val, seed=args.seed, workers=args.workers)

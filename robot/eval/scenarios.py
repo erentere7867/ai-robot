@@ -14,14 +14,16 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from robot.body.hal import load_capabilities
+from robot.core.angles import wrap_deg
 from robot.perception.geometry import CameraModel
 
 Pose = Mapping[str, float]
 SceneObject = Mapping[str, Any]
 
-ROBOT_HALF_LENGTH_MM = 141.0
-ROBOT_HALF_WIDTH_MM = 114.0
-ROBOT_RADIUS_MM = math.hypot(ROBOT_HALF_LENGTH_MM, ROBOT_HALF_WIDTH_MM)
+ROBOT_HALF_LENGTH_MM = load_capabilities().half_length_mm
+ROBOT_HALF_WIDTH_MM = load_capabilities().half_width_mm
+ROBOT_RADIUS_MM = load_capabilities().radius_mm
 
 FAMILY_SYNONYMS: dict[str, tuple[str, ...]] = {
     "box": ("box", "carton", "cardboard"),
@@ -69,12 +71,6 @@ def has_location_cue(text: str) -> bool:
 
 
 # --------------------------------------------------------------------------- geometry
-
-
-def wrap_deg(angle: float) -> float:
-    """Wrap into (-180, 180]."""
-    wrapped = (angle + 180.0) % 360.0 - 180.0
-    return 180.0 if wrapped == -180.0 else wrapped
 
 
 def heading_change_deg(before: Pose, after: Pose) -> float:
@@ -171,7 +167,7 @@ def visible_object_ids(pose: Pose, objects: Sequence[SceneObject],
     """Ids of objects some camera of the rig sees, by the simulator's own ground truth (projected 3D extents,
     each camera's range, occlusion by taller nearer objects)."""
     from robot.body.hal import BodyPose
-    from robot.world.sandbox import SandboxObject, visible_in
+    from robot.sim.sandbox import SandboxObject, visible_in
 
     p = BodyPose(float(pose["x_mm"]), float(pose["y_mm"]), float(pose["heading_deg"]),
                  float(pose.get("head_tilt_deg", 0.0)))
@@ -274,7 +270,6 @@ class TurnRecord:
     pose_before: dict[str, float] = field(default_factory=dict)
     pose_after: dict[str, float] = field(default_factory=dict)
     trajectory: list[dict[str, float]] = field(default_factory=list)
-    actions: list[dict[str, Any]] = field(default_factory=list)
     reflexes: list[dict[str, Any]] = field(default_factory=list)
     skills: list[dict[str, Any]] = field(default_factory=list)
     responses: int = 0
@@ -306,7 +301,7 @@ class TurnRecord:
             "pose_before": self.pose_before,
             "pose_after": self.pose_after,
             "skills": self.skills,
-            "actions": self.actions,
+            "actions": self.skills,
             "reflexes": self.reflexes,
             "trajectory": [
                 [p["x_mm"], p["y_mm"], p["heading_deg"], p.get("head_tilt_deg", 0.0)] for p in self.trajectory
@@ -573,8 +568,7 @@ def _used(turn: TurnRecord, tool: str, **want: str) -> bool:
 
 def grade_dance(run: ScenarioRun) -> Grade:
     turn = run.turns[-1]
-    danced = any(a.get("tool") == "perform_trick" and a.get("ok") and (a.get("args") or {}).get("trick") == "dance"
-                 for a in turn.actions)
+    danced = _used(turn, "express", gesture="dance")
     moved = distance_mm(turn.pose_before, turn.pose_after)
     return _verdict([(danced, "danced" if danced else "no dance trick ran"), (moved < 200.0, f"moved {moved:.0f} mm")],
                     {"moved_mm": round(moved, 1)})
@@ -1103,29 +1097,27 @@ SCENARIO_LIST = (SCENARIO_LIST + HARD_SCENARIOS + REALTIME_SCENARIOS + TASK_SCEN
 SCENARIOS: dict[str, Scenario] = {s.name: s for s in SCENARIO_LIST}
 
 
+SCENARIO_SETS: dict[str, Callable[[Scenario], bool]] = {
+    "all": lambda s: True,
+    "core": lambda s: not (s.hard or s.realtime or s.tasks or s.paraphrase or s.session or s.people),
+    "dev": lambda s: not s.paraphrase,  # everything except the held-out paraphrases
+    "hard": lambda s: s.hard,
+    "realtime": lambda s: s.realtime,
+    "tasks": lambda s: s.tasks,
+    "people": lambda s: s.people,
+    "paraphrase": lambda s: s.paraphrase,
+    "session": lambda s: s.session,
+}
+
+
 def select_scenarios(spec: str) -> list[Scenario]:
-    """Parse `all`, `core`, `hard`, `realtime`, `tasks`, `people`, `paraphrase`, `session`, `dev`, or names."""
-    names = [n.strip() for n in (spec or "all").split(",") if n.strip()]
-    if not names or names == ["all"]:
-        return list(SCENARIO_LIST)
-    if names == ["core"]:
-        return [s for s in SCENARIO_LIST
-                if not (s.hard or s.realtime or s.tasks or s.paraphrase or s.session or s.people)]
-    if names == ["paraphrase"]:
-        return [s for s in SCENARIO_LIST if s.paraphrase]
-    if names == ["session"]:
-        return [s for s in SCENARIO_LIST if s.session]
-    if names == ["dev"]:  # everything except the held-out paraphrases
-        return [s for s in SCENARIO_LIST if not s.paraphrase]
-    if names == ["hard"]:
-        return [s for s in SCENARIO_LIST if s.hard]
-    if names == ["realtime"]:
-        return [s for s in SCENARIO_LIST if s.realtime]
-    if names == ["tasks"]:
-        return [s for s in SCENARIO_LIST if s.tasks]
-    if names == ["people"]:
-        return [s for s in SCENARIO_LIST if s.people]
-    unknown = [n for n in names if n not in SCENARIOS]
-    if unknown:
-        raise ValueError(f"Unknown scenario(s): {', '.join(unknown)}; choose from {', '.join(SCENARIOS)}")
-    return [SCENARIOS[n] for n in dict.fromkeys(names)]
+    """A comma-separated mix of set names (see SCENARIO_SETS) and scenario names."""
+    chosen: dict[str, Scenario] = {}
+    for name in (n.strip() for n in (spec or "all").split(",")):
+        if name in SCENARIO_SETS:
+            chosen.update({s.name: s for s in SCENARIO_LIST if SCENARIO_SETS[name](s)})
+        elif name in SCENARIOS:
+            chosen[name] = SCENARIOS[name]
+        elif name:
+            raise ValueError(f"Unknown scenario(s): {name}; choose from {', '.join(SCENARIOS)}")
+    return list(chosen.values()) or list(SCENARIO_LIST)

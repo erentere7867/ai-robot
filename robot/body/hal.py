@@ -1,13 +1,55 @@
-"""Body hardware abstraction layer, capabilities, pose, and command types."""
+"""What the rest of the robot knows about a body: its dimensions, its state, and how to command it.
+
+Every motion is a speed command (`set_velocity`, refreshed at the control rate) plus a head angle; closed-loop
+behaviours (robot/control/behaviors.py) turn goals into those. Simulated and real bodies implement the same protocol.
+"""
 
 from __future__ import annotations
 
+import functools
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-from robot.core.config import load_yaml_file
+from robot.core.config import PROJECT_ROOT, load_yaml_file
+
+
+class Reflex(StrEnum):
+    """Why the body itself stopped or limited a motion."""
+
+    ESTOP = "estop_active"
+    CLIFF = "cliff_detected"
+    PICKED_UP = "picked_up"
+    BUMPER = "bumper"
+    OBSTACLE_AHEAD = "obstacle_stop"
+    OBSTACLE_BEHIND = "obstacle_behind"
+
+    @property
+    def halts(self) -> bool:
+        """Stops every motion, not only the one heading into the obstacle."""
+        return self in (Reflex.ESTOP, Reflex.CLIFF, Reflex.PICKED_UP, Reflex.BUMPER)
+
+    @property
+    def reason(self) -> str:
+        return _REFLEX_REASONS[self]
+
+    @property
+    def words(self) -> str:
+        return _REFLEX_WORDS[self]
+
+
+_REFLEX_REASONS = {
+    Reflex.ESTOP: "Emergency stop is active", Reflex.CLIFF: "Cliff sensor triggered",
+    Reflex.PICKED_UP: "Robot was picked up", Reflex.BUMPER: "Bumped into something",
+    Reflex.OBSTACLE_AHEAD: "Front obstacle or invalid range reading", Reflex.OBSTACLE_BEHIND: "Obstacle behind",
+}
+_REFLEX_WORDS = {
+    Reflex.ESTOP: "the emergency stop is on", Reflex.CLIFF: "there is a drop ahead",
+    Reflex.PICKED_UP: "someone picked me up", Reflex.BUMPER: "Bumper pressed: I bumped into something",
+    Reflex.OBSTACLE_AHEAD: "something is right in front of me", Reflex.OBSTACLE_BEHIND: "something is right behind me",
+}
 
 
 @dataclass(frozen=True)
@@ -15,179 +57,110 @@ class JointSpec:
     name: str
     min_deg: float
     max_deg: float
-    neutral_deg: float = 0.0
-    max_speed_deg_s: float = 90.0
-
-    def __post_init__(self) -> None:
-        if not all(
-            math.isfinite(v) for v in (self.min_deg, self.max_deg, self.neutral_deg, self.max_speed_deg_s)
-        ):
-            raise ValueError("Joint limits must be finite")
-        if not self.min_deg <= self.neutral_deg <= self.max_deg or self.max_speed_deg_s <= 0:
-            raise ValueError("Invalid joint range or speed")
+    neutral_deg: float
+    max_speed_deg_s: float
 
 
 @dataclass(frozen=True)
-class TrickSpec:
+class GestureStep:
+    seconds: float
+    v: float = 0.0  # mm/s
+    w: float = 0.0  # deg/s
+    head_deg: float | None = None
+
+
+@dataclass(frozen=True)
+class GestureSpec:
     name: str
     description: str
-    duration_s: float = 1.0
+    steps: tuple[GestureStep, ...]
 
 
 @dataclass(frozen=True)
 class BodyCapabilities:
-    """Declarative capability specification loaded from body.yaml."""
+    """The robot as described by config/body.yaml."""
 
-    robot_id: str = "companion_r1"
-    description: str = "Mobile 4-wheel skid-steer companion robot"
-    wheel_diameter_mm: float = 120.0
-    track_width_mm: float = 208.0
-    length_mm: float = 282.0
-    width_mm: float = 228.0
-    max_linear_speed_mm_s: float = 400.0
-    max_angular_speed_deg_s: float = 120.0
-    max_single_move_mm: float = 2000.0
-    max_single_spin_deg: float = 360.0
-    default_linear_speed_mm_s: float = 200.0
-    default_angular_speed_deg_s: float = 90.0
-    min_front_tof_stop_mm: float = 120.0
-    default_front_tof_mm: float = 1500.0
-    encoder_ticks_per_rev: int = 720
-    joints: dict[str, JointSpec] = field(
-        default_factory=lambda: {
-            "head_tilt": JointSpec(
-                "head_tilt", min_deg=-25.0, max_deg=35.0, neutral_deg=0.0, max_speed_deg_s=90.0
-            )
-        }
-    )
-    allowed_sounds: list[str] = field(
-        default_factory=lambda: [
-            "none",
-            "happy_trill",
-            "curious_chirp",
-            "soft_beep",
-            "sleepy_yawn",
-            "startle_pip",
-            "ack_chirp",
-            "sad_whimper",
-            "angry_grumble",
-            "giggle",
-            "purr",
-        ]
-    )
-    allowed_emotions: list[str] = field(
-        default_factory=lambda: [
-            "neutral",
-            "happy",
-            "excited",
-            "curious",
-            "sad",
-            "angry",
-            "grumpy",
-            "confused",
-            "surprised",
-            "sleepy",
-            "concerned",
-            "proud",
-            "shy",
-            "scared",
-            "love",
-        ]
-    )
-    tricks: dict[str, TrickSpec] = field(
-        default_factory=lambda: {
-            "nod": TrickSpec("nod", "Nod head up and down in agreement", 1.0),
-            "shake": TrickSpec("shake", "Small left-right body shimmy to say no or show frustration", 1.0),
-            "curious_tilt": TrickSpec("curious_tilt", "Tilt head up with a curious posture", 0.8),
-            "wiggle": TrickSpec("wiggle", "Playful in-place left-right wiggle", 1.4),
-            "dance": TrickSpec("dance", "Happy spin-and-nod dance routine", 2.5),
-            "spin": TrickSpec("spin", "Full 360-degree playful spin in place", 2.2),
-            "sleepy_droop": TrickSpec("sleepy_droop", "Droop head down gently when sleepy or sad", 1.2),
-            "perk_up": TrickSpec("perk_up", "Perk head up attentively when greeted or excited", 0.7),
-            "stomp": TrickSpec("stomp", "Short forward-back stomp when angry or grumpy", 1.0),
-        }
-    )
+    robot_id: str
+    description: str
+    wheel_diameter_mm: float
+    track_width_mm: float
+    length_mm: float
+    width_mm: float
+    max_linear_speed_mm_s: float
+    max_angular_speed_deg_s: float
+    min_front_tof_stop_mm: float
+    default_front_tof_mm: float
+    encoder_ticks_per_rev: int
+    lidar_x_mm: float
+    lidar_z_mm: float
+    head_tilt: JointSpec
+    emotion_sounds: dict[str, str] = field(default_factory=dict)  # every emotion and the sound that goes with it
+    gestures: dict[str, GestureSpec] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        for key in (
-            "wheel_diameter_mm",
-            "track_width_mm",
-            "max_linear_speed_mm_s",
-            "max_angular_speed_deg_s",
-            "max_single_move_mm",
-            "max_single_spin_deg",
-            "default_linear_speed_mm_s",
-            "default_angular_speed_deg_s",
-            "min_front_tof_stop_mm",
-            "default_front_tof_mm",
-            "encoder_ticks_per_rev",
-        ):
-            if not math.isfinite(getattr(self, key)) or getattr(self, key) <= 0:
-                raise ValueError(f"Body capability {key} must be finite and positive")
-        if (
-            self.default_linear_speed_mm_s > self.max_linear_speed_mm_s
-            or self.default_angular_speed_deg_s > self.max_angular_speed_deg_s
-        ):
-            raise ValueError("Default speed exceeds physical maximum")
-        if "head_tilt" not in self.joints:
-            raise ValueError("head_tilt joint is required")
+    @property
+    def half_length_mm(self) -> float:
+        return 0.5 * self.length_mm
+
+    @property
+    def half_width_mm(self) -> float:
+        return 0.5 * self.width_mm
+
+    @property
+    def front_range_x_mm(self) -> float:
+        """Where the front range sensor sits: on the front edge."""
+        return self.half_length_mm
+
+    @property
+    def radius_mm(self) -> float:
+        """Circumscribed radius of the footprint."""
+        return math.hypot(self.half_length_mm, self.half_width_mm)
+
+    def clamp_velocity(self, v: float, w: float) -> tuple[float, float]:
+        """Inside the drive's limits; a non-finite command is no command."""
+        v_max, w_max = self.max_linear_speed_mm_s, self.max_angular_speed_deg_s
+        return (max(-v_max, min(v_max, float(v))) if math.isfinite(v) else 0.0,
+                max(-w_max, min(w_max, float(w))) if math.isfinite(w) else 0.0)
+
+    def clamp_head(self, deg: float) -> float:
+        return max(self.head_tilt.min_deg, min(self.head_tilt.max_deg, float(deg)))
 
     @classmethod
     def from_yaml(cls, path: Path | str) -> BodyCapabilities:
         raw = load_yaml_file(path)
-        dims = raw.get("dimensions_mm", {})
-        drive = raw.get("drive", {})
-        sensors = raw.get("sensors", {})
-        tof = sensors.get("front_tof", {})
-        enc = sensors.get("wheel_encoders", {})
-
-        joints: dict[str, JointSpec] = {}
-        for jname, jraw in (raw.get("joints") or {}).items():
-            joints[jname] = JointSpec(
-                name=jname,
-                min_deg=float(jraw.get("min_deg", -25.0)),
-                max_deg=float(jraw.get("max_deg", 35.0)),
-                neutral_deg=float(jraw.get("neutral_deg", 0.0)),
-                max_speed_deg_s=float(jraw.get("max_speed_deg_s", 90.0)),
-            )
-
-        tricks: dict[str, TrickSpec] = {}
-        for tname, traw in (raw.get("tricks") or {}).items():
-            tricks[tname] = TrickSpec(
-                name=tname,
-                description=str(traw.get("description", tname)),
-                duration_s=float(traw.get("duration_s", 1.0)),
-            )
-
-        sounds = list((raw.get("sounds") or {}).get("allowed") or [])
-        emotions = list((raw.get("emotions") or {}).get("allowed") or [])
-
+        dims, drive, sensors = raw["dimensions_mm"], raw["drive"], raw["sensors"]
+        tilt = raw["joints"]["head_tilt"]
         return cls(
-            robot_id=str(raw.get("robot_id", "companion_r1")),
-            description=str(raw.get("description", "Mobile 4-wheel skid-steer companion robot")),
-            wheel_diameter_mm=float(dims.get("wheel_diameter", 120.0)),
-            track_width_mm=float(dims.get("track_width", 208.0)),
-            length_mm=float(dims.get("length", 282.0)),
-            width_mm=float(dims.get("width", 228.0)),
-            max_linear_speed_mm_s=float(drive.get("max_linear_speed_mm_s", 400.0)),
-            max_angular_speed_deg_s=float(drive.get("max_angular_speed_deg_s", 120.0)),
-            max_single_move_mm=float(drive.get("max_single_move_mm", 2000.0)),
-            max_single_spin_deg=float(drive.get("max_single_spin_deg", 360.0)),
-            default_linear_speed_mm_s=float(drive.get("default_linear_speed_mm_s", 200.0)),
-            default_angular_speed_deg_s=float(drive.get("default_angular_speed_deg_s", 90.0)),
-            min_front_tof_stop_mm=float(tof.get("min_stop_mm", 120.0)),
-            default_front_tof_mm=float(tof.get("default_reading_mm", 1500.0)),
-            encoder_ticks_per_rev=int(enc.get("ticks_per_rev", 720)),
-            joints=joints or cls().joints,
-            allowed_sounds=sounds or cls().allowed_sounds,
-            allowed_emotions=emotions or cls().allowed_emotions,
-            tricks=tricks or cls().tricks,
+            robot_id=str(raw["robot_id"]),
+            description=str(raw["description"]),
+            wheel_diameter_mm=float(dims["wheel_diameter"]),
+            track_width_mm=float(dims["track_width"]),
+            length_mm=float(dims["length"]),
+            width_mm=float(dims["width"]),
+            max_linear_speed_mm_s=float(drive["max_linear_speed_mm_s"]),
+            max_angular_speed_deg_s=float(drive["max_angular_speed_deg_s"]),
+            min_front_tof_stop_mm=float(sensors["front_tof"]["min_stop_mm"]),
+            default_front_tof_mm=float(sensors["front_tof"]["default_reading_mm"]),
+            encoder_ticks_per_rev=int(sensors["wheel_encoders"]["ticks_per_rev"]),
+            lidar_x_mm=float(sensors["lidar"]["x_offset_mm"]),
+            lidar_z_mm=float(sensors["lidar"]["z_height_mm"]),
+            head_tilt=JointSpec("head_tilt", float(tilt["min_deg"]), float(tilt["max_deg"]),
+                                float(tilt["neutral_deg"]), float(tilt["max_speed_deg_s"])),
+            emotion_sounds={str(k): str(v) for k, v in raw["emotions"].items()},
+            gestures={name: GestureSpec(name, str(g["description"]), tuple(
+                GestureStep(float(s["s"]), float(s.get("v", 0.0)), float(s.get("w", 0.0)),
+                            float(s["head"]) if "head" in s else None) for s in g["steps"]))
+                      for name, g in raw["gestures"].items()},
         )
+
+
+@functools.cache
+def load_capabilities(path: Path | None = None) -> BodyCapabilities:
+    return BodyCapabilities.from_yaml(path or PROJECT_ROOT / "config" / "body.yaml")
 
 
 @dataclass
 class BodyPose:
-    """Instantaneous kinematic pose of the robot in the local odom frame."""
+    """Where the robot is; simulated or estimated, and in the map frame once localization corrects it."""
 
     x_mm: float = 0.0
     y_mm: float = 0.0
@@ -206,11 +179,12 @@ class BodyPose:
             "angular_vel_deg_s": round(self.angular_vel_deg_s, 1),
         }
 
+    def copy(self) -> BodyPose:
+        return replace(self)
+
 
 @dataclass
 class SensorReadings:
-    """Simulated or physical low-level sensor state."""
-
     front_tof_mm: float = 1500.0
     cliff_triggered: bool = False
     estop_active: bool = False
@@ -236,32 +210,12 @@ class SensorReadings:
             "charging": self.charging,
         }
 
-
-@dataclass(frozen=True)
-class BodyCommand:
-    """Validated physical action command dispatched to the BodyHAL."""
-
-    id: str
-    tool: str
-    args: dict[str, Any]
-    timeout_s: float = 5.0
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    """Execution outcome returned by BodyHAL."""
-
-    command_id: str
-    tool: str
-    ok: bool
-    status: str  # "completed" | "clamped" | "cancelled" | "reflex_stopped" | "failed"
-    message: str
-    pose: dict[str, float]
-    details: dict[str, Any] = field(default_factory=dict)
+    def copy(self) -> SensorReadings:
+        return replace(self)
 
 
 class BodyHAL(Protocol):
-    """Hardware Abstraction Layer interface for real and simulated bodies."""
+    name: str
 
     def capabilities(self) -> BodyCapabilities: ...
 
@@ -269,8 +223,25 @@ class BodyHAL(Protocol):
 
     def sensors(self) -> SensorReadings: ...
 
-    async def execute(self, cmd: BodyCommand) -> CommandResult: ...
+    async def set_velocity(self, linear_mm_s: float, angular_deg_s: float) -> Reflex | None:
+        """Drive at this speed until the next command (the watchdog stops it if none comes)."""
 
-    async def cancel(self, command_id: str | None = None) -> None: ...
+    def set_head(self, tilt_deg: float) -> None: ...
+
+    async def update_motion(self) -> Reflex | None:
+        """Bring the body up to now with no new command; the reflex limiting motion, if any."""
+
+    async def halt(self) -> None: ...
 
     def set_estop(self, active: bool) -> None: ...
+
+    def reset_pose(self, pose: BodyPose | None = None) -> None: ...
+
+    async def publish_state(self) -> None:
+        """Emit `body.pose` now."""
+
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+    async def health(self) -> Any: ...

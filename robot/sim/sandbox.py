@@ -23,12 +23,13 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from robot.body.hal import BodyPose
+from robot.body.hal import BodyCapabilities, BodyPose, load_capabilities
+from robot.core.angles import wrap_deg
 from robot.core.config import PROJECT_ROOT
 from robot.core.events import Event
 from robot.perception.camera import encode_png
 from robot.perception.geometry import CameraModel, default_rig
-from robot.world.spatial_map import direction_words
+from robot.world.labels import direction_words
 
 _MJ_SHARED_STATE: dict[Any, dict[str, Any]] = {}
 
@@ -187,6 +188,8 @@ class SandboxObject:
     color: str = "#38bdf8"
     movable: bool = True
     yaw_deg: float = 0.0  # which way it faces (people)
+    drive_over: bool = False  # a low ramp: the range sensor and the bumper do not meet it
+    on_floor: bool = False  # the model's origin is its base rather than its centre
 
     @property
     def radius_mm(self) -> float:
@@ -211,15 +214,15 @@ def default_objects() -> dict[str, SandboxObject]:
         SandboxObject("blue_cube", "Blue Cube", "box", 620.0, -210.0, width_mm=110.0, depth_mm=110.0,
                       height_mm=110.0, color="#3b82f6"),
         SandboxObject("yellow_duck", "Yellow Toy Duck", "sphere", 470.0, 340.0, width_mm=90.0, depth_mm=90.0,
-                      height_mm=96.0, color="#eab308"),
+                      height_mm=96.0, color="#eab308", on_floor=True),
         SandboxObject("green_mug", "Green Mug", "cylinder", 840.0, -30.0, width_mm=86.0, depth_mm=86.0,
                       height_mm=116.0, color="#10b981"),
         SandboxObject("cardboard_box", "Cardboard Box", "box", 950.0, 420.0, width_mm=220.0, depth_mm=220.0,
                       height_mm=190.0, color="#d97706"),
         SandboxObject("charging_dock", "Charging Dock", "box", -680.0, 0.0, width_mm=180.0, depth_mm=220.0,
-                      height_mm=130.0, color="#8b5cf6"),
+                      height_mm=130.0, color="#8b5cf6", drive_over=True, on_floor=True),
         SandboxObject("person", "Person", "person", -1050.0, -950.0, width_mm=500.0, depth_mm=300.0,
-                      height_mm=1700.0, color="#cc5242", yaw_deg=45.0),
+                      height_mm=1700.0, color="#cc5242", yaw_deg=45.0, on_floor=True),
     ]
     return {o.id: o for o in objs}
 
@@ -309,22 +312,22 @@ def visible_in(objects: list[SandboxObject], pose: BodyPose, cam: CameraModel) -
             continue
         dist = math.hypot(obj.x_mm - pose.x_mm, obj.y_mm - pose.y_mm)
         bearing = math.degrees(math.atan2(obj.y_mm - pose.y_mm, obj.x_mm - pose.x_mm)) - pose.heading_deg
-        out.append(GroundedDetection(obj.id, obj.label, obj.color, box, dist, (bearing + 180.0) % 360.0 - 180.0))
+        out.append(GroundedDetection(obj.id, obj.label, obj.color, box, dist, wrap_deg(bearing)))
     return sorted(out, key=lambda d: d.distance_mm)
 
 
 class SimulationSandbox:
     """The room, the robot's simulated cameras and sensors, and an interactive overview camera."""
 
-    FRONT_TOF_OFFSET_X_MM = 141.0
     OVERVIEW_FOVY_DEG = 48.0
     ROBOT_FOOTPRINT_RADIUS_MM = 140.0
     DOCK_CHARGE_RADIUS_MM = 230.0
 
     def __init__(self, bus: Any = None, *, rig: tuple[CameraModel, ...] | None = None,
                  room_half_extent_mm: float = 1500.0, overview_width: int = 520, overview_height: int = 340,
-                 xml_path: Path | None = None) -> None:
+                 xml_path: Path | None = None, capabilities: BodyCapabilities | None = None) -> None:
         self.bus = bus
+        self.front_range_x_mm = (capabilities or load_capabilities()).front_range_x_mm
         self.rig = tuple(rig or default_rig())
         self.cameras = {c.name: c for c in self.rig}
         self.room_half_extent_mm = room_half_extent_mm
@@ -354,11 +357,11 @@ class SimulationSandbox:
     def bind(self, sim_body: Any | None = None) -> None:
         """Follow `body.pose` to keep the simulated range sensors current."""
         self._sim_body = sim_body
-        if sim_body is not None and hasattr(sim_body, "attach_sensor_model"):
-            sim_body.attach_sensor_model(self)  # ToF/cliff sampled every control tick, no bus latency
+        if sim_body is not None:
+            sim_body.bind_world(self)  # its sensors sample this room every control tick
         if self.bus is not None:
             self._sub_ids.append(self.bus.subscribe("body.pose", self._on_body_pose, name="sandbox:pose"))
-            self._sync_sensors(self._last_pose)
+            self.follow_pose(self._last_pose)
 
     def unbind(self) -> None:
         if self.bus is not None:
@@ -382,7 +385,7 @@ class SimulationSandbox:
         self._last_frame = None
         self._last_overview_url = None
         if self._sim_body is not None:
-            self._sync_sensors(self._sim_body.pose())
+            self.follow_pose(self._sim_body.pose())
 
     def list_objects(self) -> list[dict[str, Any]]:
         res = []
@@ -455,8 +458,8 @@ class SimulationSandbox:
         """Forward ToF distance (mm) from the front bumper to the nearest object or wall in a 14-degree cone."""
         yaw = math.radians(pose.heading_deg)
         dir_x, dir_y = math.cos(yaw), math.sin(yaw)
-        ox = pose.x_mm + self.FRONT_TOF_OFFSET_X_MM * dir_x
-        oy = pose.y_mm + self.FRONT_TOF_OFFSET_X_MM * dir_y
+        ox = pose.x_mm + self.front_range_x_mm * dir_x
+        oy = pose.y_mm + self.front_range_x_mm * dir_y
         min_dist = 2500.0
         half = self.room_half_extent_mm
         if abs(dir_x) > 1e-6 and (t := ((half if dir_x > 0 else -half) - ox) / dir_x) > 0:
@@ -465,7 +468,7 @@ class SimulationSandbox:
             min_dist = min(min_dist, t)
         cone = math.tan(math.radians(14.0))
         for obj in self._objects.values():
-            if obj.id == "charging_dock":
+            if obj.drive_over:
                 continue
             dx, dy = obj.x_mm - ox, obj.y_mm - oy
             forward = dx * dir_x + dy * dir_y
@@ -495,8 +498,8 @@ class SimulationSandbox:
         if abs(pose.x_mm) + r > half or abs(pose.y_mm) + r > half:
             return True
         for obj in self._objects.values():
-            if obj.id == "charging_dock":
-                continue  # the dock is a low ramp the robot drives onto
+            if obj.drive_over:
+                continue
             if math.hypot(obj.x_mm - pose.x_mm, obj.y_mm - pose.y_mm) < r + 0.5 * min(obj.width_mm, obj.depth_mm):
                 return True
         return False
@@ -525,12 +528,12 @@ class SimulationSandbox:
         return visible_in(list(self._objects.values()), pose or self._last_pose, camera or self.front)
 
     # ---- rendering -------------------------------------------------------------------------------
-    def _state(self) -> dict[str, Any]:
+    def mujoco_state(self) -> dict[str, Any]:
         return _mujoco_state(self.xml_path, self.rig, self.overview_width, self.overview_height)
 
     def _sync_mujoco(self, pose: BodyPose) -> dict[str, Any]:
         """Pose the robot, face and objects in MuJoCo (on the GL thread)."""
-        st = self._state()
+        st = self.mujoco_state()
         model, data, q, g = st["model"], st["data"], st["qpos"], st["geoms"]
         data.qpos[q["base_x"]] = pose.x_mm / 1000.0
         data.qpos[q["base_y"]] = pose.y_mm / 1000.0
@@ -559,9 +562,8 @@ class SimulationSandbox:
             slot = obj.id if obj.id in mocap else next(spare, None)
             if slot is None:
                 continue
-            on_floor = obj.id in ("yellow_duck", "charging_dock") or obj.shape == "person"
             data.mocap_pos[mocap[slot]] = [obj.x_mm / 1000.0, obj.y_mm / 1000.0,
-                                           0.0 if on_floor else obj.height_mm / 2000.0]
+                                           0.0 if obj.on_floor else obj.height_mm / 2000.0]
             half = math.radians(obj.yaw_deg) / 2.0
             data.mocap_quat[mocap[slot]] = [math.cos(half), 0.0, 0.0, math.sin(half)]
             gid = st["spawn_geoms"].get(slot, -1)
@@ -574,7 +576,7 @@ class SimulationSandbox:
     def set_render_effects(self, *, shadows: bool, reflections: bool) -> None:
         """Shadows and floor reflections in the robot's camera images (off by default; training data varies them)."""
         def apply() -> None:
-            for renderer in self._state()["cameras"].values():
+            for renderer in self.mujoco_state()["cameras"].values():
                 renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = shadows
                 renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = reflections
         _GL.run(apply)
@@ -613,7 +615,7 @@ class SimulationSandbox:
             seg.update_scene(st["data"], camera=f"cam_{camera}")
             return model, rgb, seg.render()[:, :, 0].copy()  # geom id per pixel, -1 for background
         model, rgb, ids = _GL.run(render)
-        mocap = self._state()["mocap"]
+        mocap = self.mujoco_state()["mocap"]
         spare = iter(sorted(k for k in mocap if k.startswith("spawn_")))
         body_to_obj: dict[int, str] = {}
         for obj in self._objects.values():
@@ -741,21 +743,18 @@ class SimulationSandbox:
             return False
 
     # ---- following the robot ----------------------------------------------------------------------
-    def _sync_sensors(self, pose: BodyPose) -> None:
+    def follow_pose(self, pose: BodyPose) -> None:
         prev = self._last_pose
         self._wheel_travel_mm += math.hypot(pose.x_mm - prev.x_mm, pose.y_mm - prev.y_mm)
         self._last_pose = pose
-        if self._sim_body is not None and hasattr(self._sim_body, "set_sandbox_sensors"):
-            self._sim_body.set_sandbox_sensors(front_tof_mm=self.compute_front_tof_mm(pose),
-                                               cliff=self.check_cliff_triggered(pose))
         self._last_frame = None
         self._last_overview_url = None
 
     def _on_body_pose(self, event: Event) -> None:
         p = event.payload.get("pose")
         if isinstance(p, dict):
-            self._sync_sensors(BodyPose(float(p.get("x_mm", 0.0)), float(p.get("y_mm", 0.0)),
-                                        float(p.get("heading_deg", 0.0)), float(p.get("head_tilt_deg", 0.0))))
+            self.follow_pose(BodyPose(float(p.get("x_mm", 0.0)), float(p.get("y_mm", 0.0)),
+                                      float(p.get("heading_deg", 0.0)), float(p.get("head_tilt_deg", 0.0))))
 
     def snapshot(self, pose: BodyPose | None = None) -> dict[str, Any]:
         p = pose or self._last_pose

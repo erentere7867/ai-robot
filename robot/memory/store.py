@@ -22,7 +22,6 @@ from robot.memory.models import (
     TombstoneRecord,
 )
 from robot.memory.policy import (
-    DEFAULT_RESERVED_TERMS,
     NAME_SUBJECT,
     canonical_fact,
     canonical_subject,
@@ -196,7 +195,6 @@ class MemoryStore:
         self.max_episodes = max_episodes
         self.revision = 0
         # Tool names the agent loop registers here are never accepted as fact text.
-        self.reserved_terms: set[str] = set(DEFAULT_RESERVED_TERMS)
         self._conn.execute("PRAGMA cache_size=-2048")
         self._conn.execute("PRAGMA mmap_size=0")
         self._episode_count = self._conn.execute("SELECT count(*) FROM episodes").fetchone()[0]
@@ -269,7 +267,7 @@ class MemoryStore:
             }
         if op == "remember":
             base = {"op": "remember", "ok": False, "text": proposal.text, "subject": proposal.subject, "id": None}
-            if is_instruction_like(proposal.text, self.reserved_terms):
+            if is_instruction_like(proposal.text):
                 return {**base, "status": "rejected", "reason": "instruction_like", "content": ""}
             rec = self.remember(
                 proposal.text,
@@ -395,11 +393,11 @@ class MemoryStore:
             "content": raw[:200],
             "id": None,
         }
-        reason = fact_rejection_reason(raw, reserved_terms=self.reserved_terms)
+        reason = fact_rejection_reason(raw)
         if reason:
             return {**result, "reason": reason}
         subj, content = canonical_fact(raw, subject)
-        reason = fact_rejection_reason(content, reserved_terms=self.reserved_terms) or (
+        reason = fact_rejection_reason(content) or (
             None if subj and subj != "general" else "no_subject"
         )
         result.update(subject=subj, content=content)
@@ -677,10 +675,6 @@ class MemoryStore:
         ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
-    def search_episodes(self, query: str, *, limit: int = 5) -> list[EpisodeRecord]:
-        """Full-text search over episodes (including daily summaries), most relevant and recent first."""
-        return [ep for ep, _ in self._episode_hits(self._terms(query), limit)]
-
     def recall(self, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
         """Hybrid recall over active facts and episodes as compact dicts: kind, text, age_s, score."""
         terms = self._terms(query)
@@ -886,15 +880,6 @@ class MemoryStore:
         return {
             "active_memories": [m.to_dict() for m in self.list_active(limit=100)],
             "tombstones": [t.__dict__ for t in self.list_tombstones(limit=100)],
-            "recent_episodes": [e.__dict__ for e in self.recent_episodes(limit=10)],
-        }
-
-    def export_all(self) -> dict[str, Any]:
-        all_rows = self._conn.execute("SELECT * FROM memories ORDER BY valid_from ASC").fetchall()
-        return {
-            "active_memories": [m.to_dict() for m in self.list_active()],
-            "all_memories": [self._row_to_memory(r).to_dict() for r in all_rows],
-            "tombstones": [t.__dict__ for t in self.list_tombstones()],
             "recent_episodes": [e.__dict__ for e in self.recent_episodes(limit=10)],
         }
 

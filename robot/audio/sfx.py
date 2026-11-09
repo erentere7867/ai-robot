@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import io
 import math
-import wave
 
 import numpy as np
 
@@ -34,7 +32,6 @@ def _chirp_segment(
     """Synthesize a frequency-swept musical chirp with optional vibrato and harmonics."""
     n = max(1, int(duration_s * sr))
     t = np.linspace(0.0, duration_s, n, endpoint=False, dtype=np.float32)
-    # Exponential/smooth pitch curve feels more organic than linear
     inst_freq = f_start * ((f_end / max(1.0, f_start)) ** (t / max(1e-4, duration_s)))
     if vibrato_hz > 0.0 and vibrato_depth_hz > 0.0:
         inst_freq = inst_freq + vibrato_depth_hz * np.sin(2.0 * math.pi * vibrato_hz * t)
@@ -66,14 +63,12 @@ class PetSoundSynthesizer:
             return np.zeros(0, dtype=np.float32)
 
         if name == "ack_chirp":
-            # Quick two-note attentive perk-up ("bip-boop!")
             s1 = _chirp_segment(540.0, 680.0, 0.055, sr=sr)
             gap = np.zeros(int(0.015 * sr), dtype=np.float32)
             s2 = _chirp_segment(740.0, 980.0, 0.070, sr=sr)
             wav = np.concatenate([s1, gap, s2])
 
         elif name == "happy_trill":
-            # Rising playful 4-note arpeggio with warm shimmer
             notes = [
                 _chirp_segment(523.25, 560.0, 0.065, sr=sr),
                 _chirp_segment(659.25, 700.0, 0.065, sr=sr),
@@ -83,20 +78,17 @@ class PetSoundSynthesizer:
             wav = np.concatenate(notes)
 
         elif name == "curious_chirp":
-            # Questioning upward inflection ("hmm-wee?")
             s1 = _chirp_segment(420.0, 460.0, 0.075, sr=sr)
             s2 = _chirp_segment(460.0, 960.0, 0.165, vibrato_hz=18.0, vibrato_depth_hz=20.0, sr=sr)
             wav = np.concatenate([s1, s2])
 
         elif name == "sad_whimper":
-            # Soft descending minor sigh with gentle tremolo
             s1 = _chirp_segment(640.0, 440.0, 0.18, vibrato_hz=10.0, vibrato_depth_hz=12.0, sr=sr)
             gap = np.zeros(int(0.03 * sr), dtype=np.float32)
             s2 = _chirp_segment(420.0, 270.0, 0.28, vibrato_hz=8.0, vibrato_depth_hz=10.0, sr=sr)
             wav = np.concatenate([s1, gap, s2]) * 0.85
 
         elif name == "angry_grumble":
-            # Gritty low FM growl-stomp ("grrr-bzt!")
             rich = ((1, 1.0), (2, 0.65), (3, 0.45), (4, 0.30), (5, 0.20))
             s1 = _chirp_segment(
                 175.0, 120.0, 0.16, vibrato_hz=42.0, vibrato_depth_hz=28.0, harmonics=rich, sr=sr
@@ -108,7 +100,6 @@ class PetSoundSynthesizer:
             wav = np.tanh(1.6 * np.concatenate([s1, gap, s2])).astype(np.float32)
 
         elif name == "sleepy_yawn":
-            # Long gentle downward glide
             wav = (
                 _chirp_segment(
                     410.0,
@@ -121,14 +112,12 @@ class PetSoundSynthesizer:
             )
 
         elif name == "startle_pip":
-            # High surprised double-pip ("eep!")
             s1 = _chirp_segment(980.0, 1480.0, 0.065, sr=sr)
             gap = np.zeros(int(0.015 * sr), dtype=np.float32)
             s2 = _chirp_segment(1320.0, 1180.0, 0.060, sr=sr)
             wav = np.concatenate([s1, gap, s2])
 
         elif name == "giggle":
-            # Bouncy 4-bubble staccato giggle
             parts = []
             for base_f in (680.0, 790.0, 740.0, 920.0):
                 parts.append(_chirp_segment(base_f, base_f * 1.22, 0.065, sr=sr))
@@ -136,7 +125,6 @@ class PetSoundSynthesizer:
             wav = np.concatenate(parts)
 
         elif name == "purr":
-            # Warm rhythmic amplitude-modulated purr
             dur = 0.48
             n = int(dur * sr)
             t = np.linspace(0.0, dur, n, endpoint=False, dtype=np.float32)
@@ -149,19 +137,6 @@ class PetSoundSynthesizer:
             wav = (carrier / 1.65) * am * _envelope(n, 0.12, 0.25)
 
         else:
-            # Default: "soft_beep"
             wav = _chirp_segment(660.0, 660.0, 0.11, sr=sr)
 
         return (wav * float(self.master_gain)).astype(np.float32)
-
-    def synthesize_wav_bytes(self, sound_name: str) -> bytes:
-        """Synthesize `sound_name` and return a complete 16-bit PCM WAV file in memory."""
-        samples = self.synthesize(sound_name)
-        pcm16 = np.clip(samples * 32767.0, -32768, 32767).astype(np.int16)
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(self.sample_rate)
-            wf.writeframes(pcm16.tobytes())
-        return buf.getvalue()

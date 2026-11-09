@@ -8,21 +8,20 @@ outside the detector's classes ("my keys") fall back to the VLM: slower, but it 
 from __future__ import annotations
 
 import asyncio
-import base64
 import re
 from typing import Any
 
-from robot.control.behaviors import Scan, Search
-from robot.perception.camera import crop_png, side_by_side
+from robot.control.behaviors import Scan, Search, bearing_to
+from robot.core.angles import wrap_deg
+from robot.perception.camera import side_by_side
 from robot.perception.geometry import camera_for
 from robot.skills.base import Skill, SkillContext, SkillResult
-from robot.world.spatial_map import direction_words, label_score
+from robot.world.labels import direction_words, label_score
 
 LOOK_AROUND_STEP_DEG = 60.0
 GENERIC_QUERIES = {"room", "everything", "anything", "all", "objects", "object", "things", "thing", "scene",
                    "surroundings", "around", "stuff", "view", "what", "it", "that", "front", "area", "items",
                    "item", "something"}
-NAME_PROMPT = "What is this object? Answer with two or three words, such as \"orange traffic cone\"."
 
 
 def _query(text: str) -> str:
@@ -48,23 +47,11 @@ def _side(query: str) -> str | None:
 
 
 def _streaming(ctx: SkillContext) -> bool:
-    fast = ctx.fast
-    return fast is not None and fast.detector is not None and getattr(fast, "streaming", True)
+    return ctx.fast.detector is not None
 
 
 def _in_vocabulary(ctx: SkillContext, query: str) -> bool:
-    """Can the fast detector find this? (Detectors without a fixed class list, as in tests, can.)"""
-    vocabulary = getattr(ctx.fast.detector, "vocabulary", None) if ctx.fast is not None else None
-    if vocabulary is None:
-        return True
-    return any(label_score(label, query) >= 1 for label in vocabulary)
-
-
-async def perceive(ctx: SkillContext, query: str | None = None) -> dict[str, Any]:
-    """One camera view through the slow (VLM) detector, fused into the map."""
-    ctx.check()
-    frame = ctx.camera.capture()
-    return await _fuse(ctx, frame, await ctx.detector.detect(frame, query), query)
+    return any(label_score(label, query) >= 1 for label in ctx.fast.detector.vocabulary)
 
 
 async def _fuse(ctx: SkillContext, frame: Any, detections: list[Any], query: str | None) -> dict[str, Any]:
@@ -89,22 +76,11 @@ async def _view_result(ctx: SkillContext, frame: Any, detections: list[Any], upd
 
 async def _name_unknown(ctx: SkillContext, frame: Any, pairs: list[Any]) -> None:
     """Ask the VLM what the fast detector's unnamed "object"s are (once per object)."""
-    vlm = getattr(ctx.detector, "backend", None)
-    if vlm is None or frame is None or getattr(frame, "rgb", None) is None:
-        return
     for obj, det, _ in pairs[:3]:
-        if obj.label != "object":
-            continue
-        url = "data:image/png;base64," + base64.b64encode(crop_png(frame.rgb, det.bbox)).decode("ascii")
-        try:
-            reply = await vlm.chat([{"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}},
-                                                                 {"type": "text", "text": NAME_PROMPT}]}],
-                                   max_tokens=12)
-        except Exception:
-            return
-        name = " ".join(reply.content.strip().strip(".\"'").lower().split()[:4])
-        if name and len(name) < 40:
-            obj.label = name
+        if obj.label == "object":
+            name = await ctx.vlm.name_object(frame, det.bbox)
+            if name:
+                obj.label = name
 
 
 def _summary(ctx: SkillContext, ids: list[str]) -> list[str]:
@@ -125,8 +101,7 @@ def _in_sector(ctx: SkillContext, obj_id: str, direction: str) -> bool:
     obj = ctx.spatial_map.objects.get(obj_id)
     if obj is None:
         return False
-    off = (obj.relative(ctx.pose())[1] - DIRECTIONS[direction] + 180.0) % 360.0 - 180.0
-    return abs(off) <= SECTOR_HALF_DEG
+    return abs(wrap_deg(obj.relative(ctx.pose())[1] - DIRECTIONS[direction])) <= SECTOR_HALF_DEG
 
 
 def _image_for(views: list[Any], direction: str) -> Any:
@@ -140,19 +115,11 @@ def _image_for(views: list[Any], direction: str) -> Any:
     facing = [f for f in frames if f.model.covers(centre, 10.0)]
     if direction == "behind" and len(facing) >= 2:
         return side_by_side(sorted(facing, key=lambda f: f.model.yaw_deg)[:2])
-    return min(frames, key=lambda f: abs((centre - f.model.yaw_deg + 180.0) % 360.0 - 180.0))
-
-
-_LOOK_AT_ME = re.compile(r"\b(?:look|turn)(?: right| over)? (?:at|to|towards?) me\b|\bface me\b", re.I)
+    return min(frames, key=lambda f: abs(wrap_deg(centre - f.model.yaw_deg)))
 
 
 async def observe(ctx: SkillContext, direction: str = "around") -> SkillResult:
     """Look through every camera at once: what is around me (or only in one direction), without turning."""
-    if ctx.request and _LOOK_AT_ME.search(ctx.request) and ctx.spatial_map.speaker is not None:
-        # "Look at me" is turning to face the human (measured: the 2B model read "look" as observe).
-        from robot.skills.navigation import face  # navigation imports this module
-
-        return await face(ctx, "me")
     pose = ctx.pose()
     key = (round(pose.x_mm, -1), round(pose.y_mm, -1), round(pose.heading_deg), round(pose.head_tilt_deg),
            direction)
@@ -168,9 +135,8 @@ async def observe(ctx: SkillContext, direction: str = "around") -> SkillResult:
             await _name_unknown(ctx, frame, view["pairs"])
     else:
         centre = DIRECTIONS.get(direction, 0.0)
-        name = camera_for(ctx.camera.models, centre).name if hasattr(ctx.camera, "models") else None
-        frame = ctx.camera.capture(name) if name else ctx.camera.capture()
-        results = [await _fuse(ctx, frame, await ctx.detector.detect(frame, None), None)]
+        frame = ctx.camera.capture(camera_for(ctx.camera.models, centre).name)
+        results = [await _fuse(ctx, frame, await ctx.vlm.detect(frame, None), None)]
         views = [(frame, None, None)]
     ctx.attached_image = _image_for(views, direction)
     seen_ids = [i for view in results for i in view["seen"]]
@@ -202,7 +168,7 @@ async def observe(ctx: SkillContext, direction: str = "around") -> SkillResult:
 
 def in_view(ctx: SkillContext) -> dict[str, Any]:
     """What the fast detector sees right now (it watched during the motion): {} without a streaming detector."""
-    if not _streaming(ctx) or ctx.fast.last_frame is None:
+    if ctx.fast.last_frame is None:
         return {}
     now = ctx.clock.monotonic()
     ids = [o.id for o in ctx.spatial_map.objects.values() if now - o.last_seen < 1.5 and o.confidence >= 0.4]
@@ -241,7 +207,7 @@ async def look_around(ctx: SkillContext, query: str = "") -> SkillResult:
 
 async def _face_found(ctx: SkillContext, obj_id: str) -> SkillResult:
     target = ctx.spatial_map.objects[obj_id]
-    await ctx.face_point(target.x_mm, target.y_mm)
+    await ctx.turn_by(bearing_to(ctx.pose(), target.x_mm, target.y_mm))
     return SkillResult(True, f"Found it and turned to face it: {ctx.spatial_map.describe(target, ctx.pose())}.",
                        {"found": target.id})
 
@@ -251,15 +217,17 @@ async def _look_around_vlm(ctx: SkillContext, query: str) -> SkillResult:
     seen_ids: list[str] = []
     fallback: str | None = None  # a synonym match (asked for a box, saw a cube) if nothing better turns up
     steps = int(round(360.0 / LOOK_AROUND_STEP_DEG))
+    start_heading = ctx.pose().heading_deg
     for step in range(steps):
         ctx.check()
         frame = ctx.camera.capture()
-        detecting = asyncio.ensure_future(ctx.detector.detect(frame, query or None))
+        detecting = asyncio.ensure_future(ctx.vlm.detect(frame, query or None))
         spun = None
         try:
             if step < steps - 1:
                 # Turn to the next view while the model reads this one (the frame keeps its own pose).
-                spun = await ctx.spin(LOOK_AROUND_STEP_DEG)
+                spun = await ctx.turn_by(wrap_deg(start_heading + (step + 1) * LOOK_AROUND_STEP_DEG
+                                                  - ctx.pose().heading_deg))
             view = await _fuse(ctx, frame, await detecting, query or None)
         finally:
             detecting.cancel()
@@ -277,7 +245,7 @@ async def _look_around_vlm(ctx: SkillContext, query: str) -> SkillResult:
             return SkillResult(False, f"Stopped looking around: {spun.message}",
                                {"objects": _summary(ctx, seen_ids)})
     # Finish where we started so the scan does not leave the robot facing an arbitrary way.
-    await ctx.spin(LOOK_AROUND_STEP_DEG)
+    await ctx.turn_by(wrap_deg(start_heading - ctx.pose().heading_deg))
     ctx.attached_image = None  # the last frame is not what the robot faces now
     objects = _summary(ctx, seen_ids)
     if query and fallback is not None and fallback in ctx.spatial_map.objects:
@@ -296,9 +264,9 @@ def skills() -> list[Skill]:
                              "aliases": {"back": "behind", "ahead": "front", "forward": "front",
                                          "backward": "behind", "backwards": "behind", "all": "around",
                                          "everywhere": "around", "all_around": "around"}}},
-              observe),
+              observe, acts=True, idempotent=True),
         Skill("look_around", "Turn a full circle while looking, to find things that are not in front of you "
               "or to learn what is in the room. With query, stops and faces the first match.",
               {"query": {"type": "string", "description": "optional: the thing you are searching for"}},
-              look_around),
+              look_around, acts=True, idempotent=True),
     ]

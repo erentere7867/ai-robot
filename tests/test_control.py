@@ -8,14 +8,17 @@ import math
 import pytest
 from robot_fakes import GroundTruthDetector, clear_scene
 
-from robot.body.sim_body import SimBody
+from robot.body.hal import load_capabilities
 from robot.control.behaviors import Follow, GoToObject, Move, Orbit, Relation, Search, Turn
 from robot.control.fast_loop import FastLoop
+from robot.control.safety import CollisionMonitor
 from robot.core.bus import EventBus
 from robot.core.clock import ReplayClock
 from robot.navigation.planner import GridPlanner
-from robot.perception.camera import CameraRig, SimCamera
-from robot.world.sandbox import SimulationSandbox
+from robot.perception.camera import CameraRig
+from robot.sim.sandbox import SimulationSandbox
+from robot.sim.sensors import SimCamera
+from robot.sim.sim_body import SimBody
 from robot.world.spatial_map import SpatialMap
 
 
@@ -23,15 +26,16 @@ from robot.world.spatial_map import SpatialMap
 async def rig():
     clock = ReplayClock()
     bus = EventBus(clock)
-    body = SimBody(bus)
+    body = SimBody(bus, load_capabilities())
     sandbox = SimulationSandbox(bus)
     sandbox.bind(body)
     clear_scene(sandbox, keep=("cardboard_box",))
     world = SpatialMap(clock)
     camera = CameraRig([SimCamera(sandbox, body, clock, model) for model in sandbox.rig])
     loop = FastLoop(bus=bus, clock=clock, body=body, camera=camera, spatial_map=world,
-                    planner=GridPlanner(room_half_extent_mm=world.half, resolution_mm=50.0),
-                    detector=GroundTruthDetector(sandbox), continuous=False)
+                    planner=GridPlanner(room_half_extent_mm=world.grid.half, resolution_mm=50.0, robot_radius_mm=181.0),
+                    monitor=CollisionMonitor(load_capabilities()),
+                    detector=GroundTruthDetector(sandbox))
     await bus.start()
     await body.start()
     await loop.start()
