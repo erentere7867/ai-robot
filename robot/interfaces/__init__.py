@@ -1,1 +1,1 @@
-"""User and diagnostic interfaces (plain terminal console in H1, dashboard in H2)."""
+"""Ways to watch the robot: the live page."""

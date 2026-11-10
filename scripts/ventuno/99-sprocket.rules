@@ -1,6 +1,0 @@
-# Stable device names for the robot's USB peripherals (installed by scripts/ventuno/setup.sh).
-# Check your devices' IDs with `udevadm info -a -n /dev/ttyUSB0` and adjust.
-
-# LD19 / LD06 lidar on its USB-UART adapter (CP210x shown; CH340 is 1a86:7523)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="lidar", MODE="0660", GROUP="dialout"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="lidar", MODE="0660", GROUP="dialout"

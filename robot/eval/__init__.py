@@ -1,5 +1,1 @@
-"""Capability evaluation: simulated scenarios graded from simulator ground truth.
-
-`robot.eval.scenarios` holds pure scenario definitions and graders; `robot.eval.runner` drives a real
-`RobotHarness` through them using only the harness public API.
-"""
+"""Evaluation: `brain_check` tests the model on real photos; `scenarios` holds the simulator task graders."""

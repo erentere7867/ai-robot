@@ -2,7 +2,7 @@
 
 The camera finds and names things in front; the lidar knows where solid things are all around, which is
 what navigation needs. Scans are fused into the occupancy grid by the fast loop, tagged with the pose at capture.
-Sources: robot/sim/sensors.py and robot/hardware/sensors.py.
+Source in simulation: robot/sim/sensors.py.
 """
 
 from __future__ import annotations

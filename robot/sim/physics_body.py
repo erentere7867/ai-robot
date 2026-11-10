@@ -1,20 +1,15 @@
 """Rigid-body MuJoCo simulation of companion_r1 with motor/servo actuators, odometry and sensor noise.
 
-`PhysicsBody` replaces the kinematic `SimBody` when dynamics matter. Commands drive the wheel velocity and
-head servo actuators of `config/companion_r1_physics.xml`; a 100 Hz "firmware" loop inside the 2 ms physics
-step closes the speed loop and integrates odometry (quantised wheel encoders + noisy IMU yaw), as the MCU does. `pose()` is that estimate; `true_pose()` is MuJoCo ground
-truth. Chassis contact or stalled wheels raise a "bumper" reflex. Movable sandbox objects are free
-bodies that the robot can push; their new positions are written back with `sandbox.move_object()`.
+Commands drive the wheel velocity and head servo actuators of `config/companion_r1_physics.xml`; a 100 Hz
+"firmware" loop inside the 2 ms physics step closes the speed loop and integrates odometry (quantised wheel
+encoders + noisy IMU yaw), as the MCU does. `pose()` is that estimate; `true_pose()` is MuJoCo ground truth.
+Time only moves in `advance(seconds)`. Chassis contact or stalled wheels raise a "bumper" reflex. Movable
+sandbox objects are free bodies the robot can push; their new positions go back with `sandbox.move_object()`.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import logging
 import math
-import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,15 +17,9 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from robot.body.hal import BodyCapabilities, BodyPose, Reflex
+from robot.body.hal import BodyCapabilities, BodyPose, Reflex, SensorReadings, load_capabilities
 from robot.core.angles import wrap_deg
-from robot.core.bus import EventBus
-from robot.core.clock import RealClock
 from robot.core.config import PROJECT_ROOT
-from robot.core.service import ServiceHealth
-from robot.sim.sim_body import SimBody
-
-logger = logging.getLogger(__name__)
 
 PHYSICS_XML_PATH = PROJECT_ROOT / "config" / "companion_r1_physics.xml"
 _WHEELS = ("fl", "fr", "rl", "rr")
@@ -75,11 +64,10 @@ def _signature(obj: dict[str, Any]) -> tuple:
     return (obj["shape"], obj["width_mm"], obj["depth_mm"], obj["height_mm"], bool(obj.get("movable", True)))
 
 
-class PhysicsBody(SimBody):
+class PhysicsBody:
     """MuJoCo rigid-body companion_r1 with skid-steer wheel motors, head servo, odometry and bumper."""
 
-    name = "physics_body"
-
+    VELOCITY_TIMEOUT_S = 0.35  # motor watchdog: no fresh speed command -> stop
     LINEAR_ACCEL_MM_S2 = 800.0
     ANGULAR_ACCEL_DEG_S2 = 360.0
     RATE_P = 0.5
@@ -89,27 +77,17 @@ class PhysicsBody(SimBody):
     BUMPER_HOLD_S = 0.04
     STALL_HOLD_S = 0.3
     FIRMWARE_DT_S = 0.01
-    MAX_CATCHUP_S = 0.5
-    IDLE_PERIOD_S = 0.05
     OBJECT_SYNC_MM = 5.0
 
-    def __init__(
-        self,
-        bus: EventBus,
-        capabilities: BodyCapabilities,
-        *,
-        step_dt_s: float = 0.05,
-        sandbox: Any | None = None,
-        seed: int = 0,
-        battery_idle_pct_per_min: float = 0.5,
-        battery_pct_per_m: float = 1.0,
-        charge_pct_per_min: float = 20.0,
-        noise: SensorNoise | None = None,
-        xml_path: Path | str | None = None,
-    ) -> None:
-        self._data: mujoco.MjData | None = None
-        self._step_lock = threading.RLock()  # the idle task and the control thread both advance the physics
-        super().__init__(bus, capabilities, step_dt_s=step_dt_s)
+    def __init__(self, capabilities: BodyCapabilities | None = None, *, sandbox: Any | None = None, seed: int = 0,
+                 battery_idle_pct_per_min: float = 0.5, battery_pct_per_m: float = 1.0,
+                 charge_pct_per_min: float = 20.0, noise: SensorNoise | None = None,
+                 xml_path: Path | str | None = None) -> None:
+        self._caps = capabilities or load_capabilities()
+        self._sensors = SensorReadings(front_tof_mm=self._caps.default_front_tof_mm)
+        self._world: Any | None = None
+        self._vel_target: tuple[float, float] = (0.0, 0.0)
+        self._vel_until = 0.0
         self.battery_idle_pct_per_min = float(battery_idle_pct_per_min)
         self.battery_pct_per_m = float(battery_pct_per_m)
         self.charge_pct_per_min = float(charge_pct_per_min)
@@ -153,29 +131,26 @@ class PhysicsBody(SimBody):
         self._time_debt = 0.0
         self._sim_time = 0.0
         self._awake_until = 0.0
-        self._advancing = False
-        self._perf_wall_s = 0.0
-        self._perf_sim_s = 0.0
-        self._idle_task: asyncio.Task | None = None
         self._battery_travel_mm = 0.0
 
         # Let the tyres settle onto the floor before odometry is zeroed.
         mujoco.mj_step(self._model, self._data, nstep=round(0.3 / self._model.opt.timestep))
         self._reset_odometry()
-        self._clock_ref = self._battery_ref = self.bus.clock.monotonic()
+        self._battery_ref = 0.0
         if sandbox is not None:
             self.bind_world(sandbox)
 
     # -- odometry estimate (what pose() reports) ------------------------------------------------
 
-    @property
-    def _pose(self) -> BodyPose:
-        return self._odom
+    def capabilities(self) -> BodyCapabilities:
+        return self._caps
 
-    @_pose.setter
-    def _pose(self, value: BodyPose) -> None:
-        self._odom = value
+    def pose(self) -> BodyPose:
+        return self._odom.copy()
 
+    def sensors(self) -> SensorReadings:
+        self._refresh_sensors()
+        return self._sensors.copy()
     def reset_pose(self, pose: BodyPose | None = None) -> None:
         """Teleport the physical robot (and head) to `pose`, at rest, and re-zero odometry there.
 
@@ -230,84 +205,43 @@ class PhysicsBody(SimBody):
             angular_vel_deg_s=math.degrees(float(qv[v + 5])),
         )
 
-    # -- lifecycle and HAL overrides ------------------------------------------------------------
+    # -- commands and time -----------------------------------------------------------------------
 
-    async def start(self) -> None:
-        await super().start()
-        # Keep the world evolving between commands in live runs; replay clocks only advance on demand.
-        if isinstance(self.bus.clock, RealClock) and self._idle_task is None:
-            self._idle_task = asyncio.create_task(self._idle_loop(), name="physics_body:idle")
-
-    async def stop(self) -> None:
-        if self._idle_task is not None:
-            self._idle_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._idle_task
-            self._idle_task = None
-        await super().stop()
-
-    async def health(self) -> ServiceHealth:
-        health = await super().health()
-        health.details = {
-            **health.details,
-            "true_pose": self.true_pose().to_dict(),
-            "battery_pct": round(self._sensors.battery_pct, 1),
-            "physics_ms_per_sim_s": round(self.physics_ms_per_sim_s(), 2),
-        }
-        return health
-
-    def physics_ms_per_sim_s(self) -> float:
-        """Average wall-clock milliseconds spent stepping physics per simulated second."""
-        return 1000.0 * self._perf_wall_s / self._perf_sim_s if self._perf_sim_s > 0 else 0.0
-
-    def set_estop(self, active: bool) -> None:
-        super().set_estop(active)
-        if active:
-            self._halt_actuators()
-
-    def bind_world(self, sandbox: Any) -> None:
-        """Sample its raycasts from ground truth, mirror its objects into physics, report pushed ones back."""
-        super().bind_world(sandbox)
-        self._sync_world()
+    def command(self, linear_mm_s: float, angular_deg_s: float) -> None:
+        """Drive at this speed until the next command; the watchdog stops it if none comes."""
+        v, w = self._caps.clamp_velocity(linear_mm_s, angular_deg_s)
+        self._vel_target = (0.0, 0.0) if self._sensors.estop_active else (v, w)
+        self._vel_until = self._sim_time + self.VELOCITY_TIMEOUT_S
 
     def set_head(self, tilt_deg: float) -> None:
         self._head_target = self._caps.clamp_head(tilt_deg)
         self._wake()
 
-    async def halt(self) -> None:
+    def halt(self) -> None:
         self._halt_actuators()
-        await super().halt()
 
-    def _refresh_sensors(self) -> None:
-        if self._data is None:
-            return
-        truth = self.true_pose()
-        if self._world is not None:
-            tof = float(self._world.compute_front_tof_mm(truth))
-            cliff = bool(self._world.check_cliff_triggered(truth))
-        else:
-            tof, cliff = self._raycast_tof_mm(), False
-        if self.noise.tof_mm > 0:
-            tof = max(0.0, tof + float(self._rng.normal(0.0, self.noise.tof_mm)))
-        self._apply_ranges(round(tof, 1), cliff)
-        self._update_battery(truth)
+    def set_estop(self, active: bool) -> None:
+        self._sensors.estop_active = active
+        if active:
+            self._halt_actuators()
 
-    def _update_battery(self, truth: BodyPose) -> None:
-        """Idle drain per minute plus drain per metre of wheel travel; charging while docked."""
-        now = self.bus.clock.monotonic()
-        dt, self._battery_ref = max(0.0, now - self._battery_ref), now
-        travel_m, self._battery_travel_mm = self._battery_travel_mm / 1000.0, 0.0
-        charging = self._world is not None and self._world.is_charging(truth)
-        pct = self._sensors.battery_pct - self.battery_pct_per_m * travel_m
-        if charging:
-            pct += self.charge_pct_per_min * dt / 60.0
-        else:
-            pct -= self.battery_idle_pct_per_min * dt / 60.0
-        self._sensors.battery_pct = min(100.0, max(0.0, pct))
-        self._sensors.charging = charging
+    def bind_world(self, sandbox: Any) -> None:
+        """Sample its range sensors from ground truth, mirror its objects into physics, report pushed ones back."""
+        self._world = sandbox
+        self._sync_world()
 
-    async def update_motion(self) -> Reflex | None:
-        self.advance_to_now()
+    def advance(self, seconds: float) -> Reflex | None:
+        """Run the world forward; returns the reflex that limited motion, if any."""
+        self._time_debt += max(0.0, seconds)
+        dt = self._model.opt.timestep
+        steps = int(self._time_debt / dt + 1e-9)
+        self._time_debt -= steps * dt
+        if steps > 0:
+            if self._at_rest():
+                self._sim_time += steps * dt
+            else:
+                self._step_physics(steps)
+        self._sync_world()
         self._refresh_sensors()
         reflex: Reflex | None = None
         if self._fw_reflex is not None:
@@ -320,65 +254,41 @@ class PhysicsBody(SimBody):
             reflex = Reflex.OBSTACLE_AHEAD
         if reflex is not None and reflex.halts:
             self._halt_actuators()
-        if reflex is not None and reflex != self._vel_reflex:
-            await self._emit_reflex(reflex)
-        self._vel_reflex = reflex
-        if self._velocity_active() or reflex is not None or self._head_setpoint != self._head_target:
-            await self.publish_state()
         return reflex
 
+    def _refresh_sensors(self) -> None:
+        truth = self.true_pose()
+        if self._world is not None:
+            tof = float(self._world.compute_front_tof_mm(truth))
+            cliff = bool(self._world.check_cliff_triggered(truth))
+        else:
+            tof, cliff = self._raycast_tof_mm(), False
+        if self.noise.tof_mm > 0:
+            tof = max(0.0, tof + float(self._rng.normal(0.0, self.noise.tof_mm)))
+        self._sensors.front_tof_mm, self._sensors.cliff_triggered = round(tof, 1), cliff
+        self._update_battery(truth)
+
+    def _update_battery(self, truth: BodyPose) -> None:
+        """Idle drain per minute plus drain per metre of wheel travel; charging while docked."""
+        dt, self._battery_ref = max(0.0, self._sim_time - self._battery_ref), self._sim_time
+        travel_m, self._battery_travel_mm = self._battery_travel_mm / 1000.0, 0.0
+        charging = self._world is not None and self._world.is_charging(truth)
+        pct = self._sensors.battery_pct - self.battery_pct_per_m * travel_m
+        if charging:
+            pct += self.charge_pct_per_min * dt / 60.0
+        else:
+            pct -= self.battery_idle_pct_per_min * dt / 60.0
+        self._sensors.battery_pct = min(100.0, max(0.0, pct))
+        self._sensors.charging = charging
+
     def _halt_actuators(self) -> None:
-        self._vel_target, self._vel_until = (0.0, 0.0), self.bus.clock.monotonic()
+        self._vel_target, self._vel_until = (0.0, 0.0), self._sim_time
         self._fw_v = self._fw_w = self._fw_w_i = 0.0
         self._head_target = self._head_setpoint
-        if self._data is not None:
-            self._data.ctrl[self._motor_ids] = 0.0
-
-    # -- physics stepping ------------------------------------------------------------------------
-
-    async def _idle_loop(self) -> None:
-        while True:
-            await asyncio.sleep(self.IDLE_PERIOD_S)
-            try:
-                self.advance_to_now()
-            except Exception:
-                logger.exception("Idle physics step failed")
+        self._data.ctrl[self._motor_ids] = 0.0
 
     def _wake(self, seconds: float = 1.0) -> None:
         self._awake_until = max(self._awake_until, self._sim_time + seconds)
-
-    def advance_to_now(self) -> None:
-        with self._step_lock:
-            self._advance_to_now()
-
-    def _advance_to_now(self) -> None:
-        """Step physics by the bus-clock time elapsed since the last call (catch-up is bounded).
-
-        Commands call this every control tick, and with a `RealClock` an idle task calls it
-        between commands. With a `ReplayClock` the world only evolves when this is called.
-        """
-        if self._advancing:
-            return
-        now = self.bus.clock.monotonic()
-        elapsed, self._clock_ref = now - self._clock_ref, now
-        if elapsed > 0:
-            self._time_debt = min(self._time_debt + elapsed, self.MAX_CATCHUP_S)
-        dt = self._model.opt.timestep
-        steps = int(self._time_debt / dt + 1e-9)
-        self._time_debt -= steps * dt
-        self._advancing = True
-        try:
-            if steps > 0:
-                if self._at_rest():
-                    self._sim_time += steps * dt
-                else:
-                    started = time.perf_counter()
-                    self._step_physics(steps)
-                    self._perf_wall_s += time.perf_counter() - started
-                    self._perf_sim_s += steps * dt
-            self._sync_world()
-        finally:
-            self._advancing = False
 
     def _at_rest(self) -> bool:
         return (
@@ -446,11 +356,11 @@ class PhysicsBody(SimBody):
         self._monitor_bumper(dt, v_left, v_right)
 
     def _velocity_active(self) -> bool:
-        return self.bus.clock.monotonic() < self._vel_until or abs(self._fw_v) > 1e-3 or abs(self._fw_w) > 1e-3
+        return self._sim_time < self._vel_until or abs(self._fw_v) > 1e-3 or abs(self._fw_w) > 1e-3
 
     def _velocity_control(self, dt: float, gyro_deg_s: float) -> tuple[float, float]:
         """Speed control: ramp to the commanded speeds, hold the turn rate on the gyro (watchdog included)."""
-        fresh = self.bus.clock.monotonic() < self._vel_until
+        fresh = self._sim_time < self._vel_until
         target_v, target_w = self._vel_target if fresh else (0.0, 0.0)
         tof = self._sensors.front_tof_mm
         self._fw_blocked = target_v > 0 and (not math.isfinite(tof) or tof <= self._caps.min_front_tof_stop_mm)

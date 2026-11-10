@@ -2,21 +2,18 @@
 
 The robot model and room are config/companion_r1.xml; the cameras are built from config/body.yaml
 (`sensors.cameras`), so the simulator's lenses are exactly the ones the perception code assumes.
-Ground truth here (object positions, `detect_objects`, `render_labels`) feeds training data, the dashboard's
-"sim truth" overlay and the evaluation graders; the robot itself only gets camera pixels and range readings.
+Ground truth here (object positions, `detect_objects`, `render_labels`) feeds training data and the
+evaluation graders; the robot itself only gets camera pixels and range readings.
 """
 
 from __future__ import annotations
 
 import atexit
-import base64
 import concurrent.futures
 import math
 import queue
-import subprocess
-import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +23,7 @@ import numpy as np
 from robot.body.hal import BodyCapabilities, BodyPose, load_capabilities
 from robot.core.angles import wrap_deg
 from robot.core.config import PROJECT_ROOT
-from robot.core.events import Event
-from robot.perception.camera import encode_png
 from robot.perception.geometry import CameraModel, default_rig
-from robot.world.labels import direction_words
 
 _MJ_SHARED_STATE: dict[Any, dict[str, Any]] = {}
 
@@ -80,7 +74,7 @@ _GL = _GLThread()
 def _close_renderers() -> None:
     def close_all() -> None:
         for st in list(_MJ_SHARED_STATE.values()):
-            for renderer in [*st["cameras"].values(), *st["seg"].values(), st["over_renderer"]]:
+            for renderer in [*st["cameras"].values(), *st["seg"].values()]:
                 try:
                     renderer.close()
                 except Exception:
@@ -128,9 +122,9 @@ def scene_xml(xml_path: Path, rig: tuple[CameraModel, ...]) -> str:
     return text
 
 
-def _mujoco_state(xml_path: Path, rig: tuple[CameraModel, ...], over_w: int, over_h: int) -> dict[str, Any]:
+def _mujoco_state(xml_path: Path, rig: tuple[CameraModel, ...]) -> dict[str, Any]:
     """The MuJoCo model, data and renderers for this scene and rig (built once, on the GL thread)."""
-    key = (str(xml_path.resolve()), rig, over_w, over_h)
+    key = (str(xml_path.resolve()), rig)
     state = _MJ_SHARED_STATE.get(key)
     if state is not None:
         return state
@@ -159,12 +153,10 @@ def _mujoco_state(xml_path: Path, rig: tuple[CameraModel, ...], over_w: int, ove
         "model": model, "data": data,
         "cameras": cameras,
         "seg": {},
-        "over_renderer": mujoco.Renderer(model, height=over_h, width=over_w),
         "qpos": {"base_x": joint("base_x"), "base_y": joint("base_y"), "base_yaw": joint("base_yaw"),
                  "head_tilt": joint("head_tilt"),
                  "wheels": [joint(j) for j in ("fl_spin", "fr_spin", "rl_spin", "rr_spin")]},
-        "geoms": {"eye_l": geom("g_eye_left"), "eye_r": geom("g_eye_right"), "mouth": geom("g_mouth"),
-                  "cliff_zone": geom("cliff_zone_geom")},
+        "geoms": {"cliff_zone": geom("cliff_zone_geom")},
         "mocap": mocap,
         "spawn_geoms": {f"spawn_{i}": geom(f"geom_spawn_{i}") for i in range(1, 5)},
     }
@@ -238,27 +230,6 @@ class GroundedDetection:
     distance_mm: float
     bearing_deg: float  # relative to the robot's heading, + = left
 
-    def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "label": self.label, "color": self.color, "bbox": [round(v, 3) for v in self.bbox],
-                "distance_mm": round(self.distance_mm), "direction": direction_words(self.bearing_deg)}
-
-
-@dataclass
-class CameraFrame:
-    """One rendered camera image plus what is truly in it (for the dashboard)."""
-
-    camera: str
-    width: int
-    height: int
-    png_bytes: bytes
-    visible_objects: list[GroundedDetection] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        seen = ", ".join(f"{d.label.lower()} {d.distance_mm / 1000:.1f} m" for d in self.visible_objects[:4])
-        return {"camera": self.camera, "width": self.width, "height": self.height,
-                "data_url": "data:image/png;base64," + base64.b64encode(self.png_bytes).decode("ascii"),
-                "visible_objects": [d.to_dict() for d in self.visible_objects],
-                "summary": f"Sim truth, {self.camera} camera: " + (seen or "nothing in view")}
 
 
 def _extent_points(obj: SandboxObject) -> list[tuple[float, float, float]]:
@@ -317,84 +288,34 @@ def visible_in(objects: list[SandboxObject], pose: BodyPose, cam: CameraModel) -
 
 
 class SimulationSandbox:
-    """The room, the robot's simulated cameras and sensors, and an interactive overview camera."""
+    """The room and the robot's simulated cameras and sensors."""
 
-    OVERVIEW_FOVY_DEG = 48.0
     ROBOT_FOOTPRINT_RADIUS_MM = 140.0
     DOCK_CHARGE_RADIUS_MM = 230.0
 
-    def __init__(self, bus: Any = None, *, rig: tuple[CameraModel, ...] | None = None,
-                 room_half_extent_mm: float = 1500.0, overview_width: int = 520, overview_height: int = 340,
+    def __init__(self, *, rig: tuple[CameraModel, ...] | None = None, room_half_extent_mm: float = 1500.0,
                  xml_path: Path | None = None, capabilities: BodyCapabilities | None = None) -> None:
-        self.bus = bus
         self.front_range_x_mm = (capabilities or load_capabilities()).front_range_x_mm
         self.rig = tuple(rig or default_rig())
         self.cameras = {c.name: c for c in self.rig}
         self.room_half_extent_mm = room_half_extent_mm
-        self.overview_width = overview_width
-        self.overview_height = overview_height
         self.xml_path = xml_path or (PROJECT_ROOT / "config" / "companion_r1.xml")
         self._objects: dict[str, SandboxObject] = {}
         self.cliff_zone_enabled = False
         self.cliff_zone_rect: tuple[float, float, float, float] = (950.0, 1500.0, -600.0, 600.0)
-        self.cam_azimuth_deg, self.cam_elevation_deg = -135.0, -24.0  # the dashboard's orbit camera
-        self.cam_distance_m, self.cam_lookat_m = 1.35, [0.25, 0.0, 0.12]
-        self._face_state: dict[str, Any] = {"color_rgb": (0, 228, 255), "left_openness": 1.0,
-                                            "right_openness": 1.0, "mouth_open": 0.08}
-        self._last_pose = BodyPose()
-        self._wheel_travel_mm = 0.0
-        self._last_frame: CameraFrame | None = None
-        self._last_overview_url: str | None = None
-        self._viewer_proc: subprocess.Popen[Any] | None = None
-        self._sub_ids: list[str] = []
-        self._sim_body: Any | None = None
         self.reset_default_scene()
 
     @property
     def front(self) -> CameraModel:
         return self.cameras.get("front", self.rig[0])
 
-    def bind(self, sim_body: Any | None = None) -> None:
-        """Follow `body.pose` to keep the simulated range sensors current."""
-        self._sim_body = sim_body
-        if sim_body is not None:
-            sim_body.bind_world(self)  # its sensors sample this room every control tick
-        if self.bus is not None:
-            self._sub_ids.append(self.bus.subscribe("body.pose", self._on_body_pose, name="sandbox:pose"))
-            self.follow_pose(self._last_pose)
-
-    def unbind(self) -> None:
-        if self.bus is not None:
-            for sid in self._sub_ids:
-                self.bus.unsubscribe(sid)
-        self._sub_ids.clear()
-        if self._viewer_proc is not None and self._viewer_proc.poll() is None:
-            try:
-                self._viewer_proc.terminate()
-            except Exception:
-                pass
-            self._viewer_proc = None
-
     # ---- scene ----------------------------------------------------------------------------------
     def reset_default_scene(self) -> None:
         self._objects = default_objects()
         self.cliff_zone_enabled = False
-        self._changed()
-
-    def _changed(self) -> None:
-        self._last_frame = None
-        self._last_overview_url = None
-        if self._sim_body is not None:
-            self.follow_pose(self._sim_body.pose())
 
     def list_objects(self) -> list[dict[str, Any]]:
-        res = []
-        for obj in self._objects.values():
-            d = obj.to_dict()
-            u, v = self.project_world_to_overview_uv(obj.x_mm, obj.y_mm, obj.z_mm + 0.5 * min(obj.height_mm, 400.0))
-            d["overview_uv"] = [round(u, 3), round(v, 3)]
-            res.append(d)
-        return res
+        return [obj.to_dict() for obj in self._objects.values()]
 
     def get_object(self, obj_id: str) -> SandboxObject | None:
         return self._objects.get(obj_id)
@@ -409,16 +330,7 @@ class SimulationSandbox:
         obj.y_mm = max(-lim, min(lim, float(y_mm)))
         if yaw_deg is not None:
             obj.yaw_deg = float(yaw_deg)
-        self._changed()
         return obj
-
-    def move_object_by_overview_ray(self, obj_id: str, u_norm: float, v_norm: float) -> SandboxObject | None:
-        """Move an object to where a drag on the overview image meets the floor."""
-        obj = self._objects.get(obj_id)
-        if obj is None:
-            return None
-        hit = self.unproject_overview_uv_to_world(u_norm, v_norm, plane_z_mm=0.5 * min(obj.height_mm, 400.0))
-        return obj if hit is None else self.move_object(obj_id, hit[0], hit[1])
 
     def add_object(self, *, obj_id: str | None = None, label: str = "Orange Cone", shape: str = "cylinder",
                    x_mm: float = 550.0, y_mm: float = 0.0, size_mm: float = 100.0, color: str = "#f97316"
@@ -435,18 +347,13 @@ class SimulationSandbox:
                             max(-lim, min(lim, float(x_mm))), max(-lim, min(lim, float(y_mm))),
                             width_mm=sz, depth_mm=sz, height_mm=sz, color=color)
         self._objects[clean_id] = obj
-        self._changed()
         return obj
 
     def remove_object(self, obj_id: str) -> bool:
-        removed = self._objects.pop(obj_id, None) is not None
-        if removed:
-            self._changed()
-        return removed
+        return self._objects.pop(obj_id, None) is not None
 
     def set_cliff_zone(self, enabled: bool) -> None:
         self.cliff_zone_enabled = bool(enabled)
-        self._changed()
 
     def person_head(self) -> tuple[float, float, float] | None:
         """Where the person's voice comes from (x, y, z mm), or None when nobody is in the room."""
@@ -525,11 +432,11 @@ class SimulationSandbox:
     def detect_objects(self, pose: BodyPose | None = None, camera: CameraModel | None = None
                        ) -> list[GroundedDetection]:
         """Ground-truth boxes of the objects one camera sees (no render)."""
-        return visible_in(list(self._objects.values()), pose or self._last_pose, camera or self.front)
+        return visible_in(list(self._objects.values()), pose or BodyPose(), camera or self.front)
 
     # ---- rendering -------------------------------------------------------------------------------
     def mujoco_state(self) -> dict[str, Any]:
-        return _mujoco_state(self.xml_path, self.rig, self.overview_width, self.overview_height)
+        return _mujoco_state(self.xml_path, self.rig)
 
     def _sync_mujoco(self, pose: BodyPose) -> dict[str, Any]:
         """Pose the robot, face and objects in MuJoCo (on the GL thread)."""
@@ -539,19 +446,6 @@ class SimulationSandbox:
         data.qpos[q["base_y"]] = pose.y_mm / 1000.0
         data.qpos[q["base_yaw"]] = math.radians(pose.heading_deg)  # hinge qpos is radians
         data.qpos[q["head_tilt"]] = math.radians(pose.head_tilt_deg)
-        wheel = self._wheel_travel_mm / 60.0
-        yaw = math.radians(pose.heading_deg)
-        for idx, wid in enumerate(q["wheels"]):
-            data.qpos[wid] = wheel + yaw * (1.2 if idx % 2 == 0 else -1.2)
-        r, gr, b = self._face_state["color_rgb"]
-        for k in ("eye_l", "eye_r", "mouth"):
-            if g[k] >= 0:
-                model.geom_rgba[g[k]] = [r / 255.0, gr / 255.0, b / 255.0, 1.0]
-        for k, key in (("eye_l", "left_openness"), ("eye_r", "right_openness")):
-            if g[k] >= 0:
-                model.geom_size[g[k], 2] = 0.015 * max(0.08, float(self._face_state[key]))
-        if g["mouth"] >= 0:
-            model.geom_size[g["mouth"], 2] = 0.002 + 0.009 * max(0.08, float(self._face_state["mouth_open"]))
         if g["cliff_zone"] >= 0:
             model.geom_rgba[g["cliff_zone"], 3] = 0.45 if self.cliff_zone_enabled else 0.0
         mocap = st["mocap"]
@@ -573,17 +467,9 @@ class SimulationSandbox:
         mujoco.mj_forward(model, data)
         return st
 
-    def set_render_effects(self, *, shadows: bool, reflections: bool) -> None:
-        """Shadows and floor reflections in the robot's camera images (off by default; training data varies them)."""
-        def apply() -> None:
-            for renderer in self.mujoco_state()["cameras"].values():
-                renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = shadows
-                renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = reflections
-        _GL.run(apply)
-
     def render_rgb(self, camera: str = "front", pose: BodyPose | None = None) -> np.ndarray:
         """What one of the robot's cameras sees (raw RGB, as a physical camera would deliver it)."""
-        p = pose or self._last_pose
+        p = pose or BodyPose()
 
         def render() -> np.ndarray:
             st = self._sync_mujoco(p)
@@ -599,7 +485,7 @@ class SimulationSandbox:
         Returns (rgb, {object_id: {"bbox_px": (x1, y1, x2, y2), "pixels": n, "label": str}}): simulator
         ground truth for training and grading a detector.
         """
-        p = pose or self._last_pose
+        p = pose or BodyPose()
         cam = self.cameras[camera]
 
         def render() -> tuple[Any, np.ndarray, np.ndarray]:
@@ -633,142 +519,3 @@ class SimulationSandbox:
                                   "pixels": len(xs), "label": self._objects[obj_id].label}
         return rgb, labels
 
-    def capture_camera_view(self, pose: BodyPose | None = None, camera: str = "front") -> CameraFrame:
-        """A camera image for the dashboard, with what is truly in view (sim truth, for debugging)."""
-        p = pose or self._last_pose
-        cam = self.cameras[camera]
-        frame = CameraFrame(camera, cam.width, cam.height, encode_png(self.render_rgb(camera, p)),
-                            self.detect_objects(p, cam))
-        if camera == "front":
-            self._last_frame = frame
-        return frame
-
-    # ---- the dashboard's overview camera ----------------------------------------------------------
-    def set_orbit_camera(self, *, azimuth_deg: float | None = None, elevation_deg: float | None = None,
-                         distance_m: float | None = None, lookat_m: list[float] | None = None) -> None:
-        if azimuth_deg is not None:
-            self.cam_azimuth_deg = float(azimuth_deg) % 360.0
-        if elevation_deg is not None:
-            self.cam_elevation_deg = max(-85.0, min(-5.0, float(elevation_deg)))
-        if distance_m is not None:
-            self.cam_distance_m = max(0.35, min(3.8, float(distance_m)))
-        if lookat_m is not None and len(lookat_m) == 3:
-            self.cam_lookat_m = [max(-1.4, min(1.4, float(lookat_m[0]))), max(-1.4, min(1.4, float(lookat_m[1]))),
-                                 max(0.0, min(0.8, float(lookat_m[2])))]
-        self._last_overview_url = None
-
-    def update_face_state(self, face_dict: dict[str, Any]) -> None:
-        """Mirror the live face (eye colour and openness, mouth) on the robot's visor."""
-        state = {"color_rgb": tuple(face_dict.get("color_rgb") or (0, 228, 255)),
-                 "left_openness": round(float(face_dict.get("left_openness", 1.0)), 2),
-                 "right_openness": round(float(face_dict.get("right_openness", 1.0)), 2),
-                 "mouth_open": round(float(face_dict.get("mouth_open", 0.08)), 2)}
-        if state != self._face_state:
-            self._face_state = state
-            self._last_overview_url = None
-
-    def _overview_basis(self) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
-        """(position, forward, right, up) of the orbit camera, in metres."""
-        az, el = math.radians(self.cam_azimuth_deg), math.radians(self.cam_elevation_deg)
-        fwd = (math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el))
-        lx, ly, lz = self.cam_lookat_m
-        d = self.cam_distance_m
-        pos = (lx - d * fwd[0], ly - d * fwd[1], lz - d * fwd[2])
-        right = (-math.sin(az), math.cos(az), 0.0)
-        up = (-math.sin(el) * math.cos(az), -math.sin(el) * math.sin(az), math.cos(el))
-        return pos, fwd, right, up
-
-    def _overview_tan(self) -> tuple[float, float]:
-        ty = math.tan(math.radians(0.5 * self.OVERVIEW_FOVY_DEG))
-        return ty * (self.overview_width / float(self.overview_height)), ty
-
-    def project_world_to_overview_uv(self, x_mm: float, y_mm: float, z_mm: float) -> tuple[float, float]:
-        """A world point (mm) on the overview image (normalized u, v); (-1, -1) behind the camera."""
-        pos, fwd, right, up = self._overview_basis()
-        d = (x_mm / 1000.0 - pos[0], y_mm / 1000.0 - pos[1], z_mm / 1000.0 - pos[2])
-        zc = sum(a * b for a, b in zip(d, fwd, strict=True))
-        if zc <= 0.02:
-            return (-1.0, -1.0)
-        tx, ty = self._overview_tan()
-        xc = sum(a * b for a, b in zip(d, right, strict=True))
-        yc = sum(a * b for a, b in zip(d, up, strict=True))
-        return 0.5 + 0.5 * xc / (zc * tx), 0.5 - 0.5 * yc / (zc * ty)
-
-    def unproject_overview_uv_to_world(self, u_norm: float, v_norm: float, plane_z_mm: float = 45.0
-                                       ) -> tuple[float, float] | None:
-        """Where a point on the overview image meets the horizontal plane z = `plane_z_mm`."""
-        pos, fwd, right, up = self._overview_basis()
-        tx, ty = self._overview_tan()
-        nx, ny = (float(u_norm) - 0.5) * 2.0 * tx, (0.5 - float(v_norm)) * 2.0 * ty
-        ray = [fwd[i] + nx * right[i] + ny * up[i] for i in range(3)]
-        if abs(ray[2]) < 1e-4:
-            return None
-        t = (plane_z_mm / 1000.0 - pos[2]) / ray[2]
-        if t <= 0.0:
-            return None
-        return (pos[0] + t * ray[0]) * 1000.0, (pos[1] + t * ray[1]) * 1000.0
-
-    def render_overview_3d(self, pose: BodyPose | None = None) -> str:
-        """The third-person view of the room as a PNG data URL."""
-        p = pose or self._last_pose
-        if self._last_overview_url is not None and p == self._last_pose:
-            return self._last_overview_url
-        az, el, dist, lookat = self.cam_azimuth_deg, self.cam_elevation_deg, self.cam_distance_m, list(self.cam_lookat_m)
-
-        def render() -> np.ndarray:
-            st = self._sync_mujoco(p)
-            cam = mujoco.MjvCamera()
-            cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-            cam.lookat[:], cam.distance, cam.azimuth, cam.elevation = lookat, dist, az, el
-            renderer: mujoco.Renderer = st["over_renderer"]
-            renderer.update_scene(st["data"], camera=cam)
-            return renderer.render().copy()
-
-        self._last_overview_url = "data:image/png;base64," + base64.b64encode(encode_png(_GL.run(render))).decode()
-        return self._last_overview_url
-
-    def launch_native_viewer(self, api_url: str = "http://127.0.0.1:8090") -> bool:
-        """Open the native MuJoCo viewer window, synced with the harness through the dashboard API."""
-        if self._viewer_proc is not None and self._viewer_proc.poll() is None:
-            return True
-        script = PROJECT_ROOT / "scripts" / "mujoco_live_viewer.py"
-        if not script.exists():
-            return False
-        try:
-            self._viewer_proc = subprocess.Popen([sys.executable, str(script), "--api", api_url, "--xml",
-                                                  str(self.xml_path)], stdout=subprocess.DEVNULL,
-                                                 stderr=subprocess.DEVNULL)
-            return True
-        except Exception:
-            return False
-
-    # ---- following the robot ----------------------------------------------------------------------
-    def follow_pose(self, pose: BodyPose) -> None:
-        prev = self._last_pose
-        self._wheel_travel_mm += math.hypot(pose.x_mm - prev.x_mm, pose.y_mm - prev.y_mm)
-        self._last_pose = pose
-        self._last_frame = None
-        self._last_overview_url = None
-
-    def _on_body_pose(self, event: Event) -> None:
-        p = event.payload.get("pose")
-        if isinstance(p, dict):
-            self.follow_pose(BodyPose(float(p.get("x_mm", 0.0)), float(p.get("y_mm", 0.0)),
-                                      float(p.get("heading_deg", 0.0)), float(p.get("head_tilt_deg", 0.0))))
-
-    def snapshot(self, pose: BodyPose | None = None) -> dict[str, Any]:
-        p = pose or self._last_pose
-        if self._last_frame is None or p != self._last_pose:
-            self._last_pose = p
-            self._last_overview_url = None
-            frame = self.capture_camera_view(p)
-        else:
-            frame = self._last_frame
-        return {"engine": "mujoco_3d", "room_half_extent_mm": self.room_half_extent_mm,
-                "cliff_zone_enabled": self.cliff_zone_enabled, "cliff_zone_rect": list(self.cliff_zone_rect),
-                "orbit_camera": {"azimuth_deg": round(self.cam_azimuth_deg, 1),
-                                 "elevation_deg": round(self.cam_elevation_deg, 1),
-                                 "distance_m": round(self.cam_distance_m, 2),
-                                 "lookat_m": [round(x, 2) for x in self.cam_lookat_m],
-                                 "data_url": self.render_overview_3d(p)},
-                "objects": self.list_objects(), "camera": frame.to_dict()}
