@@ -169,10 +169,16 @@ def interactive(robot, room: str, brain_url: str, port: int) -> None:  # noqa: A
 
     threading.Thread(target=refresh, daemon=True).start()
     brain = Brain(brain_url)
+    planner = LocalPlanner(brain)
     if not brain.healthy():
         print(f"no model answering at {brain_url}: start llama-server there first", flush=True)
+    else:
+        print("the planner is reading its rules and examples...", flush=True)
+        started = time.monotonic()
+        planner.warm()
+        print(f"...done in {time.monotonic() - started:.0f} s", flush=True)
     print(f"Open http://localhost:{port} and type an instruction. Ctrl+C to quit.", flush=True)
-    drive(live, Agent(LocalPlanner(brain), live=live), Holder(robot))
+    drive(live, Agent(planner, live=live), Holder(robot))
 
 
 def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float) -> None:

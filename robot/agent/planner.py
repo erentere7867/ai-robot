@@ -155,6 +155,11 @@ class LocalPlanner:
                             {"role": "assistant", "content": answer}]
         self.messages: list[dict[str, Any]] = []
 
+    def warm(self) -> None:
+        """Have the model read the rules, API card and examples now, so the first instruction finds them cached
+        (thousands of tokens: on a CPU that is minutes)."""
+        self.brain.complete([*self.prefix, {"role": "user", "content": "Instruction: wait"}], 'root ::= "ok"', 1)
+
     def _write(self) -> PlanResult:
         reply = self.brain.complete(self.messages, GRAMMAR, self.max_tokens, self.think)
         self.messages.append({"role": "assistant", "content": reply.text})
