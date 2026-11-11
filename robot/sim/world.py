@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import random
 import re
 import threading
 import time
@@ -42,6 +43,7 @@ V_MAX, W_MAX, TURN_RATE, CRUISE = 0.5, 1.5, 1.0, 0.4  # firmware ceilings and no
 STOP_ZONE, SLOW_ZONE, PERSON_ZONE = 0.25, 0.6, 1.5  # collision monitor
 SEE_RANGE, PERCEIVE_EVERY, STALL_S, ASK_S = 4.5, 0.2, 10.0, 2.0
 SPIN_RATES = {"slow": 0.5, "normal": 1.0, "fast": 1.5}  # rad/s
+MOTION = {"move", "turn", "spin", "face", "go_to", "drive", "drive_path", "stop", "orbit", "follow"}
 BASE_VOCABULARY = frozenset("""person chair sofa couch table desk box ball backpack bag cup mug bottle plant lamp tv bed
 door shoe book laptop phone cat dog charger bin toy pillow shelf cabinet fridge sink window basket""".split())
 COLORS = frozenset("red orange yellow green blue purple pink brown black white grey gray".split())
@@ -108,6 +110,8 @@ class Scene:
     notes: list[str] = field(default_factory=list)  # remembered from earlier tasks
     seen: list[tuple[str, Point]] = field(default_factory=list)  # in the object map from earlier, maybe stale
     stop_at: float | None = None  # the user says "stop" at this time
+    noise: float = 0.0  # 0 sees perfectly; 1 is a poor detector: misses grow with distance, positions jitter
+    seed: int = 0  # for the noise, so a run can be repeated
 
 
 @dataclass
@@ -152,6 +156,9 @@ class SimRobot:
         self.x, self.y, self.yaw = scene.start.x, scene.start.y, math.radians(scene.start.yaw)
         self.v_now = self.w_now = 0.0
         self.held = False  # the collision monitor stopped the last step
+        self._rng = random.Random(scene.seed)
+        self._detected: set[int] = set()  # ids the detector reported at the last perception tick
+        self._behaviour: Any = None  # a background skill's controller: () -> (v, w)
         self.ended_by = ""  # why the program was stopped: "cancel", "stop word" or "budget"
         self.vocabulary = set(BASE_VOCABULARY)
         self.memory: dict[int, tuple[Point, float]] = {}  # id -> where and when last seen
@@ -165,7 +172,9 @@ class SimRobot:
         self._cancel = threading.Event()
         self._last_perceive = -1.0
         self._build_grid()
-        self._perceive()
+        for _ in range(10 if scene.noise else 1):  # with noise, the robot has watched for 2 s before the task
+            self._last_perceive = -1.0
+            self._perceive()
 
     # ---- world geometry ---------------------------------------------------------------------------------------
     def _cell(self, x: float, y: float) -> tuple[int, int]:
@@ -190,17 +199,23 @@ class SimRobot:
         for t in self.things.values():
             if t.solid and not t.route and not t.person:
                 self.occupied |= (xs - t.x) ** 2 + (ys - t.y) ** 2 <= t.radius ** 2
-        # Planning grid: a cell is blocked when any occupied cell lies within the robot's radius plus a margin.
+        self.set_occupied(self.occupied)
+        self.coverage = np.zeros_like(walls)
+
+    def set_occupied(self, occupied: np.ndarray) -> None:
+        """Use this occupancy grid (a saved map, say) and derive the planning grids from it: a cell is blocked when
+        any occupied cell lies within the robot's radius plus a margin."""
+        nx, ny = occupied.shape
+        self.occupied = occupied
         k = math.ceil((RADIUS + 0.03) / RES)
-        inflated = np.zeros_like(self.occupied)
-        padded = np.pad(self.occupied, k)
+        inflated = np.zeros_like(occupied)
+        padded = np.pad(occupied, k)
         for di in range(-k, k + 1):
             for dj in range(-k, k + 1):
                 if di * di + dj * dj <= k * k:
                     inflated |= padded[k + di:k + di + nx, k + dj:k + dj + ny]
         self.inflated = inflated
         self.blocked = inflated[:nx - nx % PLAN, :ny - ny % PLAN].reshape(nx // PLAN, PLAN, ny // PLAN, PLAN).any(axis=(1, 3))
-        self.coverage = np.zeros_like(walls)
 
     def _occ(self, x: float, y: float, grid: np.ndarray | None = None) -> bool:
         grid = self.occupied if grid is None else grid
@@ -236,10 +251,27 @@ class SimRobot:
         if self.t - self._last_perceive < PERCEIVE_EVERY - 1e-9:
             return
         self._last_perceive = self.t
+        self._perceive_objects()
+        self._cover()
+
+    def _perceive_objects(self) -> None:
+        """What the detector reports this tick, into memory: here from the scene (the RealRobot uses its cameras)."""
+        noise, self._detected = self.scene.noise, set()
         for t in self._visible():
-            if self._detectable(t):
-                self.memory[t.id] = (self._where(t), self.t)
-        # Camera coverage: floor cells within range along unobstructed rays.
+            if not self._detectable(t):
+                continue
+            p = self._where(t)
+            if noise:  # a real detector misses things, more often far away, and places them a little off
+                d = math.dist(p, (self.x, self.y))
+                if self._rng.random() < noise * (0.15 + 0.6 * d / SEE_RANGE):
+                    continue
+                s = noise * (0.03 + 0.03 * d)
+                p = (p[0] + self._rng.gauss(0.0, s), p[1] + self._rng.gauss(0.0, s))
+            self._detected.add(t.id)
+            self.memory[t.id] = (p, self.t)
+
+    def _cover(self) -> None:
+        """Camera coverage: floor cells within range along unobstructed rays."""
         angles = np.linspace(-math.pi, math.pi, 720, endpoint=False)  # 4 cm apart at full range
         steps = np.arange(RADIUS, SEE_RANGE, RES)
         px = self.x + np.outer(np.cos(angles), steps)
@@ -319,6 +351,8 @@ class SimRobot:
 
     def _step(self, v: float, w: float, dt: float = DT) -> None:
         self._interrupts()
+        if self._behaviour is not None and not v and not w:  # a background skill drives while the program waits
+            v, w = self._behaviour()
         v, w = max(-V_MAX, min(V_MAX, v)), max(-W_MAX, min(W_MAX, w))
         self.held = False
         if v:
@@ -449,6 +483,8 @@ class SimRobot:
             raise BudgetSpent(f"made {self.max_calls} robot calls")
         if call:
             self.trace.events.append(Event(round(self.t, 2), call, args, (self.x, self.y, self.yaw)))
+        if call in MOTION:  # any new motion replaces a background skill
+            self._behaviour = None
         self._interrupts()
 
     def _result(self, text: str) -> None:
@@ -536,9 +572,16 @@ class SimRobot:
         else:
             self._rotate(sign * 2 * math.pi * abs(float(turns)), rate)
 
-    def face(self, target: Point | Pose | Object | str) -> None:
-        self._call("face", target=target)
-        tx, ty = self._reach(self._target(target), 0.0)[0]
+    def face(self, target: Point | Pose | Object | str, background: bool = False) -> None:
+        self._call("face", target=target, background=background)
+        target = self._target(target)
+        if background:  # keep turning toward it, a moving person included, while the program goes on
+            def keep_facing() -> tuple[float, float]:
+                tx, ty = self._reach(target, 0.0)[0]
+                return 0.0, 2.5 * wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw)
+            self._behaviour = keep_facing
+            return
+        tx, ty = self._reach(target, 0.0)[0]
         self._rotate(wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw))
 
     def go_to(self, target: Point | Pose | Object | str, distance: float = 0.0) -> None:
@@ -651,7 +694,7 @@ class SimRobot:
 
     def _found(self, description: str, since: float) -> Object | None:
         """In view now, or seen since the search started."""
-        visible = self._matching(description, self._visible())
+        visible = self._matching(description, self._in_view())
         if visible:
             return self._object(visible[0])
         recent = [o for o in self._remembered(description) if self.t - o.last_seen >= since - 1e-6]
@@ -678,38 +721,49 @@ class SimRobot:
             raise PathBlocked(f"no free ring round it: {blocked(r):.0%} of the best ring is blocked by things or people")
         self._drive_path(geom.circle(center, r, (self.x, self.y), laps=abs(float(laps)), ccw=ccw), 0.3, record=False)
 
-    def follow(self, person: Object, distance: float = 1.0, seconds: float | None = None) -> None:
-        self._call("follow", person=person, distance=distance, seconds=seconds)
+    def follow(self, person: Object, distance: float = 1.0, seconds: float | None = None,
+               background: bool = False) -> None:
+        self._call("follow", person=person, distance=distance, seconds=seconds, background=background)
         person = self._target(person)
         thing = self.things.get(person.id) if isinstance(person, Object) else None
         if thing is None:
             raise TypeError("follow needs a person Object, such as robot.user()")
+        control = self._follower(thing, float(distance))
+        if background:  # keep following while the program goes on, until the next motion or "stop"
+            self._behaviour = control
+            return
         end = self.t + float(seconds) if seconds is not None else math.inf
-        lost_since, route, replan_at = None, [], 0.0
         while self.t < end:
+            self._step(*control())
+        self._halt()
+
+    def _follower(self, thing: Thing, distance: float) -> Any:
+        """A controller that keeps `distance` m from a person: a route round obstacles, renewed twice a second."""
+        state: dict[str, Any] = {"lost": None, "route": [], "replan": 0.0}
+
+        def control() -> tuple[float, float]:
             p = self._where(thing)
             if p is None or thing not in self._visible():
-                lost_since = self.t if lost_since is None else lost_since
-                if self.t - lost_since > 5.0:
+                state["lost"] = self.t if state["lost"] is None else state["lost"]
+                if self.t - state["lost"] > 5.0:
+                    self._behaviour = None
                     raise TargetLost("lost sight of them for 5 s")
-                self._step(0.0, 0.0)
-                continue
-            lost_since = None
+                return 0.0, 0.0
+            state["lost"] = None
             d = math.dist(p, (self.x, self.y))
-            if d <= float(distance) + 0.3:  # close enough: keep facing them
-                route = []
-                err = wrap(math.atan2(p[1] - self.y, p[0] - self.x) - self.yaw)
-                self._step(-0.15 if d < float(distance) - 0.3 else 0.0, 2.5 * err)
-                continue
-            if self.t >= replan_at or not route:  # a route round obstacles toward them, renewed twice a second
-                route, replan_at = self._plan(p, float(distance)) or [], self.t + 0.5
+            if d <= distance + 0.3:  # close enough: keep facing them
+                state["route"] = []
+                return (-0.15 if d < distance - 0.3 else 0.0), 2.5 * wrap(math.atan2(p[1] - self.y, p[0] - self.x)
+                                                                          - self.yaw)
+            if self.t >= state["replan"] or not state["route"]:
+                state["route"], state["replan"] = self._plan(p, distance) or [], self.t + 0.5
+            route = state["route"]
             while route and math.dist(route[0], (self.x, self.y)) < 0.2:
                 route.pop(0)
             tx, ty = route[0] if route else p
             err = wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw)
-            v = min(CRUISE, 0.8 * (d - float(distance))) if abs(err) < 0.7 else 0.0
-            self._step(v, 2.5 * err)
-        self._halt()
+            return (min(CRUISE, 0.8 * (d - distance)) if abs(err) < 0.7 else 0.0), 2.5 * err
+        return control
 
     def spot(self, target: Point | Pose | Object | str, side: str, distance: float = 0.5) -> Point:
         self._call()
@@ -734,7 +788,7 @@ class SimRobot:
         self._watch(description)
         end = self.t + float(seconds) if seconds is not None else math.inf
         while True:
-            seen = self._matching(description, self._visible())
+            seen = self._matching(description, self._in_view())
             if seen:
                 return self._object(seen[0])
             if self.t >= end:
@@ -771,8 +825,12 @@ class SimRobot:
     def detect(self, description: str) -> list[Object]:
         self._call()
         self._watch(description)
-        found = self._matching(description, self._visible())
-        return Matches(sorted((self._object(t) for t in found), key=lambda o: o.distance))
+        found = self._matching(description, self._in_view())
+        return Matches(sorted((self._object(t, *self.memory[t.id]) for t in found), key=lambda o: o.distance))
+
+    def _in_view(self) -> list[Thing]:
+        """What the detector reports now: everything visible, or with noise, what it did not miss this tick."""
+        return [t for t in self._visible() if not self.scene.noise or t.id in self._detected]
 
     def where(self, description: str, area: str = "everywhere") -> list[Object]:
         self._call()
@@ -946,8 +1004,11 @@ class SimRobot:
                 "user": user.id if user else None}
 
     def begin(self) -> None:
-        """A new task starts here: "start" names this spot."""
+        """A new task starts here: "start" names this spot, and an earlier stop no longer applies."""
         self.places["start"] = Pose(self.x, self.y, math.degrees(self.yaw))
+        self._cancel.clear()
+        self.ended_by = ""
+        self._behaviour = None
 
     def announce(self, text: str) -> None:
         """The planner's first sentence, spoken before the program runs."""

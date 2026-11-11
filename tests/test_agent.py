@@ -144,3 +144,35 @@ def test_turn_left_alone_is_a_quarter_turn_and_a_bare_angle_asks_which_way():
     assert ok, why
     result = check("robot.turn(90)\n", SimRobot(living_room()))
     assert not result.ok and "which way" in result.message
+
+
+def test_a_background_follow_keeps_going_while_the_program_waits():
+    """"Follow me and tell me if you see a cat": the follow runs alongside wait_for."""
+    import math
+
+    from robot.eval.suite import tracked, walking_user
+
+    walk = ((0.2, 0.4), (2.4, 0.2), (2.4, -1.9), (0.0, -2.0))
+
+    scene = with_things(walking_user(walk, 0.4, stop_at=40.0), Thing("cat", 2.0, -1.5, 0.15, "black", solid=False,
+                                                                       appear_at=20.0))
+    sim = SimRobot(scene)
+    program = ('robot.follow(robot.user(), background=True)\ncat = robot.wait_for("cat")\n'
+               'robot.say("I can see a cat!")\nrobot.follow(robot.user())\n')
+    assert check(program, sim).ok
+    result = Runner(sim).run(program)
+    assert result.status in ("done", "preempted"), result.error
+    assert any("cat" in text for _, text in sim.trace.said)
+    assert tracked(sim, 8.0, 20.0, lambda x, y, _, u: math.dist((x, y), u) <= 2.2) >= 0.6
+
+
+def test_hand_written_programs_survive_a_poor_detector():
+    """With noise 1 the detector misses things, more often far away, and places them off; the skills must cope."""
+    failed = []
+    for case_id, program in sorted(PROGRAMS.items()):
+        scene = BY_ID[case_id].scene()
+        scene.noise, scene.seed = 1.0, 1
+        sim = SimRobot(scene)
+        if not (check(program, sim).ok and Runner(sim).run(program).status != "error" and BY_ID[case_id].check(sim)):
+            failed.append(case_id)
+    assert failed == []

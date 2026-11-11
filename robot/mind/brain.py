@@ -56,7 +56,7 @@ class Brain:
         data = r.json()
         t = data.get("timings") or {}
         text, thought = data["choices"][0]["message"]["content"] or "", ""
-        if think and "</think>" in text:
+        if "</think>" in text:  # with thinking off some templates still open and close an empty <think> block
             thought, text = text.split("</think>", 1)
             thought, text = thought.removeprefix("<think>"), text.lstrip()
         return Reply(text, t.get("prompt_ms", 0.0), t.get("predicted_ms", 0.0), t.get("prompt_n", 0),
@@ -85,6 +85,18 @@ class Brain:
         """A yes or no question about one image."""
         reply = self.complete(_with_image(image_url, f"{question} Answer yes or no."), 'root ::= "yes" | "no"', 2)
         return reply.text.strip() == "yes", reply
+
+    def name(self, image_url: str, words: list[str]) -> str | None:
+        """What the object in the middle of a crop is, chosen from `words`; None when the model sees no object.
+
+        A choice beats a free answer: answering freely, the model called a red ball a "button" and a cardboard box a
+        "wall"; choosing from the robot's words it named 8 of 10 simulator crops right (both misses called a low
+        coffee table a desk)."""
+        words = sorted(set(words)) + ["nothing"]
+        reply = self.complete(_with_image(image_url, "What is the object in the middle of this picture? Answer with "
+                                          "one word from: " + ", ".join(words) + "."),
+                              "root ::= " + " | ".join(f'"{w}"' for w in words), 8)
+        return None if reply.text.strip() == "nothing" else reply.text.strip()
 
     def ground(self, image_url: str, marked_url: str, description: str, marks: int) -> tuple[int | None, Reply]:
         """Which numbered box is this? None when it is not there.

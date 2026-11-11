@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,7 +50,10 @@ class _Proxy:
             raise AttributeError(f"robot has no {name}")
 
         def call(*args: Any, **kwargs: Any) -> Any:
-            self._conn.send(("call", name, args, kwargs))
+            frame = sys._getframe(1)  # the program line making this call, for the live view
+            while frame is not None and frame.f_code.co_filename != "<program>":
+                frame = frame.f_back
+            self._conn.send(("call", name, args, kwargs, frame.f_lineno if frame else 0))
             kind, value = self._conn.recv()
             if kind == "ok":
                 return value
@@ -79,9 +83,11 @@ def _child(source: str, conn: Any) -> None:
 
 
 class Runner:
-    def __init__(self, backend: Any, *, time_limit_s: float = 600.0) -> None:
+    def __init__(self, backend: Any, *, time_limit_s: float = 600.0,
+                 on_call: Callable[[str, int], None] | None = None) -> None:
         self.backend = backend
         self.time_limit_s = time_limit_s
+        self.on_call = on_call  # told each call's name and program line, for the live view
         self._stop = threading.Event()
         self._proc: Any = None
 
@@ -114,8 +120,10 @@ class Runner:
                 if message[0] == "done":
                     result = self._finish(message[1], calls)
                     break
-                _, name, args, kwargs = message
+                _, name, args, kwargs, line = message
                 calls += 1
+                if self.on_call is not None:
+                    self.on_call(name, line)
                 here.send(self._serve(name, args, kwargs))
         finally:
             if proc.is_alive():

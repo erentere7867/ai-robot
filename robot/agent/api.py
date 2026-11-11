@@ -142,7 +142,7 @@ class Robot(Protocol):
         """a table object (by id) as it is now; raises NotFound"""
 
     def move(self, metres: float, direction: str = "forward") -> None:
-        """straight; direction "forward" or "backward"; raises PathBlocked"""
+        """straight; direction "forward" or "backward\""""
 
     def turn(self, degrees: float = 90, direction: str = "") -> None:
         """on the spot; direction "left" or "right" (needed)"""
@@ -151,29 +151,30 @@ class Robot(Protocol):
              direction: str = "left") -> None:
         """full turns (1 = 360°), or for seconds; speed "slow", "normal" or "fast\""""
 
-    def face(self, target: Target) -> None:
-        """turn toward it"""
+    def face(self, target: Target, background: bool = False) -> None:
+        """turn toward it; background=True keeps at it"""
 
     def go_to(self, target: Target, distance: float = 0.0) -> None:
-        """drive there round obstacles, stopping distance m short; raises PathBlocked"""
+        """drive there round obstacles, stopping distance m short"""
 
     def drive(self, *, metres_per_second: float, degrees_per_second: float = 0.0, seconds: float) -> None:
         """raw speed; + degrees_per_second turns left"""
 
     def drive_path(self, points: list[Point], speed: float = 0.3) -> None:
-        """drive through the points in order; raises PathBlocked"""
+        """drive through the points in order"""
 
     def stop(self) -> None:
         """stop moving"""
 
     def search(self, description: str, area: str = "here") -> Object | None:
-        """memory, then explore until seen; area "here", a room or "everywhere"; None if not found"""
+        """memory, then explore; area "here", a room or "everywhere"; None if not found"""
 
     def orbit(self, target: Target, laps: float = 1.0, direction: str = "left", distance: float = 0.5) -> None:
-        """circle it distance m from its edge; "left" is anticlockwise; raises PathBlocked"""
+        """circle it distance m from its edge; "left" = anticlockwise"""
 
-    def follow(self, person: Object, distance: float = 1.0, seconds: float | None = None) -> None:
-        """stay distance m from them until "stop" or seconds; raises TargetLost"""
+    def follow(self, person: Object, distance: float = 1.0, seconds: float | None = None,
+               background: bool = False) -> None:
+        """stay distance m away until "stop" or seconds; background=True runs alongside"""
 
     def spot(self, target: Target, side: str, distance: float = 0.5) -> Point:
         """a free point next to it: side "behind", "front", "left" or "right" as you see it now"""

@@ -8,23 +8,36 @@ The design is in [docs/architecture.md](docs/architecture.md).
 ## Layout
 
 ```
-config/    robot geometry (body.yaml), MuJoCo model and meshes
 firmware/  STM32H5 sketch: wheels, odometry, watchdog, reflexes
 robot/
-  agent/      the robot API and API card, the gate, the sandboxed runner
-  sim/        world.py: 2D simulator behind the API (gate dry runs, test suite); MuJoCo room and physics for ROS 2
+  agent/      the robot API and API card, the planner, the gate, the sandboxed runner, instant commands
+  sim/        world.py: the 2D simulator behind the API (gate dry runs, test suite)
+  ros/        the 3D simulation: Sprocket's body (3 cameras for 360 degrees, 2D lidar, IMU), Gazebo rooms with
+              Fuel furniture, Nav2, perception on ROS, and run3d.py to run the whole stack
+  perception/ YOLOE-26 detector, camera rig geometry, locating detections, colour, the map-frame tracker
   mind/       client for the model (LFM3-VL-2B through llama-server)
-  perception/ camera geometry, frames, lidar scans
+  interfaces/ the live page (instructions in, program and map out) and the 2D demo
   eval/       the 50-instruction suite, hand-written programs, red-team programs, photo check (M0)
-tests/     phase acceptance tests
+  train/      fine-tuning data generator and the Kaggle notebook
+tests/     acceptance tests
 ```
 
 ## Try it
 
 ```bash
-python -m pip install -e ".[sim,eval,dev]"
-python -m pytest -q                 # phase 4 acceptance in simulation, about 15 s
+python -m pip install -e ".[eval,dev]"
+python -m pytest -q                 # about 75 s
 python -m robot.eval.suite          # hand-written programs through gate, runner and checks
+python -m robot.interfaces.demo     # the 2D room behind the live page, http://localhost:8765
+```
+
+The 3D run needs WSL (Ubuntu) with ROS 2 Lyrical, Nav2 and Gazebo, a Python environment with ultralytics, and the
+YOLOE-26 weights in the working folder:
+
+```bash
+python -m robot.ros.run3d --perception --brain http://127.0.0.1:8081    # what the robot sees, against the truth
+python -m robot.ros.run3d --cases O1 O3 O6 --watch 30                    # hand-written programs, judged
+python -m robot.ros.run3d --interactive --gui --brain http://127.0.0.1:8081   # Gazebo and the page
 ```
 
 The photo check for the model (M0) needs a `llama-server` build (b11960 or newer) running

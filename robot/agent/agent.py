@@ -29,6 +29,8 @@ HINTS = (
     ("expected a point", "Targets are a point (x, y), a Pose, an Object, or a str naming a place, a room or a thing."),
     ("is not available", "Only robot, geom, math, the four exceptions and basic builtins exist; print does not."),
     ("positional argument", 'Pass unit arguments by name, for example robot.move(metres=1.0, direction="forward").'),
+    ("'NoneType' object", "Motion and speech calls (go_to, move, turn, face, orbit, say...) return nothing: keep the "
+                          "object you passed in, e.g. chair = robot.where(\"chair\")[0], then robot.go_to(chair)."),
     ("unexpected keyword", "Use the argument names shown in the API."),
 )
 
@@ -53,9 +55,14 @@ class TaskRecord:
 
 
 class Agent:
-    def __init__(self, planner: LocalPlanner, *, readback: bool = False) -> None:
+    def __init__(self, planner: LocalPlanner, *, readback: bool = False, live: Any = None) -> None:
         self.planner = planner
         self.readback = readback  # check each program's dry run, in words, against the instruction before it runs
+        self.live = live  # robot.interfaces.live.Live, or None
+
+    def _show(self, **changes: Any) -> None:
+        if self.live is not None:
+            self.live.update(**changes)
 
     def _ask_planner(self, record: TaskRecord, call: Any) -> PlanResult | None:
         started = time.perf_counter()
@@ -74,9 +81,13 @@ class Agent:
         record = TaskRecord(instruction)
         if hasattr(robot, "begin"):
             robot.begin()  # "start" now names where this task began
+        self._show(status="planning", instruction=instruction, say_first="", plan="", program="", line=0, readback="",
+                   problems=[])
         result = self._ask_planner(record, lambda: self.planner.plan(describe(robot.snapshot()), instruction))
         gate_retries, spoke = 0, False
         while result is not None:
+            self._show(status="checking", say_first=result.say_first, plan=result.plan, program=result.program, line=0,
+                       problems=list(record.problems))
             gate = check(result.program, robot)
             if not gate.ok:
                 record.problems.append(f"gate: {gate}")
@@ -100,9 +111,15 @@ class Agent:
             if not spoke:
                 robot.announce(result.say_first)
                 spoke = True
-            run = Runner(robot).run(result.program)
+            if self.live is not None:
+                self._show(status="running", readback=readback(gate.trace, gate.ended_by))
+                self.live.show_world(robot)
+            run = Runner(robot, on_call=self._on_call(robot)).run(result.program)
             if run.status in ("done", "preempted"):
                 record.outcome = run.status
+                self._show(status="done" if run.status == "done" else "stopped", line=0)
+                if self.live is not None:
+                    self.live.show_world(robot)
                 return record
             record.problems.append(f"run: line {run.line}: {run.error}")
             if record.repairs >= MAX_REPAIRS:
@@ -110,4 +127,14 @@ class Agent:
             problem = explain(f"The program stopped at line {run.line} with {run.error}.")
             result = self._ask_planner(record, lambda p=problem: self.planner.repair(p, describe(robot.snapshot())))
         record.outcome = "failed"
+        self._show(status="failed", problems=list(record.problems))
         return record
+
+    def _on_call(self, robot: Any) -> Any:
+        if self.live is None:
+            return None
+
+        def seen(name: str, line: int) -> None:
+            self.live.update(line=line)
+            self.live.show_world(robot)
+        return seen

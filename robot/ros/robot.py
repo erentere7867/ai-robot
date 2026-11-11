@@ -20,7 +20,7 @@ DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
 
 
 class RosRobot(SimRobot):
-    def __init__(self, scene: Scene, max_time: float = 600.0) -> None:
+    def __init__(self, scene: Scene, max_time: float = 600.0, nudge: Any = None) -> None:
         import rclpy
         from geometry_msgs.msg import Twist, TwistStamped
         from nav2_msgs.action import DriveOnHeading, FollowPath, NavigateToPose, Spin
@@ -52,10 +52,13 @@ class RosRobot(SimRobot):
         threading.Thread(target=self._executor.spin, daemon=True).start()
         self._goal: Any = None
         self.t0 = None
-        deadline = time.monotonic() + 60.0
+        deadline, next_nudge = time.monotonic() + 120.0, time.monotonic() + 10.0
         while not self._read_pose():
             if time.monotonic() > deadline:
-                raise RuntimeError("no map -> base_link transform after 60 s: is Nav2 running and localised?")
+                raise RuntimeError("no map -> base_link transform after 120 s: is Nav2 running and localised?")
+            if nudge is not None and time.monotonic() > next_nudge:  # e.g. send the initial pose again
+                nudge()
+                next_nudge = time.monotonic() + 10.0
             time.sleep(0.2)
         self.t0 = self._now()
         self.t = 0.0
@@ -94,6 +97,8 @@ class RosRobot(SimRobot):
     def _step(self, v: float, w: float, dt: float = DT) -> None:
         """One control period: say, listen, sleep and drive in the 2D world all advance time through this."""
         self._interrupts()
+        if self._behaviour is not None and not v and not w:  # a background skill drives while the program waits
+            v, w = self._behaviour()
         if v or w or self.v_now or self.w_now:
             self._publish(v, w)
         self.v_now, self.w_now = v, w

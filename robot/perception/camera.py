@@ -1,16 +1,12 @@
-"""Camera frames: raw pixels tagged with the pose at capture, and encoding images for the vision model."""
+"""Images for the vision model and the live page: a fast PNG encoder and a data URL."""
 
 from __future__ import annotations
 
 import base64
 import struct
 import zlib
-from dataclasses import dataclass, field
 
 import numpy as np
-
-from robot.body.hal import BodyPose
-from robot.perception.geometry import CameraModel
 
 VLM_MAX_WIDTH = 512  # a wider image only costs tokens
 
@@ -44,15 +40,3 @@ def fit_width(rgb: np.ndarray, max_width: int) -> np.ndarray:
 def data_url(rgb: np.ndarray) -> str:
     """An image as the vision model reads it."""
     return "data:image/png;base64," + base64.b64encode(encode_png(fit_width(rgb, VLM_MAX_WIDTH))).decode("ascii")
-
-
-@dataclass
-class Frame:
-    pose: BodyPose
-    model: CameraModel
-    captured_at: float
-    rgb: np.ndarray = field(repr=False)
-
-    @property
-    def camera(self) -> str:
-        return self.model.name

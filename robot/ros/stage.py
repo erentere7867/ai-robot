@@ -23,21 +23,53 @@ from pathlib import Path
 
 from robot.sim.world import SimRobot
 
-WALL_H, THING_H, PERSON_H = 0.6, 0.5, 1.7
+WALL_H, PERSON_H = 2.4, 1.7  # room-height walls: cameras should see a room, not a pen
+RGB = {"black": (0.1, 0.1, 0.1), "white": (0.92, 0.92, 0.9), "grey": (0.55, 0.55, 0.55), "gray": (0.55, 0.55, 0.55),
+       "brown": (0.5, 0.33, 0.18), "red": (0.8, 0.12, 0.1), "blue": (0.15, 0.3, 0.8), "yellow": (0.95, 0.8, 0.1),
+       "green": (0.2, 0.6, 0.25), "orange": (0.95, 0.5, 0.1), "silver": (0.75, 0.75, 0.78), "": (0.6, 0.6, 0.6),
+       "wall": (0.9, 0.88, 0.84)}
+# label: (shape, height in metres) so the 3D room looks like the room: tables at table height, a tall lamp
+SHAPES = {"table": ("box", 0.75), "desk": ("box", 0.75), "sofa": ("box", 0.8), "cabinet": ("box", 1.0),
+          "fridge": ("box", 1.7), "tv": ("box", 0.9), "box": ("box", 0.45), "bin": ("cylinder", 0.5),
+          "chair": ("box", 0.9), "lamp": ("cylinder", 1.5), "plant": ("cylinder", 0.9), "ball": ("sphere", 0.0),
+          "backpack": ("box", 0.45), "basket": ("cylinder", 0.35), "laptop": ("box", 0.06), "pillow": ("box", 0.2),
+          "shoe": ("box", 0.12), "bottle": ("cylinder", 0.3), "cup": ("cylinder", 0.12), "person": ("cylinder", 1.7)}
 
 
-def _box(name: str, x: float, y: float, yaw: float, size: tuple[float, float, float]) -> str:
-    geometry = f"<box><size>{size[0]:.3f} {size[1]:.3f} {size[2]:.3f}</size></box>"
-    return (f'<model name="{name}"><static>true</static><pose>{x:.3f} {y:.3f} {size[2] / 2:.3f} 0 0 {yaw:.4f}</pose>'
+def _steps(lo: float, hi: float, every: float) -> list[float]:
+    n = max(1, round((hi - lo) / every))
+    return [lo + (k + 0.5) * (hi - lo) / n for k in range(n)]
+
+
+def _model(name: str, x: float, y: float, yaw: float, geometry: str, z: float, color: str) -> str:
+    r, g, b = RGB.get(color, RGB[""])
+    material = f"<material><ambient>{r} {g} {b} 1</ambient><diffuse>{r} {g} {b} 1</diffuse></material>"
+    return (f'<model name="{name}"><static>true</static><pose>{x:.3f} {y:.3f} {z:.3f} 0 0 {yaw:.4f}</pose>'
             f'<link name="l"><collision name="c"><geometry>{geometry}</geometry></collision>'
-            f'<visual name="v"><geometry>{geometry}</geometry></visual></link></model>')
+            f'<visual name="v"><geometry>{geometry}</geometry>{material}</visual></link></model>')
 
 
-def _cylinder(name: str, x: float, y: float, r: float, h: float) -> str:
-    geometry = f"<cylinder><radius>{r:.3f}</radius><length>{h:.3f}</length></cylinder>"
-    return (f'<model name="{name}"><static>true</static><pose>{x:.3f} {y:.3f} {h / 2:.3f} 0 0 0</pose>'
-            f'<link name="l"><collision name="c"><geometry>{geometry}</geometry></collision>'
-            f'<visual name="v"><geometry>{geometry}</geometry></visual></link></model>')
+def _box(name: str, x: float, y: float, yaw: float, size: tuple[float, float, float], color: str = "white") -> str:
+    return _model(name, x, y, yaw, f"<box><size>{size[0]:.3f} {size[1]:.3f} {size[2]:.3f}</size></box>", size[2] / 2,
+                  color)
+
+
+def _thing(t: object, real: bool = True) -> str:
+    """A real 3D model from Fuel when there is one (a detector can recognise it), else a coloured shape."""
+    from robot.ros.fuel import include
+
+    name = f"{t.label}{t.id}"
+    model = include(t.label, name, t.x, t.y) if real else None
+    if model:
+        return model
+    shape, h = SHAPES.get(t.label, ("cylinder", 0.5))
+    if shape == "box":  # a square footprint inside the disc the planner and the map use
+        side = t.radius * 1.6
+        return _box(name, t.x, t.y, 0.0, (side, side, h), t.color)
+    if shape == "sphere":
+        return _model(name, t.x, t.y, 0.0, f"<sphere><radius>{t.radius:.3f}</radius></sphere>", t.radius, t.color)
+    return _model(name, t.x, t.y, 0.0, f"<cylinder><radius>{t.radius:.3f}</radius><length>{h:.3f}</length></cylinder>",
+                  h / 2, t.color or ("blue" if t.label == "person" else ""))
 
 
 def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
@@ -47,10 +79,16 @@ def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
     walls = [((-w / 2, -h / 2), (w / 2, -h / 2)), ((w / 2, -h / 2), (w / 2, h / 2)),
              ((w / 2, h / 2), (-w / 2, h / 2)), ((-w / 2, h / 2), (-w / 2, -h / 2)), *scene.walls]
     models = [_box(f"wall{k}", (a[0] + b[0]) / 2, (a[1] + b[1]) / 2, math.atan2(b[1] - a[1], b[0] - a[0]),
-                   (math.dist(a, b) + 0.1, 0.1, WALL_H)) for k, (a, b) in enumerate(walls)]
+                   (math.dist(a, b) + 0.1, 0.1, WALL_H), "wall") for k, (a, b) in enumerate(walls)]
+    lights = "".join(  # ceiling lights every 2.5 m, as in a home
+        f'<light type="point" name="ceiling{i}_{j}"><pose>{x:.2f} {y:.2f} 2.3 0 0 0</pose>'
+        '<diffuse>0.32 0.31 0.29 1</diffuse><specular>0.1 0.1 0.1 1</specular><cast_shadows>false</cast_shadows>'
+        '<attenuation><range>7</range><constant>0.6</constant><linear>0.08</linear><quadratic>0.01</quadratic>'
+        '</attenuation></light>'
+        for i, x in enumerate(_steps(-w / 2, w / 2, 2.5)) for j, y in enumerate(_steps(-h / 2, h / 2, 2.5)))
     for t in world.things.values():
-        if t.person or t.solid:
-            models.append(_cylinder(f"{t.label}{t.id}", t.x, t.y, t.radius, PERSON_H if t.person else THING_H))
+        if (t.person or t.solid or t.label in SHAPES) and t.label != "door" and not t.route and t.appear_at <= 0:
+            models.append(_thing(t))
     sdf = out / "world.sdf"
     sdf.write_text(f"""<?xml version="1.0"?>
 <sdf version="1.6" xmlns:xacro="http://www.ros.org/wiki/xacro">
@@ -62,10 +100,14 @@ def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
     <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
-    <light type="directional" name="sun"><pose>0 0 10 0 0 0</pose><direction>-0.5 0.1 -0.9</direction></light>
+    <scene><ambient>0.32 0.32 0.32 1</ambient><background>0.78 0.82 0.86 1</background><shadows>false</shadows></scene>
+    <light type="directional" name="sun"><pose>0 0 10 0 0 0</pose><diffuse>0.45 0.45 0.43 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular><direction>-0.4 0.2 -0.9</direction><cast_shadows>false</cast_shadows></light>
+    {lights}
     <model name="ground"><static>true</static><link name="l">
       <collision name="c"><geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry></collision>
-      <visual name="v"><geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry></visual>
+      <visual name="v"><geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry>
+        <material><ambient>0.55 0.45 0.33 1</ambient><diffuse>0.62 0.5 0.36 1</diffuse></material></visual>
     </link></model>
     {"".join(models)}
   </world>
@@ -82,14 +124,54 @@ def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
     return sdf, yaml
 
 
-def launch(world: SimRobot, out: Path) -> subprocess.Popen:
+class Launched:
+    """The simulation's processes: Gazebo with Nav2 and Sprocket, and the rear cameras' bridges."""
+
+    def __init__(self, procs: list[subprocess.Popen]) -> None:
+        self.procs = procs
+
+    def stop(self) -> None:
+        for proc in self.procs:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGINT)
+        for proc in self.procs:
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+        subprocess.run(["pkill", "-f", "[g]z sim"], check=False)
+
+
+def launch(world: SimRobot, out: Path, *, gui: bool = False) -> Launched:
+    """Nav2's simulation launch with Sprocket's body (robot/ros/model.py) in the scene; with gui, the Gazebo 3D window
+    opens too (RViz stays closed: on a CPU it costs the model and the detector too much, and the live page shows the
+    map, the lidar and the cameras). The rear cameras get their own bridges: the TurtleBot launch only knows the front one."""
+    from robot.ros.model import REAR_BRIDGES, REAR_INFO, urdf
+
     sdf, yaml = export(world, out)
+    body = out / "sprocket.urdf"
+    body.write_text(urdf())
     s = world.scene.start
     args = [f"world:={sdf}", f"map:={yaml}", f"x_pose:={s.x}", f"y_pose:={s.y}", f"yaw:={math.radians(s.yaw)}",
-            "headless:=True", "use_rviz:=False", "use_keepout_zones:=False", "use_speed_zones:=False"]
-    log = open(out / "launch.log", "w")  # noqa: SIM115 - closed with the process group
-    return subprocess.Popen(["ros2", "launch", "nav2_bringup", "tb4_simulation_launch.py", *args],
-                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            f"robot_sdf:={body}", "robot_name:=sprocket", f"headless:={not gui}", "use_rviz:=False",
+            "use_keepout_zones:=False", "use_speed_zones:=False"]
+    env = {**os.environ, "QT_QPA_PLATFORM": "xcb"}  # Qt windows draw through X11 under WSLg
+    sim_time = ["--ros-args", "-p", "use_sim_time:=true"]
+    for _ in range(3):
+        log = open(out / "launch.log", "w")  # noqa: SIM115 - closed with the process group
+        procs = [subprocess.Popen(["ros2", "launch", "nav2_bringup", "tb4_simulation_launch.py", *args],
+                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)]
+        for command in (["ros2", "run", "ros_gz_image", "image_bridge", *REAR_BRIDGES, *sim_time],
+                        ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *REAR_INFO, *sim_time]):
+            procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True))
+        time.sleep(10.0)
+        # Nav2's launch starts `gz sim` on the world file while xacro is still writing it; on a busy machine Gazebo
+        # can lose that race and exit at once, taking the launch down. Then start again.
+        if "Unable to find or download file /tmp/nav2_" not in (out / "launch.log").read_text(errors="ignore"):
+            break
+        print("Gazebo started before its world file was written; starting again", flush=True)
+        Launched(procs).stop()
+    return Launched(procs)
 
 
 def set_initial_pose(node: object, world: SimRobot) -> None:
@@ -119,14 +201,14 @@ def run_case(case: object, program: str) -> tuple[bool, str, SimRobot | None]:
 
     scene = case.scene()
     out = Path(tempfile.mkdtemp(prefix=f"sprocket-{case.id}-"))
-    proc = launch(SimRobot(scene), out)
+    sim = launch(SimRobot(scene), out)
     robot = None
     try:
         rclpy.init()
         helper = rclpy.create_node("sprocket_stage")
         time.sleep(25.0)  # Gazebo, the robot and Nav2's lifecycle take a while to come up
         set_initial_pose(helper, SimRobot(scene))
-        robot = RosRobot(case.scene())
+        robot = RosRobot(case.scene(), nudge=lambda: set_initial_pose(helper, SimRobot(scene)))
         if not robot.actions["navigate_to_pose"].wait_for_server(timeout_sec=120.0):
             return False, "Nav2 did not come up", robot
         time.sleep(3.0)
@@ -143,12 +225,7 @@ def run_case(case: object, program: str) -> tuple[bool, str, SimRobot | None]:
             robot.shutdown()
         if rclpy.ok():
             rclpy.shutdown()
-        os.killpg(proc.pid, signal.SIGINT)
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-        subprocess.run(["pkill", "-f", "gz sim"], check=False)
+        sim.stop()
 
 
 def main() -> None:
@@ -165,7 +242,10 @@ def main() -> None:
     passed = 0
     for case in chosen:
         started = time.monotonic()
-        ok, why, robot = run_case(case, PROGRAMS[case.id])
+        try:
+            ok, why, robot = run_case(case, PROGRAMS[case.id])
+        except Exception as exc:  # one room that fails to start must not stop the rest
+            ok, why, robot = False, f"{type(exc).__name__}: {exc}"[:40], None
         sim_ok = __import__("robot.eval.suite", fromlist=["run_case"]).run_case(case, PROGRAMS[case.id])[0]
         passed += ok
         t = robot.t if robot else 0.0

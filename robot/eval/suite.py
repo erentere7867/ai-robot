@@ -346,7 +346,7 @@ def run_case(case: Case, program: str) -> tuple[bool, str, SimRobot]:
     return ok, "passed" if ok else "check failed", sim
 
 
-def run_planner(tag: str, only: list[str], think: int = 0, check_readback: bool = False) -> None:
+def run_planner(tag: str, only: list[str], think: int = 0, check_readback: bool = False, noise: float = 0.0) -> None:
     """Phase 5: the model writes every program. Pass means the check holds with at most two repairs."""
     import json
     import statistics
@@ -363,7 +363,9 @@ def run_planner(tag: str, only: list[str], think: int = 0, check_readback: bool 
     for case in CASES:
         if only and case.id not in only:
             continue
-        sim = SimRobot(case.scene())
+        scene = case.scene()
+        scene.noise = noise
+        sim = SimRobot(scene)
         record = agent.do(case.say, sim)
         try:
             checked = bool(case.check(sim))
@@ -402,9 +404,10 @@ def main() -> None:
     parser.add_argument("--only", nargs="*", default=[])
     parser.add_argument("--think", type=int, default=0, help="let the model reason first, in up to this many characters")
     parser.add_argument("--readback", action="store_true", help="check each dry run, in words, against the instruction")
+    parser.add_argument("--noise", type=float, default=0.0, help="detector noise, 0 (perfect) to 1 (poor)")
     args = parser.parse_args()
     if args.planner:
-        run_planner(args.tag, args.only, args.think, args.readback)
+        run_planner(args.tag, args.only, args.think, args.readback, args.noise)
         return
     from robot.eval.programs import PROGRAMS
 
