@@ -6,8 +6,9 @@ depth (Fable): the lidar return in the box's direction gives the range when it a
 box's bottom edge, where the object meets the floor), and the floor estimate alone serves for things under the
 lidar's plane, such as a ball or a cup. The angle the box spans at that range gives its size (pixels are not a fixed
 angle on a wide lens: at the edge of the 155-degree rear lens one pixel is a quarter of what it is in the middle); its
-centre lies one radius behind the visible surface. A box cut by the image's side edge is skipped: its middle is not
-the object's, and another view will show it whole.
+centre lies one radius behind the visible surface. A box cut by the image's side edge is placed from its visible part:
+a wide thing close by (a coffee table 1.5 m away spans 35 degrees) can straddle the seam between two cameras so that
+neither sees it whole, and the tracker joins the two parts by place and size.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import math
 import numpy as np
 
 from robot.perception.rig import Camera
+from robot.ros.model import LIDAR_Z
 
 
 def lidar_range(scan: tuple[np.ndarray, float, float] | None, bearing: float, spread: float = 0.04) -> float | None:
@@ -34,8 +36,6 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
            scan: tuple[np.ndarray, float, float] | None = None) -> tuple[float, float, float] | None:
     """Robot-frame centre (x, y) and radius of the object in pixel box (x1, y1, x2, y2); None when out of reach."""
     x1, y1, x2, y2 = box
-    if x1 <= 2 or x2 >= cam.width - 2:
-        return None
     u = (x1 + x2) / 2
     bearing = cam.bearing(u)
     surface: float | None = None  # horizontal distance from the camera to the object's near face
@@ -50,6 +50,10 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
         floor = cam.floor(u, y2)
         guess = math.hypot(floor[0] - cam.x, floor[1] - cam.y) if floor else None
         lidar = lidar_range(scan, bearing)
+        if floor is not None:  # how tall is it? the lidar's beam passes over anything lower than the lidar
+            forward = (floor[0] - cam.x) * math.cos(cam.yaw) + (floor[1] - cam.y) * math.sin(cam.yaw)
+            if cam.point(u, y1, forward)[2] < LIDAR_Z:
+                lidar = None  # (a 25 cm ball under the 27 cm beam took the wall's range behind it, 1 m too far)
         if lidar is not None:  # from the robot's centre; to the camera, roughly the camera's offset less
             lidar -= math.hypot(cam.x, cam.y) * math.cos(bearing - cam.yaw)
         if lidar is not None and guess is not None and abs(lidar - guess) <= 0.35 * guess + 0.2:

@@ -2,7 +2,10 @@
 
     python -m robot.ros.run3d --perception             # how well the robot sees the room: tracked vs real objects
     python -m robot.ros.run3d --cases O1 O3 S1         # hand-written suite programs on real perception, judged
+    python -m robot.ros.run3d --cases O1 O3 --plan --brain http://127.0.0.1:8081  # the planner's programs, judged
     python -m robot.ros.run3d --interactive --gui --brain http://127.0.0.1:8081   # Gazebo and the page
+
+All of them serve the live page on --port (8765): the map with the lidar, the cameras and the program as it runs.
 
 Run inside WSL with ROS sourced and the YOLOE environment active, from ~/sprocket-models (where the weights are).
 Imports stay inside functions: the runner's sandbox process re-imports this module and must stay small.
@@ -38,15 +41,20 @@ def start(scene_factory, gui: bool, brain_url: str | None):  # noqa: ANN001, ANN
 
     truth = scene_factory()
     sim = launch(SimRobot(truth), Path(tempfile.mkdtemp(prefix="sprocket-3d-")), gui=gui)
-    rclpy.init()
-    helper = rclpy.create_node("sprocket_run3d")
-    print("starting Gazebo and Nav2...", flush=True)
-    time.sleep(30.0 if gui else 25.0)
-    set_initial_pose(helper, SimRobot(truth))
-    print("loading YOLOE-26...", flush=True)
-    detector = Detector(threads=3)  # the rest of the laptop's CPU runs Gazebo, Nav2 and the model
-    robot = RealRobot(scene_factory(), detector=detector, brain=Brain(brain_url) if brain_url else None,
-                      nudge=lambda: set_initial_pose(helper, SimRobot(truth)))
+    try:
+        if not rclpy.ok():
+            rclpy.init()
+        helper = rclpy.create_node("sprocket_run3d")
+        print("starting Gazebo and Nav2...", flush=True)
+        time.sleep(30.0 if gui else 25.0)
+        set_initial_pose(helper, SimRobot(truth))
+        print("loading YOLOE-26...", flush=True)
+        detector = Detector(threads=3)  # the rest of the laptop's CPU runs Gazebo, Nav2 and the model
+        robot = RealRobot(scene_factory(), detector=detector, brain=Brain(brain_url) if brain_url else None,
+                          nudge=lambda: set_initial_pose(helper, SimRobot(truth)))
+    except BaseException:  # a simulation that failed to come up must not keep running under the next one
+        stop(None, sim)
+        raise
     return robot, truth, sim
 
 
@@ -77,14 +85,14 @@ def report(robot, truth) -> None:  # noqa: ANN001
     extra = [k for k in tracks if k.id not in used]
     print(f"\nfound {len(errors)} of {sum(t.label != 'door' for t in truth.things)} real objects; median position error "
           f"{sorted(errors)[len(errors) // 2] if errors else float('nan'):.2f} m; tracks matching nothing real: "
-          + (", ".join(f"{k.label} {k.id}" for k in extra) or "none"))
+          + (", ".join(f"{k.label} {k.id} at ({k.x:.1f}, {k.y:.1f}) r {k.radius:.2f}" for k in extra) or "none"))
     dropped = [t for t in robot.perception.tracker.tracks.values() if t.rejected]
     if dropped:
         print("the vision model saw nothing in: " + ", ".join(
             f"{t.votes.most_common(1)[0][0]} {t.id} at ({t.x:.1f}, {t.y:.1f})" for t in dropped))
     timings = robot.perception.timings
     if timings:
-        print(f"detector: median {1000 * sorted(timings)[len(timings) // 2]:.0f} ms per frame on this CPU")
+        print(f"detector: median {1000 * sorted(timings)[len(timings) // 2]:.0f} ms per frame")
 
 
 def annotated(robot, name: str, width: int = 0):  # noqa: ANN001, ANN201
@@ -135,87 +143,132 @@ def scan_points(robot, every: int = 3) -> list[tuple[float, float]]:  # noqa: AN
     return points
 
 
-def interactive(robot, room: str, brain_url: str, port: int) -> None:  # noqa: ANN001
-    """The live page on the 3D run: type an instruction, then watch the Gazebo window, the map with the lidar, the
-    three cameras with what the robot tracks, and the program as it runs."""
+def page(holder, port: int):  # noqa: ANN001, ANN201
+    """The live page for whatever robot `holder.sim` is now: the map with the lidar, the three cameras with what the
+    robot tracks, the program as it runs, and a box for instructions (they arrive in the returned Live's inbox)."""
     import threading
 
-    from robot.agent.agent import Agent
-    from robot.agent.planner import LocalPlanner
-    from robot.interfaces.demo import Holder, drive
     from robot.interfaces.live import Live
-    from robot.mind.brain import Brain
     from robot.perception.camera import encode_png
     from robot.ros.perceive import TOPICS
 
     def camera(name: str) -> bytes | None:
-        image = annotated(robot, name, 480)
+        image = annotated(holder.sim, name, 480) if holder.sim is not None else None
         return encode_png(image) if image is not None else None
 
     live = Live()
     live.serve(port)
     live.camera = camera
-    live.update(scene=room, scenes=[room], cameras=list(TOPICS))
+    live.update(cameras=list(TOPICS))
 
     def refresh() -> None:
         while True:
+            robot = holder.sim
             try:
-                robot._perceive_objects()
-                live.show_world(robot)
-                live.update(scan=scan_points(robot))
-            except RuntimeError:  # a collection changed while being copied; take the next frame
+                if robot is not None and robot.perception is not None:
+                    robot._perceive_objects()
+                    live.show_world(robot)
+                    live.update(scan=scan_points(robot))
+            except (RuntimeError, AttributeError):  # changing while copied, or between cases; take the next frame
                 pass
             time.sleep(0.3)
 
     threading.Thread(target=refresh, daemon=True).start()
+    print(f"watch it at http://localhost:{port}", flush=True)
+    return live
+
+
+def planner_for(brain_url: str):  # noqa: ANN201
+    """The on-board planner on the model at `brain_url`, its rules and examples already read."""
+    from robot.agent.planner import LocalPlanner
+    from robot.mind.brain import Brain
+
     brain = Brain(brain_url)
     planner = LocalPlanner(brain)
     if not brain.healthy():
         print(f"no model answering at {brain_url}: start llama-server there first", flush=True)
-    else:
-        print("the planner is reading its rules and examples...", flush=True)
-        started = time.monotonic()
-        planner.warm()
-        print(f"...done in {time.monotonic() - started:.0f} s", flush=True)
-    print(f"Open http://localhost:{port} and type an instruction. Ctrl+C to quit.", flush=True)
-    drive(live, Agent(planner, live=live), Holder(robot))
+        return planner
+    started = time.monotonic()
+    planner.warm()
+    print(f"the planner read its rules and examples in {time.monotonic() - started:.0f} s", flush=True)
+    return planner
 
 
-def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float) -> None:
-    """Hand-written suite programs on the full stack: each case's room in Gazebo, the robot seeing it through its
-    cameras for `look` seconds first, the gate's dry run in the room as perceived, and the suite's check judged
-    against the room as it really is."""
+def interactive(robot, room: str, brain_url: str, port: int) -> None:  # noqa: ANN001
+    """Type an instruction on the live page, then watch the Gazebo window and the page as the robot does it."""
+    from robot.agent.agent import Agent
+    from robot.interfaces.demo import Holder, drive
+
+    holder = Holder(robot)
+    live = page(holder, port)
+    live.update(scene=room, scenes=[room])
+    planner = planner_for(brain_url)
+    print("type an instruction on the page. Ctrl+C to quit.", flush=True)
+    drive(live, Agent(planner, live=live), holder)
+
+
+def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, port: int, plan: bool) -> None:
+    """Suite cases on the full stack: each case's room in Gazebo, the robot seeing it through its cameras for `look`
+    seconds first, then the hand-written program (or, with `plan`, the planner's own from the case's words) through
+    the gate's dry run in the room as perceived, and the suite's check judged against the room as it really is."""
+    from robot.agent.agent import Agent
     from robot.agent.gate import check
     from robot.agent.runner import Runner
     from robot.eval.programs import PROGRAMS
     from robot.eval.suite import CASES
+    from robot.interfaces.demo import Holder
     from robot.ros.fuel import furnish
     from robot.ros.real import judge
 
+    holder = Holder(None)
+    live = page(holder, port)
+    agent = Agent(planner_for(brain_url or "http://127.0.0.1:8081"), live=live) if plan else None
     passed = 0
-    cases = [c for c in CASES if c.id in ids and c.id in PROGRAMS]
+    cases = [c for c in CASES if c.id in ids and (plan or c.id in PROGRAMS)]
     for case in cases:
         robot = sim = None
+        started = time.monotonic()
+        print(f"\n== {case.id}: {case.say}", flush=True)
         try:
             robot, truth, sim = start(lambda c=case: furnish(c.scene()), gui, brain_url)
+            holder.sim = robot
+            live.update(scene=case.id, scenes=[case.id], status="idle", instruction=case.say, program="", plan="",
+                        readback="", problems=[], line=0)
             time.sleep(look)
             robot._perceive_objects()
-            robot.begin()
-            gate = check(PROGRAMS[case.id], robot)
-            if not gate.ok:
-                outcome = f"gate: {gate}"
+            begun = time.monotonic()
+            if agent is not None:
+                record = agent.do(case.say, robot)
+                ok = record.outcome == "done" and bool(case.check(judge(robot, truth)))
+                outcome = ("passed" if ok else "ran, check failed" if record.outcome == "done" else
+                           f"{record.outcome}: {record.problems[-1][:60] if record.problems else ''}")
+                if not ok:
+                    print("  the planner's last program:\n" + "\n".join(
+                        "    " + line for line in (record.programs[-1] if record.programs else "").splitlines()))
             else:
-                result = Runner(robot).run(PROGRAMS[case.id])
-                ok = result.status != "error" and bool(case.check(judge(robot, truth)))
-                passed += ok
-                outcome = "passed" if ok else (f"run: {result.error} (line {result.line})"
-                                               if result.status == "error" else "check failed")
+                robot.begin()
+                gate = check(PROGRAMS[case.id], robot)
+                result = Runner(robot).run(PROGRAMS[case.id]) if gate.ok else None
+                ok = result is not None and result.status != "error" and bool(case.check(judge(robot, truth)))
+                outcome = ("passed" if ok else f"gate: {gate}" if result is None else
+                           f"run: {result.error} (line {result.line})" if result.status == "error" else "check failed")
+            if not ok:
+                print("  the robot knew: " + ", ".join(sorted(f"{t.color} {t.label} {t.id} at ({t.x:.1f}, {t.y:.1f})"
+                                                             for t in robot.things.values())))
+                print("  really there:   " + ", ".join(sorted(f"{t.color} {t.label} at ({t.x:.1f}, {t.y:.1f})"
+                                                             for t in truth.things)))
+            passed += ok
         except Exception as exc:  # noqa: BLE001 - one case's failure must not stop the others
-            outcome = f"crashed: {exc}"
+            import traceback
+
+            outcome, begun = f"crashed: {type(exc).__name__}: {exc}", time.monotonic()
+            traceback.print_exc()
         finally:
+            holder.sim = None
             stop(robot, sim)
-        print(f"{case.id:<4} {outcome:<44} {case.say}", flush=True)
-    print(f"\n{passed} of {len(cases)} passed on the full stack")
+        print(f"{case.id:<4} {outcome:<50} {time.monotonic() - begun:5.0f} s task, {time.monotonic() - started:4.0f} s "
+              f"in all | {case.say}", flush=True)
+    print(f"\n{passed} of {len(cases)} passed on the full stack ({'planner' if plan else 'hand-written programs'})")
 
 
 def stop(robot, sim) -> None:  # noqa: ANN001
@@ -238,12 +291,13 @@ def main() -> None:
     parser.add_argument("--watch", type=float, default=20.0, help="seconds of looking before reporting or a case")
     parser.add_argument("--interactive", action="store_true", help="the instruction page on --port")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--cases", nargs="+", help="suite cases whose hand-written programs to run")
+    parser.add_argument("--cases", nargs="+", help="suite cases to run on the full stack")
+    parser.add_argument("--plan", action="store_true", help="with --cases: the planner writes each program")
     parser.add_argument("--brain", default="", help="llama-server URL, e.g. http://127.0.0.1:8081: names new objects, "
-                                                    "answers vision questions, and plans with --interactive")
+                                                    "answers vision questions, and plans")
     args = parser.parse_args()
     if args.cases:
-        run_cases(args.cases, args.gui, args.brain or None, args.watch)
+        run_cases(args.cases, args.gui, args.brain or None, args.watch, args.port, args.plan)
         return
     robot, truth, sim = start(lambda: truth_scene(args.room), args.gui, args.brain or None)
     try:

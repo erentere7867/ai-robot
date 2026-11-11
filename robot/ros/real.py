@@ -21,8 +21,10 @@ from robot.ros.perceive import Perception
 from robot.ros.robot import RosRobot
 from robot.sim.world import COLORS, Scene, SimRobot, Thing
 
+# Other names for what perception calls a thing. "desk" answers to "table" only when no table is known (a word match
+# scores below a whole name): from low down a coffee table is often seen as a desk.
 NAMES = {"sofa": ("couch", "seat", "something to sit on"), "chair": ("seat", "something to sit on"),
-         "cup": ("mug",), "backpack": ("bag",), "ball": ("toy",), "bin": ("trash can",)}
+         "cup": ("mug",), "backpack": ("bag",), "ball": ("toy",), "bin": ("trash can",), "desk": ("work table",)}
 SMALL = {"cup", "bottle", "ball", "shoe", "phone", "keys", "remote", "book", "toy"}  # under the lidar, not obstacles
 SEEN_NOW = 1.5  # seconds: a track seen this recently is "in view now"
 

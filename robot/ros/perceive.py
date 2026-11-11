@@ -21,7 +21,7 @@ from robot.perception import colour
 from robot.perception.camera import data_url
 from robot.perception.locate import lidar_range, locate
 from robot.perception.rig import RIG, to_map, to_robot
-from robot.perception.tracker import Detection, Track, Tracker, canonical
+from robot.perception.tracker import Detection, Track, Tracker, canonical, pixels
 
 TOPICS = {"front_camera": "/rgbd_camera/image", "rear_left_camera": "/rear_left_camera/image",
           "rear_right_camera": "/rear_right_camera/image"}
@@ -94,8 +94,7 @@ class Perception:
     def _verify_loop(self) -> None:
         while not self._stop:
             with self.lock:
-                track = next((t for t in sorted(self.tracker.objects(), key=lambda t: t.first_seen)
-                              if not t.verified and t.id in self.crops), None)
+                track = self.tracker.to_name(self.crops)
                 crop = self.crops.get(track.id) if track is not None else None
             if track is None:
                 time.sleep(0.2)
@@ -107,7 +106,7 @@ class Perception:
                 print(f"perception: naming {track.label} {track.id}: {exc}", flush=True)
                 label = track.label
             with self.lock:
-                self.tracker.verify(track, label)
+                self.tracker.verify(track, label, pixels(crop))
 
     def process(self, name: str) -> None:
         stamp, rgb = self.frames[name]
@@ -129,7 +128,8 @@ class Perception:
             mx, my = to_map(pose, bx, by)
             x1, y1, x2, y2 = (int(v) for v in s.box)
             core = rgb[y1 + (y2 - y1) // 4:y2 - (y2 - y1) // 4, x1 + (x2 - x1) // 4:x2 - (x2 - x1) // 4]
-            detection = Detection(s.label, mx, my, radius, colour.name(core), s.score, name)
+            cut = x1 <= 2 or x2 >= rgb.shape[1] - 2
+            detection = Detection(s.label, mx, my, radius, colour.name(core), s.score, name, cut)
             detections.append(detection)
             boxes[id(detection)] = (x1, y1, x2, y2)
         now = time.monotonic()
@@ -138,6 +138,8 @@ class Perception:
             matched = {id(t) for _, t in pairs}
             self.boxes[name] = [(boxes[id(det)], track.id) for det, track in pairs]
             for det, track in pairs:  # pairs come sorted by score: find each detection's own box
+                if det.cut and track.id in self.crops:
+                    continue  # a part of the thing makes a poor picture of it; keep the whole one
                 x1, y1, x2, y2 = boxes[id(det)]
                 pad = max(8, (x2 - x1) // 6)
                 self.crops[track.id] = rgb[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad].copy()

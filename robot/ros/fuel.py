@@ -38,21 +38,33 @@ MODELS: dict[str, tuple[str, float, float, str]] = {
 LIFT = {"box": 0.150, "ball": 0.127}  # models whose origin is their centre: raised so they stand on the floor
 
 
-def include(label: str, name: str, x: float, y: float, yaw: float = 0.0) -> str | None:
-    """An SDF <include> of the label's Fuel model at (x, y), or None when there is no model for it."""
-    if label not in MODELS:
+def fits(thing: object, things: list = ()) -> bool:
+    """Can this thing be shown by its label's 3D model (whose colour is fixed)? Yes, unless colour is what tells it
+    from another thing of its kind in the room (`things`): then only a model of its own colour will do, and otherwise
+    it stays a plain shape of its colour, so "the nearest box that is not blue" still has a yellow box to find."""
+    if thing.label not in MODELS:
+        return False
+    color = MODELS[thing.label][3]
+    told_apart = any(o is not thing and o.label == thing.label and o.color != thing.color for o in things)
+    return not told_apart or not color or thing.color == color
+
+
+def include(thing: object, name: str, things: list = (), yaw: float = 0.0) -> str | None:
+    """An SDF <include> of the thing's Fuel model at its place, or None when no model fits it."""
+    if not fits(thing, things):
         return None
-    owner, model = MODELS[label][0].split("/")
+    owner, model = MODELS[thing.label][0].split("/")
     uri = URI.format(owner, model.replace(" ", "%20"))
     return (f"<include><uri>{uri}</uri><name>{name}</name><static>true</static>"
-            f"<pose>{x:.3f} {y:.3f} {LIFT.get(label, 0.0):.3f} 0 0 {yaw:.3f}</pose></include>")
+            f"<pose>{thing.x:.3f} {thing.y:.3f} {LIFT.get(thing.label, 0.0):.3f} 0 0 {yaw:.3f}</pose></include>")
 
 
 def furnish(scene: object) -> object:
-    """Give each thing that has a 3D model that model's measured size and colour, so the room the checks judge is
+    """Give each thing that a 3D model fits that model's measured size and colour, so the room the checks judge is
     the room Gazebo shows. Returns the scene (changed in place)."""
-    for t in scene.things:
-        if t.label in MODELS:
+    keep = [fits(t, scene.things) for t in scene.things]  # decided before any colour changes
+    for t, fit in zip(scene.things, keep, strict=True):
+        if fit:
             _, radius, _, color = MODELS[t.label]
             t.radius = radius
             if color:

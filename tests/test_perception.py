@@ -118,3 +118,54 @@ def test_depth_reads_the_near_face_of_an_open_thing():
     depth[200:300, 280:290] = depth[200:300, 390:400] = 2.0  # its legs
     x, y, r = locate(cam, (280, 200, 400, 300), depth=depth)
     assert abs(math.hypot(x - cam.x, y - cam.y) - (2.0 + r)) < 0.15
+
+
+def test_a_part_seen_past_the_picture_edge_joins_its_thing_and_neighbours_stay_apart():
+    tr = Tracker()
+    for t in (0.0, 0.5):
+        tr.update([Detection("table", 2.0, -1.0, 0.5, score=0.6)], t)
+        tr.update([Detection("desk", 2.2, -1.2, 0.07, score=0.3, cut=True)], t)  # the part past a picture edge
+        tr.update([Detection("chair", 0.0, 2.0, 0.39, score=0.8)], t)
+        tr.update([Detection("backpack", 0.0, 2.45, 0.22, score=0.7)], t)  # leaning on the chair's side
+    assert sorted(t.label for t in tr.objects()) == ["backpack", "chair", "table"]
+
+
+def test_a_thing_is_named_again_when_seen_twice_as_large():
+    tr = Tracker()
+    for t in (0.0, 0.5):
+        tr.update([Detection("book", 4.0, 1.0, 0.2, score=0.4)], t)
+    far, near = np.zeros((20, 20, 3)), np.zeros((40, 40, 3))
+    track = tr.to_name({1: far})
+    tr.verify(track, "book", 400)
+    assert tr.to_name({1: far}) is None  # named from this view already
+    assert tr.to_name({1: near}) is track
+    tr.verify(track, "backpack", 1600)
+    assert tr.objects()[0].label == "backpack"
+
+
+def test_a_thing_first_seen_cut_takes_its_size_from_the_first_whole_view():
+    tr = Tracker()
+    tr.update([Detection("desk", 1.3, -1.1, 0.07, score=0.3, cut=True)], 0.0)  # only its edge, past the picture
+    tr.update([Detection("table", 1.6, -1.0, 0.5, score=0.6)], 0.5)  # then the whole table from another camera
+    tr.update([Detection("table", 1.6, -1.0, 0.5, score=0.6)], 1.0)
+    (table,) = tr.objects()
+    assert table.label == "table" and abs(table.radius - 0.5) < 0.05
+
+
+def test_a_cut_view_joins_the_thing_whose_middle_it_misses():
+    tr = Tracker()
+    for t in (0.0, 0.5):
+        tr.update([Detection("table", 1.6, -1.0, 0.25, score=0.6)], t)
+        tr.update([Detection("desk", 1.3, -1.1, 0.07, score=0.3, cut=True)], t)  # 0.32 m off, past the edge
+    assert [t.label for t in tr.objects()] == ["table"]
+
+
+def test_a_thing_under_the_lidar_beam_ignores_the_wall_the_beam_hits_behind_it():
+    cam = RIG["rear_left_camera"]
+    d, half, height = 2.0, 0.12, 0.24  # a ball's near face 2 m away on the lens axis; the wall 2.8 m behind
+    u1, u2 = cam.width / 2 - half / d * cam.focal, cam.width / 2 + half / d * cam.focal
+    v2 = cam.height / 2 + cam.z / d * cam.focal
+    v1 = cam.height / 2 + (cam.z - height) / d * cam.focal
+    ranges = np.full(360, 2.8 + math.hypot(cam.x, cam.y), dtype=np.float32)
+    x, y, r = locate(cam, (u1, v1, u2, v2), scan=(ranges, -math.pi, 2 * math.pi / 360))
+    assert abs(math.hypot(x - cam.x, y - cam.y) - (d + r)) < 0.1

@@ -5,8 +5,9 @@ track inside a gate that has its label, or another label and a similar size: the
 differently from different sides (a low coffee table is sometimes a "tv"), so a track's label is a vote of its
 sightings weighted by score. People are kept apart from things. The track's position and size follow its sightings
 smoothly; a detection near no track starts one, which counts as an object once it has been seen twice (a person seen
-clearly counts at once). The vision model then looks at each new object's crop once and names it (`verify`): the
-fast detector proposes, the slower model decides, and an object it sees nothing in is dropped. A track whose place a camera views clearly without
+clearly counts at once). The vision model then looks at each new object's crop and names it (`verify`): the fast
+detector proposes, the slower model decides, and an object it sees nothing in is dropped. It looks again when the
+object is seen at least twice as large (`to_name`), so names from close views win. A track whose place a camera views clearly without
 seeing it collects misses, and after three it is marked absent: negative evidence (Fable), so the robot stops
 believing in things that have gone. People are tracked the same way and are free to move.
 """
@@ -38,6 +39,7 @@ class Detection:
     color: str = ""
     score: float = 1.0
     camera: str = ""
+    cut: bool = False  # cut by the picture's edge: its place is roughly right, its size says nothing
 
 
 @dataclass
@@ -57,6 +59,8 @@ class Track:
     score: float = 0.0  # best detector score so far
     verified: bool = False  # the vision model has named it
     rejected: bool = False  # the vision model saw no object there
+    named_from: int = 0  # pixels in the crop the vision model last named it from
+    sized: bool = True  # False while it has only been seen cut by a picture's edge
 
     @property
     def color(self) -> str:
@@ -86,21 +90,29 @@ class Tracker:
             best, best_gap = None, math.inf
             for t in self.tracks.values():
                 same = t.label == label
-                if t in touched or (not same and (t.person or label == "person" or not _alike(t.radius, d.radius))):
+                alike = d.cut or not t.sized or _alike(t.radius, d.radius)
+                if t in touched or (not same and (t.person or label == "person" or not alike)):
                     continue
                 gap = math.dist((t.x, t.y), (d.x, d.y))
-                limit = max(self.gate, 1.5 * t.radius) * (2.5 if t.person else 1.0)  # people move between frames
+                if same:
+                    limit = max(self.gate, 1.5 * t.radius) * (2.5 if t.person else 1.0)  # people move between frames
+                elif d.cut:  # the visible strip's middle can be a whole radius from the thing's own
+                    limit = max(self.gate, t.radius + d.radius)
+                else:  # another name for the same footprint: a backpack beside a chair stays a backpack
+                    limit = max(t.radius, d.radius)
                 if gap < limit and gap + (0.0 if same else 0.25) < best_gap:
                     best, best_gap = t, gap + (0.0 if same else 0.25)
             if best is None:
-                best = Track(self._next, label, d.x, d.y, d.radius, now, now)
+                best = Track(self._next, label, d.x, d.y, d.radius, now, now, sized=not d.cut)
                 self.tracks[best.id] = best
                 self._next += 1
             else:
                 a = 0.7 if best.person else self.smoothing
                 best.x += a * (d.x - best.x)
                 best.y += a * (d.y - best.y)
-                best.radius += self.smoothing * (d.radius - best.radius)
+                if not d.cut:  # a cut view says nothing of size; the first whole one sets it
+                    best.radius += (self.smoothing if best.sized else 1.0) * (d.radius - best.radius)
+                    best.sized = True
                 best.hits += 1
                 best.last_seen = now
             best.misses, best.present = 0, True
@@ -120,19 +132,32 @@ class Tracker:
         if track.misses >= 3:
             track.present = False
 
-    def verify(self, track: Track, label: str | None) -> None:
-        """The vision model's name for the track's crop; None means it saw no object. People stay people: the
-        detector is reliable on them, and they are tracked by other rules."""
-        track.verified = True
+    def verify(self, track: Track, label: str | None, pixels: int = 0) -> None:
+        """The vision model's name for the track's crop of `pixels` pixels; None means it saw no object. People stay
+        people: the detector is reliable on them, and they are tracked by other rules."""
+        track.verified, track.named_from = True, pixels
         if label is None:
             track.rejected = True
         elif not track.person and canonical(label) != "person":
             track.label = canonical(label)
 
+    def to_name(self, crops: dict[int, object]) -> Track | None:
+        """The next object for the vision model to name: one never named, oldest first, else one now seen at least
+        twice as large as when it was last named (a far backpack can look like a book; close up it does not)."""
+        tracks = sorted((t for t in self.objects() if t.id in crops), key=lambda t: t.first_seen)
+        fresh = next((t for t in tracks if not t.verified), None)
+        return fresh or next((t for t in tracks if not t.person and pixels(crops[t.id]) >= 2 * t.named_from), None)
+
     def objects(self) -> list[Track]:
         return [t for t in self.tracks.values() if t.confirmed and not t.rejected]
 
 
+def pixels(image: object) -> int:
+    """Pixels in an image array (height x width)."""
+    return int(image.shape[0] * image.shape[1])
+
+
 def _alike(a: float, b: float) -> bool:
-    """Sizes close enough to be one thing named two ways (a cup on a table is not the table)."""
-    return max(a, b) <= 2.0 * max(min(a, b), 0.05)
+    """Sizes close enough to be one thing named two ways (a cup on a table is not the table; the part of a table that
+    one camera sees past the edge of its picture is)."""
+    return max(a, b) <= 3.0 * max(min(a, b), 0.05)

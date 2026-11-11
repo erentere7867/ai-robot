@@ -28,14 +28,13 @@ class Detector:
     def __init__(self, weights: str = "yoloe-26s-seg.pt", vocabulary: tuple[str, ...] = VOCABULARY,
                  confidence: float = 0.15, threads: int = 0) -> None:  # low: the tracker's two sightings filter noise
         """`threads` caps the CPU threads (0: all), so on a CPU the detector leaves room for the model and the
-        simulator; on the robot it runs on the NPU."""
+        simulator. With CUDA it runs on the GPU, in full precision: on the laptop's GTX 1650 (no tensor cores) half
+        precision was three times slower (213 against 64 ms for a 1280-pixel frame). On the robot it runs on the NPU."""
+        import torch
         from ultralytics import YOLOE
 
         if threads:
-            import torch
-
             torch.set_num_threads(threads)
-
         self.model = YOLOE(weights)
         self.vocabulary = list(dict.fromkeys(vocabulary))
         self.confidence = confidence

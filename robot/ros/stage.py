@@ -54,12 +54,12 @@ def _box(name: str, x: float, y: float, yaw: float, size: tuple[float, float, fl
                   color)
 
 
-def _thing(t: object, real: bool = True) -> str:
-    """A real 3D model from Fuel when there is one (a detector can recognise it), else a coloured shape."""
+def _thing(t: object, things: list = ()) -> str:
+    """A real 3D model from Fuel when one fits (a detector can recognise it), else a coloured shape."""
     from robot.ros.fuel import include
 
     name = f"{t.label}{t.id}"
-    model = include(t.label, name, t.x, t.y) if real else None
+    model = include(t, name, things)
     if model:
         return model
     shape, h = SHAPES.get(t.label, ("cylinder", 0.5))
@@ -86,9 +86,10 @@ def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
         '<attenuation><range>7</range><constant>0.6</constant><linear>0.08</linear><quadratic>0.01</quadratic>'
         '</attenuation></light>'
         for i, x in enumerate(_steps(-w / 2, w / 2, 2.5)) for j, y in enumerate(_steps(-h / 2, h / 2, 2.5)))
-    for t in world.things.values():
+    things = list(world.things.values())
+    for t in things:
         if (t.person or t.solid or t.label in SHAPES) and t.label != "door" and not t.route and t.appear_at <= 0:
-            models.append(_thing(t))
+            models.append(_thing(t, things))
     sdf = out / "world.sdf"
     sdf.write_text(f"""<?xml version="1.0"?>
 <sdf version="1.6" xmlns:xacro="http://www.ros.org/wiki/xacro">
@@ -124,6 +125,24 @@ def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
     return sdf, yaml
 
 
+# What a simulation runs, by process name. A copy left over from an earlier run fights the new one: a second Gazebo
+# publishes its own clock and TF, and a second Nav2 container answers to the same node names (one case's Nav2 took
+# 170 s to load and never activated while the last run's container was still shutting down).
+LEFTOVERS = ("gz-sim-main", "gz-sim-gui", "gz sim", "component_container", "robot_state_publisher", "parameter_bridge",
+             "image_bridge", "ros2 launch", "rviz2")
+
+
+def clear() -> None:
+    """Kill whatever an earlier simulation left running, and wait until it is gone."""
+    patterns = [f"[{name[0]}]{name[1:]}" for name in LEFTOVERS]
+    for pattern in patterns:
+        subprocess.run(["pkill", "-9", "-f", pattern], check=False)
+    for _ in range(20):
+        if all(subprocess.run(["pgrep", "-f", p], capture_output=True).returncode for p in patterns):
+            return
+        time.sleep(0.5)
+
+
 class Launched:
     """The simulation's processes: Gazebo with Nav2 and Sprocket, and the rear cameras' bridges."""
 
@@ -136,10 +155,10 @@ class Launched:
                 os.killpg(proc.pid, signal.SIGINT)
         for proc in self.procs:
             try:
-                proc.wait(timeout=30)
+                proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
-        subprocess.run(["pkill", "-f", "[g]z sim"], check=False)
+        clear()  # Gazebo's GUI and server, and Nav2's container, do not always leave with their launch
 
 
 def launch(world: SimRobot, out: Path, *, gui: bool = False) -> Launched:
@@ -148,6 +167,7 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False) -> Launched:
     map, the lidar and the cameras). The rear cameras get their own bridges: the TurtleBot launch only knows the front one."""
     from robot.ros.model import REAR_BRIDGES, REAR_INFO, urdf
 
+    clear()
     sdf, yaml = export(world, out)
     body = out / "sprocket.urdf"
     body.write_text(urdf())
@@ -156,22 +176,39 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False) -> Launched:
             f"robot_sdf:={body}", "robot_name:=sprocket", f"headless:={not gui}", "use_rviz:=False",
             "use_keepout_zones:=False", "use_speed_zones:=False"]
     env = {**os.environ, "QT_QPA_PLATFORM": "xcb"}  # Qt windows draw through X11 under WSLg
+    if os.path.exists("/dev/dxg"):  # WSL: Mesa falls back to drawing on the CPU (llvmpipe) unless told to use the
+        env.update(GALLIUM_DRIVER="d3d12", MESA_D3D12_DEFAULT_ADAPTER_NAME="NVIDIA")  # GPU through Direct3D 12
+    env["PATH"] = f"{_wait_for_world(out)}:{env['PATH']}"
+    log = open(out / "launch.log", "w")  # noqa: SIM115 - closed with the process group
+    procs = [subprocess.Popen(["ros2", "launch", "nav2_bringup", "tb4_simulation_launch.py", *args],
+                              stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)]
     sim_time = ["--ros-args", "-p", "use_sim_time:=true"]
-    for _ in range(3):
-        log = open(out / "launch.log", "w")  # noqa: SIM115 - closed with the process group
-        procs = [subprocess.Popen(["ros2", "launch", "nav2_bringup", "tb4_simulation_launch.py", *args],
-                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)]
-        for command in (["ros2", "run", "ros_gz_image", "image_bridge", *REAR_BRIDGES, *sim_time],
-                        ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *REAR_INFO, *sim_time]):
-            procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True))
-        time.sleep(10.0)
-        # Nav2's launch starts `gz sim` on the world file while xacro is still writing it; on a busy machine Gazebo
-        # can lose that race and exit at once, taking the launch down. Then start again.
-        if "Unable to find or download file /tmp/nav2_" not in (out / "launch.log").read_text(errors="ignore"):
-            break
-        print("Gazebo started before its world file was written; starting again", flush=True)
-        Launched(procs).stop()
+    for command in (["ros2", "run", "ros_gz_image", "image_bridge", *REAR_BRIDGES, *sim_time],
+                    ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *REAR_INFO, *sim_time]):
+        procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True))
     return Launched(procs)
+
+
+def _wait_for_world(out: Path) -> Path:
+    """A folder holding a `gz` that waits for its world file before starting the real one. Nav2's simulation launch
+    starts `gz sim` on the world at the same moment as the xacro that writes it; Gazebo started first and exited at
+    once in three launches out of three on one evening, taking Nav2 down with it."""
+    import shutil
+
+    real = shutil.which("gz")
+    folder = out / "bin"
+    folder.mkdir(exist_ok=True)
+    shim = folder / "gz"
+    shim.write_text(f"""#!/usr/bin/env bash
+world="${{@: -1}}"
+case "$world" in /tmp/nav2_*.sdf)
+  for i in $(seq 1 300); do [ -s "$world" ] && break; sleep 0.1; done
+  sleep 0.5;;
+esac
+exec {real} "$@"
+""")
+    shim.chmod(0o755)
+    return folder
 
 
 def set_initial_pose(node: object, world: SimRobot) -> None:
