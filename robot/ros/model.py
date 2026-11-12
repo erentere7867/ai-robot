@@ -105,13 +105,13 @@ def urdf() -> str:
         _fixed("base_link", "lidar_link", f"0 0 {LIDAR_Z}"),
         '<gazebo reference="lidar_link"><sensor name="lidar" type="gpu_lidar"><update_rate>10</update_rate>'
         "<visualize>true</visualize><always_on>true</always_on><frame_id>lidar_link</frame_id><topic>scan</topic>"
-        "<lidar><scan><horizontal><samples>360</samples><resolution>1</resolution><min_angle>-3.14159</min_angle>"
+        "<lidar><scan><horizontal><samples>500</samples><resolution>1</resolution><min_angle>-3.14159</min_angle>"
         "<max_angle>3.14159</max_angle></horizontal></scan><range><min>0.12</min><max>12.0</max>"
         "<resolution>0.01</resolution></range></lidar></sensor></gazebo>",
         f'<link name="imu_link">{_inertial(0.01, 1e-6, 1e-6, 1e-6)}</link>',
         _fixed("base_link", "imu_link", "0 0 0.1"),
         '<gazebo reference="imu_link"><sensor type="imu" name="imu"><always_on>true</always_on>'
-        "<update_rate>100</update_rate><topic>imu</topic></sensor></gazebo>",
+        "<update_rate>100</update_rate><frame_id>imu_link</frame_id><topic>imu</topic></sensor></gazebo>",
         *(_camera(name, *spec) for name, spec in CAMERAS.items()),
         f"""<gazebo>
   <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
@@ -121,7 +121,7 @@ def urdf() -> str:
     <max_angular_acceleration>3</max_angular_acceleration><min_angular_acceleration>-3</min_angular_acceleration>
     <max_linear_velocity>0.6</max_linear_velocity><min_linear_velocity>-0.6</min_linear_velocity>
     <max_angular_velocity>2.0</max_angular_velocity><min_angular_velocity>-2.0</min_angular_velocity>
-    <topic>/cmd_vel</topic><odom_topic>/odom</odom_topic><tf_topic>tf</tf_topic>
+    <topic>/cmd_vel</topic><odom_topic>/odom</odom_topic><tf_topic>/model/sprocket/wheel_tf</tf_topic>
     <frame_id>odom</frame_id><child_frame_id>base_link</child_frame_id>
     <odom_publish_frequency>50</odom_publish_frequency>
   </plugin>
@@ -140,3 +140,27 @@ REAR_INFO = [f"/{name}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo
 
 if __name__ == "__main__":
     print(urdf())
+
+
+# The odometry the robot drives on: wheels for forward speed (sideways speed held at zero, as on any two-wheeled
+# base), the gyro for turning. Wheels slip when the robot turns on the spot (Nav2's 360-degree spin came up about 12
+# degrees short on wheel odometry alone); the gyro does not. robot_localization's EKF publishes odom -> base_link in
+# place of the wheels (whose transform goes to an unused topic above). An indoor compass heading is not trusted, so
+# no absolute yaw is fused.
+EKF = """ekf_filter_node:
+  ros__parameters:
+    use_sim_time: true
+    frequency: 30.0
+    two_d_mode: true
+    publish_tf: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+    odom0: /odom
+    odom0_config: [false, false, false, false, false, false, true, true, false, false, false, false, false, false, false]
+    imu0: /imu
+    imu0_config: [false, false, false, false, false, false, false, false, false, false, false, true, false, false, false]
+    imu0_remove_gravitational_acceleration: true
+"""
+

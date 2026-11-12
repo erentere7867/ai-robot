@@ -19,6 +19,18 @@ from robot.agent.runner import Runner
 
 MAX_GATE_RETRIES = 2
 MAX_REPAIRS = 3
+# What went wrong, in words the user can act on; the robot says it and asks to be told another way, never guessing.
+PLAINLY = (("nothing matched", "I couldn't find what you meant"), ("NotFound", "I couldn't find what you meant"),
+           ("list index out of range", "I couldn't find what you meant"),
+           ("which way", "I wasn't sure which way to go"), ("PathBlocked", "I couldn't find a way there"),
+           ("could not finish", "I couldn't find a way there"), ("TimeLimit", "it was taking too long"),
+           ("format:", "I couldn't work out how to do it"))
+
+
+def plainly(problems: list[str]) -> str:
+    """The last problem, in the user's words."""
+    last = problems[-1] if problems else ""
+    return next((words for key, words in PLAINLY if key in last), "I couldn't work out how to do it")
 # Python's error text, explained in the API's terms, so a repair knows what to change.
 HINTS = (
     ("'list' object has no attribute", "robot.where and robot.detect return lists, best match first: use [0] after "
@@ -55,7 +67,11 @@ class TaskRecord:
 
 
 class Agent:
-    def __init__(self, planner: LocalPlanner, *, readback: bool = False, live: Any = None) -> None:
+    def __init__(self, planner: LocalPlanner, *, readback: bool = False, live: Any = None,
+                 escalate: Any = None) -> None:
+        """`escalate`: a stronger planner (the cloud tier, or a larger on-board model) given one try when this one
+        has used its repairs; then the robot says plainly what went wrong and asks to be told another way."""
+        self.escalate = escalate
         self.planner = planner
         self.readback = readback  # check each program's dry run, in words, against the instruction before it runs
         self.live = live  # robot.interfaces.live.Live, or None
@@ -77,7 +93,7 @@ class Agent:
         record.tokens.append(result.reply.write_tokens)
         return result
 
-    def do(self, instruction: str, robot: Any) -> TaskRecord:
+    def do(self, instruction: str, robot: Any, speak: bool = True) -> TaskRecord:
         record = TaskRecord(instruction)
         if hasattr(robot, "begin"):
             robot.begin()  # "start" now names where this task began
@@ -127,7 +143,19 @@ class Agent:
             problem = explain(f"The program stopped at line {run.line} with {run.error}.")
             result = self._ask_planner(record, lambda p=problem: self.planner.repair(p, describe(robot.snapshot())))
         record.outcome = "failed"
+        if self.escalate is not None:
+            again = Agent(self.escalate, readback=self.readback, live=self.live).do(instruction, robot, speak=False)
+            record.programs += again.programs
+            record.problems += again.problems
+            if again.outcome != "failed":
+                record.outcome = again.outcome
+                return record
         self._show(status="failed", problems=list(record.problems))
+        if speak:
+            try:
+                robot.say(f"Sorry, {plainly(record.problems)}. Could you tell me another way?")
+            except Exception:  # noqa: BLE001 - a robot that cannot speak still reports on the page
+                pass
         return record
 
     def _on_call(self, robot: Any) -> Any:

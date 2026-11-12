@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import queue
+import threading
 import time
 from dataclasses import replace
 from typing import Any
@@ -19,7 +20,7 @@ from robot.agent.api import Object, Pose
 from robot.perception.camera import data_url
 from robot.ros.perceive import Perception
 from robot.ros.robot import RosRobot
-from robot.sim.world import COLORS, Scene, SimRobot, Thing
+from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing
 
 # Other names for what perception calls a thing. "desk" answers to "table" only when no table is known (a word match
 # scores below a whole name): from low down a coffee table is often seen as a desk.
@@ -31,16 +32,49 @@ SEEN_NOW = 1.5  # seconds: a track seen this recently is "in view now"
 
 class RealRobot(RosRobot):
     def __init__(self, scene: Scene, *, detector: Any, brain: Any = None, max_time: float = 600.0,
-                 nudge: Any = None) -> None:
+                 nudge: Any = None, store: Any = None, grid: Any = None) -> None:
+        """`store` (robot/mind/memory.py) keeps what the robot sees, is told and is shown across restarts; `grid` is
+        the occupancy of the map the robot built itself (robot/ros/explore.py), for planning and dry runs."""
         self._ready = False
         super().__init__(scene, max_time=max_time, nudge=nudge)
+        self._rooms: list = []  # room masks of the robot's own map, named again as it learns (robot/ros/rooms.py)
+        self._named_at = -1e9
+        if grid is not None:
+            from robot.ros.rooms import segment
+
+            self.set_occupied(grid)
+            self._rooms = segment(~grid, RES)
         self.perception = Perception(self.node, detector, self._pose_at, brain)
         self.brain = brain
         self.things, self.memory = {}, {}
         self.answers: queue.Queue[str] = queue.Queue()  # what the user types or says while a program waits
         self.waiting = False
         self._user: int | None = None
+        self.store, self._closed = store, False
+        if store is not None:
+            known = store.restore(self.perception.tracker)
+            self.notes = [*self.notes, *store.notes()]
+            self.places.update({name: Pose(x, y, yaw) for name, (x, y, yaw) in store.places().items()})
+            print(f"memory: {known} objects, {len(self.notes)} facts and {len(self.places) - 1} places remembered",
+                  flush=True)
+            threading.Thread(target=self._keep, daemon=True).start()
         self._ready = True
+
+    def _keep(self) -> None:
+        """Write memory every few seconds, so a crash loses little."""
+        while not self._closed:
+            time.sleep(5.0)
+            self._save()
+
+    def _save(self) -> None:
+        if self.store is not None:
+            with self.perception.lock:
+                self.store.save(self.perception.tracker, self.notes, self.places)
+
+    def shutdown(self) -> None:
+        self._save()
+        self._closed = True
+        super().shutdown()
 
     # ---- perception from the cameras ------------------------------------------------------------------------------
     def _pose_at(self, stamp: Any) -> tuple[float, float, float] | None:
@@ -50,6 +84,7 @@ class RealRobot(RosRobot):
             try:
                 tr = self.tf.lookup_transform("map", "base_link", when).transform
             except Exception:  # noqa: BLE001 - not at that time: try the latest
+                self.stale_poses = getattr(self, "stale_poses", 0) + 1
                 continue
             q = tr.rotation
             return tr.translation.x, tr.translation.y, math.atan2(2 * (q.w * q.z + q.x * q.y),
@@ -78,6 +113,12 @@ class RealRobot(RosRobot):
             self._user = self._user if self._user in things else min(p.id for p in people)
             things[self._user].user = True
         self.things, self.memory, self._detected = things, memory, detected
+        if self._rooms and now - self._named_at > 5.0:  # rooms take names from the tour and the furniture seen
+            from robot.ros.rooms import name
+
+            self._named_at = now
+            self.scene.rooms = name(self._rooms, RES, (self.scene.width, self.scene.height), list(things.values()),
+                                    self.places)
 
     def _visible(self) -> list[Thing]:
         return [self.things[i] for i in self._detected if i in self.things]

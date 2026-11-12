@@ -82,6 +82,9 @@ def main() -> None:
     args = parser.parse_args()
     live = Live()
     live.serve(args.port)
+    from robot.interfaces.voice import attach
+
+    attach(live)
     print(f"Open http://localhost:{args.port}", flush=True)
     if args.case:
         run_case(live, args.case)

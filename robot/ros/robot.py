@@ -238,8 +238,14 @@ class RosRobot(SimRobot):
 
         if abs(distance) > 0.01:
             speed = math.copysign(min(CRUISE, 0.25), distance)
-            self._act("drive_on_heading", target=RosPoint(x=distance), speed=speed,
-                      time_allowance=self._allow(10 + abs(distance) / 0.1))
+            start = (self.x, self.y)
+            try:
+                self._act("drive_on_heading", target=RosPoint(x=distance), speed=speed,
+                          time_allowance=self._allow(10 + abs(distance) / 0.1))
+            except PathBlocked:
+                self._sync()
+                if abs(distance) - math.dist(start, (self.x, self.y)) > min(0.1, 0.1 * abs(distance)):
+                    raise  # stopped well short; within 10% (10 cm at most) is done, as in the 2D world
 
     def _halt(self) -> None:
         """Every end of motion sends an explicit stop: Nav2's velocity smoother keeps the last command until its

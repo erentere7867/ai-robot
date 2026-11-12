@@ -44,6 +44,9 @@ class State:
     history: list[dict[str, Any]] = field(default_factory=list)  # past instructions and how they went
     cameras: list[str] = field(default_factory=list)  # camera images served at /camera/<name>.png
     scan: list[tuple[float, float]] = field(default_factory=list)  # lidar hits on the map
+    voice: bool = False  # the robot can hear and speak through the page
+    heard: str = ""  # what it last heard said
+    said_total: int = 0  # lines said so far (`said` holds only the last few)
 
 
 class Live:
@@ -53,6 +56,8 @@ class Live:
         self.state = State()
         self.inbox: queue.Queue[tuple[str, str]] = queue.Queue()  # ("instruct", text), ("stop", ""), ("scene", name)
         self.camera: Any = None  # name -> PNG bytes or None, for the camera panel
+        self.ears: Any = None  # robot/interfaces/voice.py: speech from the talk button becomes instructions
+        self.mouth: Any = None  # and what the robot says is spoken on the page
         self._lock = threading.Lock()
 
     def update(self, **changes: Any) -> None:
@@ -79,7 +84,19 @@ class Live:
                                "known": t.id in known, "person": t.person, "id": t.id})
         path = [(round(x, 2), round(y, 2)) for _, x, y, _ in sim.trace.poses[-1500::5]]
         self.update(robot=(sim.x, sim.y, sim.yaw), path=path, things=things, walls=walls, size=(w, h),
-                    said=[text for _, text in sim.trace.said][-6:], rooms=list(scene.rooms))
+                    said=[text for _, text in sim.trace.said][-6:], said_total=len(sim.trace.said),
+                    rooms=list(scene.rooms))
+
+    def hear(self, audio: bytes) -> None:
+        """Speech from the talk button: transcribed, then handled like a typed instruction."""
+        try:
+            text = self.ears.hear(audio)
+        except Exception as exc:  # noqa: BLE001 - a bad recording must not stop the page
+            text = ""
+            self.update(heard=f"(could not hear: {exc})")
+        if text:
+            self.update(heard=text)
+            self.inbox.put(("instruct", text[:300]))
 
     def serve(self, port: int = 8765, host: str = "127.0.0.1") -> ThreadingHTTPServer:
         live = self
@@ -98,12 +115,24 @@ class Live:
                     if png:
                         self._send(png, "image/png")
                         return
+                if self.path.startswith("/speech?") and live.mouth is not None:
+                    from urllib.parse import parse_qs, urlparse
+
+                    text = parse_qs(urlparse(self.path).query).get("text", [""])[0][:300]
+                    if text:
+                        self._send(live.mouth.say(text), "audio/wav")
+                        return
                 if self.path.startswith("/state"):
                     self._send(live.snapshot().encode(), "application/json")
                 else:
                     self._send(PAGE.encode(), "text/html; charset=utf-8")
 
             def do_POST(self) -> None:  # noqa: N802
+                if self.path.startswith("/voice") and live.ears is not None:
+                    audio = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 8_000_000))
+                    threading.Thread(target=live.hear, args=(audio,), daemon=True).start()
+                    self._send(b"{}", "application/json")
+                    return
                 length = min(int(self.headers.get("Content-Length") or 0), 4096)
                 try:
                     body = json.loads(self.rfile.read(length) or b"{}")
@@ -153,9 +182,11 @@ button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-colum
 <span id="status" class="status">idle</span> <span id="sayfirst" class="muted"></span>
 <form id="form"><input id="cmd" placeholder="e.g. Circle the table twice, then come back to me" autocomplete="off">
 <button type="submit">Send</button><button type="button" class="stop" id="stop">Stop</button>
+<button type="button" id="talk" hidden title="Hold and speak">Hold to talk</button>
+<label id="speaklabel" class="muted" hidden><input type="checkbox" id="speak" style="min-width:0;flex:0"> speak aloud</label>
 <select id="scene" title="Room"></select></form>
 <div class="hint" id="hint">The robot is the blue dot with a line showing where it faces; you are the blue
-person. Faded things have not been seen yet.</div></section>
+person. Faded things have not been seen yet.</div><div class="hint" id="heard"></div></section>
 <section><h2>Program</h2><div id="plan" class="muted"></div><pre id="program"></pre></section>
 <section><h2>Map</h2><canvas id="map" width="800" height="600"></canvas></section>
 <section><h2>What it will do (from the dry run)</h2><div id="readback"></div>
@@ -195,5 +226,27 @@ let camtick=0;function cams(s){if(!s.cameras.length)return;$('camsec').hidden=fa
 $('cams').innerHTML=s.cameras.map(n=>`<figure><img src="/camera/${n}.png?t=${Date.now()}" alt="${n}">
 <figcaption>${n.replace(/_/g,' ')}</figcaption></figure>`).join('')}
 setInterval(async()=>{try{cams(await(await fetch('/state',{cache:'no-store'})).json())}catch(e){}},1000);
+let rec=null,spoken=-1;
+async function talk(){if(rec)return;try{const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+const ctx=new AudioContext(),src=ctx.createMediaStreamSource(stream),node=ctx.createScriptProcessor(4096,1,1),chunks=[];
+node.onaudioprocess=e=>chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));src.connect(node);
+node.connect(ctx.destination);rec={stream,ctx,node,chunks};$('talk').textContent='Listening… release to send'}catch(e){
+$('heard').textContent='No microphone: '+e.message}}
+function wav(chunks,rate){const n=chunks.reduce((a,c)=>a+c.length,0),pcm=new Float32Array(n);let o=0;
+for(const c of chunks){pcm.set(c,o);o+=c.length}const step=rate/16000,m=Math.floor(n/step),v=new DataView(new ArrayBuffer(44+m*2));
+const w=(p,s)=>[...s].forEach((ch,i)=>v.setUint8(p+i,ch.charCodeAt(0)));w(0,'RIFF');v.setUint32(4,36+m*2,true);w(8,'WAVE');
+w(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,16000,true);
+v.setUint32(28,32000,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,'data');v.setUint32(40,m*2,true);
+for(let i=0;i<m;i++){const x=Math.max(-1,Math.min(1,pcm[Math.floor(i*step)]));v.setInt16(44+i*2,x*32767,true)}return v.buffer}
+function release(){if(!rec)return;const{stream,ctx,node,chunks}=rec;rec=null;node.disconnect();stream.getTracks().forEach(t=>t.stop());
+const body=wav(chunks,ctx.sampleRate);ctx.close();$('talk').textContent='Hold to talk';$('heard').textContent='Hearing…';
+fetch('/voice',{method:'POST',body})}
+$('talk').onpointerdown=talk;$('talk').onpointerup=release;$('talk').onpointerleave=release;
+function voice(s){if(!s.voice)return;$('talk').hidden=false;$('speaklabel').hidden=false;
+if(s.heard)$('heard').textContent='Heard: “'+s.heard+'”';if(spoken<0||s.said_total<spoken){spoken=s.said_total;return}
+const fresh=s.said.slice(Math.max(0,s.said.length-(s.said_total-spoken)));spoken=s.said_total;
+if($('speak').checked)fresh.reduce((p,line)=>p.then(()=>new Promise(done=>{const a=new Audio('/speech?text='+
+encodeURIComponent(line));a.onended=done;a.onerror=done;a.play().catch(done)})),Promise.resolve())}
+setInterval(async()=>{try{voice(await(await fetch('/state',{cache:'no-store'})).json())}catch(e){}},700);
 setInterval(tick,400);tick();
 </script></body></html>"""

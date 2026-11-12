@@ -541,6 +541,8 @@ class SimRobot:
             left -= math.dist((x, y), (self.x, self.y))
             if self.held and self.t - since > STALL_S:
                 self._halt()
+                if left <= min(0.1, 0.1 * abs(distance)):  # close enough: things are placed to a few centimetres
+                    return  # (a 1 m reverse stopped 5 cm short of a box placed 0.3 m closer than it stood)
                 raise PathBlocked(f"blocked with {left:.2f} m still to go")
             if not self.held:
                 since = self.t

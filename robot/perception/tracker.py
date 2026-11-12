@@ -3,13 +3,18 @@
 Detections arrive as (label, colour, map position, radius, score) from any camera. A detection joins the nearest
 track inside a gate that has its label, or another label and a similar size: the detector names one thing
 differently from different sides (a low coffee table is sometimes a "tv"), so a track's label is a vote of its
-sightings weighted by score. People are kept apart from things. The track's position and size follow its sightings
-smoothly; a detection near no track starts one, which counts as an object once it has been seen twice (a person seen
+sightings weighted by score. People are kept apart from things. A thing's place is the precision-weighted mean of its
+sightings (a scalar Kalman filter: a depth reading counts more than a far floor estimate, and the place settles as
+sightings add up, instead of being pulled a fixed share toward each new one, which made things twitch on the map);
+a person's place may move faster (WALKS), so it follows a walking person. Twins of one name left by renaming are
+merged. A detection near no track starts one, which counts as an object once it has been seen twice (a person seen
 clearly counts at once). The vision model then looks at each new object's crop and names it (`verify`): the fast
 detector proposes, the slower model decides, and an object it sees nothing in is dropped. It looks again when the
 object is seen at least twice as large (`to_name`), so names from close views win. A track whose place a camera views clearly without
 seeing it collects misses, and after three it is marked absent: negative evidence (Fable), so the robot stops
-believing in things that have gone. People are tracked the same way and are free to move.
+believing in things that have gone. People are tracked the same way and are free to move; each carries the colours
+of their clothes (`look`), so a person lost behind the furniture is known again when they reappear within walking
+distance, and two people passing close, dressed differently, do not swap: "follow me" keeps its person.
 """
 
 from __future__ import annotations
@@ -17,11 +22,18 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
 
 SAME = {"couch": "sofa", "refrigerator": "fridge", "trash can": "bin", "garbage can": "bin", "potted plant": "plant",
         "houseplant": "plant", "cardboard box": "box", "mug": "cup", "television": "tv", "monitor": "tv",
         "rucksack": "backpack", "bag": "backpack", "sports ball": "ball", "dining table": "table",
         "coffee table": "table", "office chair": "chair", "armchair": "chair", "man": "person", "woman": "person"}
+LIKE = 0.7  # how alike two looks must be (histogram intersection, 0 to 1) to know a lost person again
+UNLIKE = 0.15  # below this, two looks are two people however close they stand (0.4 split one person across cameras)
+MOVED = 0.001  # square metres per second a thing's place may drift unseen (someone may move it; misses handle more)
+WALKS = 0.25  # the same for a person, who may walk at about half a metre a second
 
 
 def canonical(label: str) -> str:
@@ -40,6 +52,8 @@ class Detection:
     score: float = 1.0
     camera: str = ""
     cut: bool = False  # cut by the picture's edge: its place is roughly right, its size says nothing
+    sigma: float = 0.1  # one standard deviation of its place, metres (from how its range was found)
+    look: Any = None  # a person's appearance: a normalised hue-saturation histogram of the clothes (`look`)
 
 
 @dataclass
@@ -61,6 +75,8 @@ class Track:
     rejected: bool = False  # the vision model saw no object there
     named_from: int = 0  # pixels in the crop the vision model last named it from
     sized: bool = True  # False while it has only been seen cut by a picture's edge
+    var: float = 0.01  # variance of its place, square metres: shrinks as sightings agree
+    look: Any = None  # a person's appearance, averaged over sightings, for knowing them again
 
     @property
     def color(self) -> str:
@@ -93,6 +109,9 @@ class Tracker:
                 alike = d.cut or not t.sized or _alike(t.radius, d.radius)
                 if t in touched or (not same and (t.person or label == "person" or not alike)):
                     continue
+                if t.person and t.look is not None and d.look is not None and \
+                        float(np.minimum(t.look, d.look).sum()) < UNLIKE:
+                    continue  # someone else, dressed differently: two people passing close do not swap
                 gap = math.dist((t.x, t.y), (d.x, d.y))
                 if same:
                     limit = max(self.gate, 1.5 * t.radius) * (2.5 if t.person else 1.0)  # people move between frames
@@ -102,12 +121,16 @@ class Tracker:
                     limit = max(t.radius, d.radius)
                 if gap < limit and gap + (0.0 if same else 0.25) < best_gap:
                     best, best_gap = t, gap + (0.0 if same else 0.25)
+            if best is None and label == "person":
+                best = self._known_again(d, now, touched)
             if best is None:
-                best = Track(self._next, label, d.x, d.y, d.radius, now, now, sized=not d.cut)
+                best = Track(self._next, label, d.x, d.y, d.radius, now, now, sized=not d.cut, var=d.sigma ** 2)
                 self.tracks[best.id] = best
                 self._next += 1
-            else:
-                a = 0.7 if best.person else self.smoothing
+            else:  # weigh each sighting by its precision; a thing settles as sightings add up, a person may walk on
+                spread = best.var + (WALKS if best.person else MOVED) * max(0.0, now - best.last_seen)
+                a = spread / (spread + d.sigma ** 2)
+                best.var = (1 - a) * spread
                 best.x += a * (d.x - best.x)
                 best.y += a * (d.y - best.y)
                 if not d.cut:  # a cut view says nothing of size; the first whole one sets it
@@ -122,9 +145,59 @@ class Tracker:
                 best.label = best.votes.most_common(1)[0][0]
             if d.color:
                 best.colors[d.color] += 1
+            if d.look is not None:
+                best.look = d.look if best.look is None else 0.8 * best.look + 0.2 * d.look
             touched.append(best)
             pairs.append((d, best))
+        self._merge(pairs)
         return pairs
+
+    def _known_again(self, d: Detection, now: float, touched: list[Track]) -> Track | None:
+        """A person near no track who looks like someone lost from view within the last half-minute, and could have
+        walked to where they are now: the same person, so "follow me" and "the user" keep them."""
+        if d.look is None:
+            return None
+        best, best_likeness = None, LIKE
+        for t in self.tracks.values():
+            away = now - t.last_seen
+            if not t.person or t in touched or t.look is None or not 0.3 < away < 30.0:
+                continue
+            if math.dist((t.x, t.y), (d.x, d.y)) > 1.0 + 1.5 * away:  # walking pace
+                continue
+            likeness = float(np.minimum(t.look, d.look).sum())  # histogram intersection, 1 for the same colours
+            if likeness > best_likeness:
+                best, best_likeness = t, likeness
+        if best is not None:
+            best.var = max(best.var, d.sigma ** 2)  # where they are now is new: let the sighting place them
+        return best
+
+    def _merge(self, pairs: list[tuple[Detection, Track]]) -> None:
+        """One thing, one track: two tracks of the same name whose centres lie inside each other's footprint are
+        merged into the older (a track renamed for a while can leave a twin behind). Two person tracks merge when
+        they stand within half a metre and look alike: one person seen from two cameras in different light."""
+        for t in sorted(self.tracks.values(), key=lambda t: t.id):
+            if t.id not in self.tracks:
+                continue
+            for o in [o for o in self.tracks.values() if o.id > t.id and o.label == t.label]:
+                if t.person:
+                    near = math.dist((t.x, t.y), (o.x, o.y)) < 0.5
+                    alike = t.look is None or o.look is None or float(np.minimum(t.look, o.look).sum()) >= LIKE
+                    if not (near and alike):
+                        continue
+                elif math.dist((t.x, t.y), (o.x, o.y)) >= max(t.radius, o.radius, 0.15):
+                    continue
+                w = o.var / (t.var + o.var)  # the more certain place counts more
+                t.x, t.y = t.x + (1 - w) * (o.x - t.x), t.y + (1 - w) * (o.y - t.y)
+                t.var = t.var * o.var / (t.var + o.var)
+                t.hits += o.hits
+                t.votes.update(o.votes)
+                t.colors.update(o.colors)
+                t.last_seen = max(t.last_seen, o.last_seen)
+                t.score = max(t.score, o.score)
+                del self.tracks[o.id]
+                for k, (d, track) in enumerate(pairs):
+                    if track is o:
+                        pairs[k] = (d, t)
 
     def missed(self, track: Track) -> None:
         """A camera looked clearly at where `track` should be and did not see it."""
@@ -133,12 +206,12 @@ class Tracker:
             track.present = False
 
     def verify(self, track: Track, label: str | None, pixels: int = 0) -> None:
-        """The vision model's name for the track's crop of `pixels` pixels; None means it saw no object. People stay
-        people: the detector is reliable on them, and they are tracked by other rules."""
+        """The vision model's name for the track's crop of `pixels` pixels; None means it saw no object. Its word
+        wins either way: the detector called a backpack a person, which "follow me" could have followed."""
         track.verified, track.named_from = True, pixels
         if label is None:
             track.rejected = True
-        elif not track.person and canonical(label) != "person":
+        else:
             track.label = canonical(label)
 
     def to_name(self, crops: dict[int, object]) -> Track | None:
@@ -161,3 +234,19 @@ def _alike(a: float, b: float) -> bool:
     """Sizes close enough to be one thing named two ways (a cup on a table is not the table; the part of a table that
     one camera sees past the edge of its picture is)."""
     return max(a, b) <= 3.0 * max(min(a, b), 0.05)
+
+
+def look(pixels: Any, bins: int = 8) -> Any:
+    """A person's appearance from the middle of their box (clothes, not the background): a hue-saturation histogram
+    of `bins` x `bins`, normalised to sum to 1. Brightness is left out, so a shadow does not change who someone is."""
+    rgb = np.asarray(pixels, dtype=np.float32).reshape(-1, 3) / 255.0
+    if rgb.shape[0] < 20:
+        return None
+    high, low = rgb.max(axis=1), rgb.min(axis=1)
+    saturation = np.where(high > 0, (high - low) / np.maximum(high, 1e-6), 0.0)
+    r, g, b = rgb.T
+    span = np.maximum(high - low, 1e-6)
+    hue = np.where(high == r, (g - b) / span % 6, np.where(high == g, (b - r) / span + 2, (r - g) / span + 4)) / 6
+    hist, _, _ = np.histogram2d(hue, saturation, bins=bins, range=((0, 1), (0, 1)))
+    return hist / hist.sum()
+

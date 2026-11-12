@@ -24,6 +24,9 @@ class Reply:
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
+NOT_A_THING = ("wall", "floor", "nothing")  # answers to "what object is this?" that mean there is none
+
+
 def _with_image(url: str, text: str) -> list[dict[str, Any]]:
     return [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}},
                                          {"type": "text", "text": text}]}]
@@ -91,12 +94,14 @@ class Brain:
 
         A choice beats a free answer: answering freely, the model called a red ball a "button" and a cardboard box a
         "wall"; choosing from the robot's words it named 8 of 10 simulator crops right (both misses called a low
-        coffee table a desk)."""
-        words = sorted(set(words)) + ["nothing"]
+        coffee table a desk). The house itself is offered too ("wall", "floor"): without those, the end of a wall
+        beside a doorway was named a cabinet, the nearest word on offer. They mean no object, like "nothing"."""
+        words = sorted(set(words) - set(NOT_A_THING)) + list(NOT_A_THING)
         reply = self.complete(_with_image(image_url, "What is the object in the middle of this picture? Answer with "
                                           "one word from: " + ", ".join(words) + "."),
                               "root ::= " + " | ".join(f'"{w}"' for w in words), 8)
-        return None if reply.text.strip() == "nothing" else reply.text.strip()
+        answer = reply.text.strip()
+        return None if answer in NOT_A_THING else answer
 
     def ground(self, image_url: str, marked_url: str, description: str, marks: int) -> tuple[int | None, Reply]:
         """Which numbered box is this? None when it is not there.

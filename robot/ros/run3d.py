@@ -29,18 +29,22 @@ def truth_scene(name: str):  # noqa: ANN201
     return furnish({"living room": living_room, "two rooms": two_rooms, "office": office}[name]())
 
 
-def start(scene_factory, gui: bool, brain_url: str | None):  # noqa: ANN001, ANN201
-    """Gazebo and Nav2 with Sprocket in the scene, and a RealRobot on them."""
+def start(scene_factory, gui: bool, brain_url: str | None, memory: str = "", slam: bool = False,  # noqa: ANN001, ANN201
+          map_file: Path | None = None):
+    """Gazebo and Nav2 with Sprocket in the scene, and a RealRobot on them (remembering in the file `memory`; mapping
+    as it goes with `slam`; localising in its own `map_file`)."""
     import rclpy
 
     from robot.mind.brain import Brain
+    from robot.mind.memory import Memory
     from robot.perception.detector import Detector
     from robot.ros.real import RealRobot
     from robot.ros.stage import launch, set_initial_pose
     from robot.sim.world import SimRobot
 
     truth = scene_factory()
-    sim = launch(SimRobot(truth), Path(tempfile.mkdtemp(prefix="sprocket-3d-")), gui=gui)
+    sim = launch(SimRobot(truth), Path(tempfile.mkdtemp(prefix="sprocket-3d-")), gui=gui, slam=slam,
+                 map_file=map_file)
     try:
         if not rclpy.ok():
             rclpy.init()
@@ -50,20 +54,34 @@ def start(scene_factory, gui: bool, brain_url: str | None):  # noqa: ANN001, ANN
         set_initial_pose(helper, SimRobot(truth))
         print("loading YOLOE-26...", flush=True)
         detector = Detector(threads=3)  # the rest of the laptop's CPU runs Gazebo, Nav2 and the model
+        grid = None
+        if map_file is not None:  # plan and dry-run in the map the robot built, not the simulator's
+            from robot.ros.explore import load_grid
+
+            grid = load_grid(map_file, SimRobot(truth).occupied.shape, (truth.width, truth.height))
         robot = RealRobot(scene_factory(), detector=detector, brain=Brain(brain_url) if brain_url else None,
-                          nudge=lambda: set_initial_pose(helper, SimRobot(truth)))
+                          nudge=lambda: set_initial_pose(helper, SimRobot(truth)),
+                          store=Memory(memory) if memory else None, grid=grid)
+        if grid is not None:  # the guided tour, done once at setup: "this is the kitchen", in the middle of each room
+            from robot.agent.api import Pose
+
+            robot.places.update({name: Pose((x0 + x1) / 2, (y0 + y1) / 2, 0.0)
+                                 for name, (x0, y0, x1, y1) in truth.rooms.items()})
     except BaseException:  # a simulation that failed to come up must not keep running under the next one
         stop(None, sim)
         raise
     return robot, truth, sim
 
 
-def report(robot, truth) -> None:  # noqa: ANN001
-    """Each real object against the nearest tracked one with its label; and tracks matching nothing real."""
+def report(robot, truth, shift: tuple[float, float] = (0.0, 0.0)) -> None:  # noqa: ANN001
+    """Each real object against the nearest tracked one with its label; and tracks matching nothing real. `shift` takes
+    the robot's map frame to the house's (a map being built starts where the robot started)."""
+    from dataclasses import replace
+
     from robot.perception.tracker import canonical
 
     robot._perceive_objects()
-    tracks = list(robot.things.values())
+    tracks = [replace(k, x=k.x + shift[0], y=k.y + shift[1]) for k in robot.things.values()]
     used, errors = set(), []
     print(f"\n{'real object':<16} {'tracked as':<16} {'error':>7}")
     for t in sorted(truth.things, key=lambda t: t.label):
@@ -90,9 +108,74 @@ def report(robot, truth) -> None:  # noqa: ANN001
     if dropped:
         print("the vision model saw nothing in: " + ", ".join(
             f"{t.votes.most_common(1)[0][0]} {t.id} at ({t.x:.1f}, {t.y:.1f})" for t in dropped))
+    pairs = list(robot.perception.depth_pairs)
+    if pairs:
+        misses = sorted(abs(g) for g in pairs if g)
+        print(f"front frames with their own depth image: {len(pairs) - len(misses)} of {len(pairs)}"
+              + (f"; when not, the nearest was {1000 * misses[len(misses) // 2]:.0f} ms off (median)" if misses else ""))
     timings = robot.perception.timings
     if timings:
         print(f"detector: median {1000 * sorted(timings)[len(timings) // 2]:.0f} ms per frame")
+
+
+def steadiness(robot, samples: list) -> None:  # noqa: ANN001
+    """How much each tracked object moves on the map while it stands still (its wobble: the spread of its place over
+    the second half of the watch), and where each camera puts it, from the raw sightings."""
+    import statistics
+
+    if len(samples) < 4:
+        return
+    late = samples[len(samples) // 2:]
+    since = late[0][0]
+    print(f"\n{'object':<14} {'wobble':>7} {'largest jump':>13}   sightings by camera: mean place, spread")
+    for track in robot.perception.objects():
+        path = [(t.x, t.y) for _, tracks in late for t in tracks if t.id == track.id]
+        if len(path) < 3:
+            continue
+        wobble = math.hypot(statistics.pstdev(p[0] for p in path), statistics.pstdev(p[1] for p in path))
+        jump = max(math.dist(a, b) for a, b in zip(path, path[1:], strict=False))
+        cams = {}
+        for t, camera, tid, x, y, *_ in list(robot.perception.sightings):
+            if tid == track.id and t >= since:
+                cams.setdefault(camera, []).append((x, y))
+        by_camera = "; ".join(
+            f"{c.split('_')[0] if c == 'front_camera' else c.split('_')[1]} ({statistics.fmean(p[0] for p in ps):.2f}, "
+            f"{statistics.fmean(p[1] for p in ps):.2f}) ±{math.hypot(statistics.pstdev(p[0] for p in ps), statistics.pstdev(p[1] for p in ps)):.2f} x{len(ps)}"
+            for c, ps in sorted(cams.items()))
+        print(f"{track.label + ' ' + str(track.id):<14} {wobble:6.2f} m {jump:10.2f} m   {by_camera}")
+    print(f"frames placed with the latest pose instead of the frame's own: {getattr(robot, 'stale_poses', 0)}")
+    low, high = robot.perception.pitch_range
+    print(f"body pitch seen by the IMU: {math.degrees(low):+.2f} to {math.degrees(high):+.2f} deg "
+          f"({len(robot.perception.tilts)} recent readings)")
+
+
+def range_errors(robot, truth) -> None:  # noqa: ANN001
+    """For each camera and way of finding range: the sighting's distance from the robot over the distance of the real
+    object on the nearest bearing (1.00 is right), the share of sightings more than 30% long, and the depth image's
+    lag behind the colour picture for those."""
+    import statistics
+
+    real = [(t.x, t.y, t.radius) for t in truth.things if t.label != "door"]
+    groups: dict[tuple[str, str], list[tuple[float, float]]] = {}
+    def off(p: tuple, rx: float, ry: float, heading: float) -> float:
+        d = math.atan2(p[1] - ry, p[0] - rx) - heading
+        return abs(math.atan2(math.sin(d), math.cos(d)))
+
+    for _, camera, _, x, y, how, rx, ry, gap in list(robot.perception.sightings):
+        heading = math.atan2(y - ry, x - rx)
+        near = min(real, key=lambda p, rx=rx, ry=ry, h=heading: off(p, rx, ry, h))
+        reach = math.dist(near[:2], (rx, ry))
+        if off(near, rx, ry, heading) < math.radians(8) and reach > 0.3:
+            groups.setdefault((camera, how), []).append((math.dist((x, y), (rx, ry)) / reach, gap))
+    print(f"\n{'camera':<18} {'range from':<6} {'sightings':>9} {'median ratio':>13} {'middle half':>15} "
+          f"{'>30% long':>10} {'their depth lag':>16}")
+    for (camera, how), rows in sorted(groups.items()):
+        ratios = sorted(r for r, _ in rows)
+        q1, q3 = ratios[len(ratios) // 4], ratios[3 * len(ratios) // 4]
+        long = [g for r, g in rows if r > 1.3]
+        lag = f"{1000 * statistics.median(long):.0f} ms" if long else "-"
+        print(f"{camera:<18} {how:<6} {len(rows):9d} {statistics.median(ratios):13.2f} {q1:7.2f}–{q3:<7.2f} "
+              f"{len(long) / len(rows):9.0%} {lag:>16}")
 
 
 def annotated(robot, name: str, width: int = 0):  # noqa: ANN001, ANN201
@@ -100,10 +183,10 @@ def annotated(robot, name: str, width: int = 0):  # noqa: ANN001, ANN201
     import numpy as np
     from PIL import Image, ImageDraw
 
-    frame = robot.perception.frames.get(name)
-    if frame is None:
+    picture = robot.perception.detected.get(name)  # the frame the boxes were found in, not a later one
+    if picture is None:
         return None
-    image = Image.fromarray(np.ascontiguousarray(frame[1]))
+    image = Image.fromarray(np.ascontiguousarray(picture))
     tracks = robot.perception.tracker.tracks
     draw = ImageDraw.Draw(image)
     for (x1, y1, x2, y2), tid in robot.perception.boxes.get(name, []):
@@ -160,6 +243,10 @@ def page(holder, port: int):  # noqa: ANN001, ANN201
     live.serve(port)
     live.camera = camera
     live.update(cameras=list(TOPICS))
+    from robot.interfaces.voice import attach
+
+    if attach(live):
+        print("the page can hear (hold to talk) and speak (tick 'speak aloud')", flush=True)
 
     def refresh() -> None:
         while True:
@@ -207,7 +294,8 @@ def interactive(robot, room: str, brain_url: str, port: int) -> None:  # noqa: A
     drive(live, Agent(planner, live=live), holder)
 
 
-def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, port: int, plan: bool) -> None:
+def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, port: int, plan: bool,
+              own_map: bool = False) -> None:
     """Suite cases on the full stack: each case's room in Gazebo, the robot seeing it through its cameras for `look`
     seconds first, then the hand-written program (or, with `plan`, the planner's own from the case's words) through
     the gate's dry run in the room as perceived, and the suite's check judged against the room as it really is."""
@@ -230,7 +318,9 @@ def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, por
         started = time.monotonic()
         print(f"\n== {case.id}: {case.say}", flush=True)
         try:
-            robot, truth, sim = start(lambda c=case: furnish(c.scene()), gui, brain_url)
+            mapped = Path(f"~/sprocket-maps/{getattr(case.scene, '__name__', '')}.yaml").expanduser()
+            robot, truth, sim = start(lambda c=case: furnish(c.scene()), gui, brain_url,
+                                      map_file=mapped if own_map and mapped.exists() else None)
             holder.sim = robot
             live.update(scene=case.id, scenes=[case.id], status="idle", instruction=case.say, program="", plan="",
                         readback="", problems=[], line=0)
@@ -289,24 +379,80 @@ def main() -> None:
     parser.add_argument("--gui", action="store_true", help="open the Gazebo window")
     parser.add_argument("--perception", action="store_true", help="watch for a while and report what was seen")
     parser.add_argument("--watch", type=float, default=20.0, help="seconds of looking before reporting or a case")
+    parser.add_argument("--turn", action="store_true", help="with --perception: turn once, slowly, while watching")
     parser.add_argument("--interactive", action="store_true", help="the instruction page on --port")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--cases", nargs="+", help="suite cases to run on the full stack")
     parser.add_argument("--plan", action="store_true", help="with --cases: the planner writes each program")
     parser.add_argument("--brain", default="", help="llama-server URL, e.g. http://127.0.0.1:8081: names new objects, "
                                                     "answers vision questions, and plans")
+    parser.add_argument("--memory", default="", help="the memory file; --interactive uses ~/sprocket-memory/<room>.db")
+    parser.add_argument("--forget", action="store_true", help="start with an empty memory")
+    parser.add_argument("--explore", action="store_true", help="map the room from scratch (slam_toolbox, frontier "
+                                                               "exploration) and save the map to ~/sprocket-maps")
+    parser.add_argument("--own-map", action="store_true", help="localise in the map --explore saved, not the "
+                                                               "simulator's")
     args = parser.parse_args()
     if args.cases:
-        run_cases(args.cases, args.gui, args.brain or None, args.watch, args.port, args.plan)
+        run_cases(args.cases, args.gui, args.brain or None, args.watch, args.port, args.plan, args.own_map)
         return
-    robot, truth, sim = start(lambda: truth_scene(args.room), args.gui, args.brain or None)
+    memory = args.memory or (f"~/sprocket-memory/{args.room}.db" if args.interactive else "")
+    if memory and args.forget:
+        Path(memory).expanduser().unlink(missing_ok=True)
+    own = Path(f"~/sprocket-maps/{args.room.replace(' ', '_')}.yaml").expanduser()
+    robot, truth, sim = start(lambda: truth_scene(args.room), args.gui, args.brain or None, memory,
+                              slam=args.explore, map_file=own if args.own_map and own.exists() else None)
     try:
-        if args.interactive:
+        if args.explore:
+            from robot.ros.explore import Explorer, coverage
+            from robot.sim.world import SimRobot
+
+            explorer = Explorer(robot)
+            stats = explorer.explore(max(args.watch, 60.0))
+            saved = explorer.save(own.with_suffix(""), (truth.start.x, truth.start.y))
+            print(f"explored in {stats['seconds']:.0f} s: {stats['goals']} frontiers visited, {stats['unreachable']} "
+                  f"unreachable, {stats['frontiers left']} left; the map shows {coverage(saved, SimRobot(truth)):.0%} "
+                  f"of the free floor; saved to {saved}", flush=True)
+            report(robot, truth, (truth.start.x, truth.start.y))
+        elif args.interactive:
             interactive(robot, args.room, args.brain or "http://127.0.0.1:8081", args.port)
         elif args.perception:
-            print(f"watching for {args.watch:.0f} s...", flush=True)
-            time.sleep(args.watch)
+            import threading
+
+            print(f"watching for {args.watch:.0f} s{', turning slowly' if args.turn else ''}...", flush=True)
+            samples: list[tuple[float, list]] = []
+            end = time.monotonic() + args.watch
+
+            corrections: list[tuple[float, float, float]] = []  # map -> odom: how localisation corrects odometry
+
+            def sample() -> None:
+                from rclpy.time import Time
+
+                while time.monotonic() < end:
+                    samples.append((time.monotonic(), robot.perception.objects()))
+                    try:
+                        tr = robot.tf.lookup_transform("map", "odom", Time()).transform
+                        q = tr.rotation
+                        corrections.append((tr.translation.x, tr.translation.y, math.degrees(math.atan2(
+                            2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)))))
+                    except Exception:  # noqa: BLE001 - not yet localised
+                        pass
+                    time.sleep(0.5)
+
+            sampler = threading.Thread(target=sample, daemon=True)
+            sampler.start()
+            if args.turn:
+                robot.spin(turns=1.0, seconds=args.watch, direction="left")
+            sampler.join()
             report(robot, truth)
+            steadiness(robot, samples)
+            range_errors(robot, truth)
+            if len(corrections) > 1:
+                steps = [(math.dist(a[:2], b[:2]), abs(b[2] - a[2])) for a, b in zip(corrections, corrections[1:],
+                                                                                     strict=False)]
+                print(f"localisation corrections (map -> odom) over the watch: moved {math.dist(corrections[0][:2], corrections[-1][:2]):.2f} m and "
+                      f"{corrections[-1][2] - corrections[0][2]:+.1f} deg in all; largest half-second step "
+                      f"{max(s[0] for s in steps):.2f} m, {max(s[1] for s in steps):.1f} deg")
             print(f"frames processed per camera: {robot.perception.counts}")
             snapshots(robot, Path("/mnt/c/Users/FixAccount/robot-runtime/runs/3d"))
     finally:

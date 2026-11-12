@@ -176,3 +176,14 @@ def test_hand_written_programs_survive_a_poor_detector():
         if not (check(program, sim).ok and Runner(sim).run(program).status != "error" and BY_ID[case_id].check(sim)):
             failed.append(case_id)
     assert failed == []
+
+
+def test_a_move_that_stops_a_few_centimetres_short_is_done():
+    from robot.agent.api import Pose
+    from robot.sim.world import Scene, SimRobot, Thing
+
+    scene = Scene(6.0, 4.0, [Thing("box", -1.6, 0.0, 0.3, "brown")], {"room": (-3.0, -2.0, 3.0, 2.0)},
+                  start=Pose(0.0, 0.0, 0.0))
+    robot = SimRobot(scene)
+    robot.move(1.0, direction="backward")  # the box stops it about 5 cm short: close enough
+    assert -1.0 < robot.x < -0.85

@@ -129,7 +129,7 @@ def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
 # publishes its own clock and TF, and a second Nav2 container answers to the same node names (one case's Nav2 took
 # 170 s to load and never activated while the last run's container was still shutting down).
 LEFTOVERS = ("gz-sim-main", "gz-sim-gui", "gz sim", "component_container", "robot_state_publisher", "parameter_bridge",
-             "image_bridge", "ros2 launch", "rviz2")
+             "image_bridge", "ros2 launch", "rviz2", "ekf_node")
 
 
 def clear() -> None:
@@ -161,20 +161,26 @@ class Launched:
         clear()  # Gazebo's GUI and server, and Nav2's container, do not always leave with their launch
 
 
-def launch(world: SimRobot, out: Path, *, gui: bool = False) -> Launched:
+def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
+           map_file: Path | None = None) -> Launched:
     """Nav2's simulation launch with Sprocket's body (robot/ros/model.py) in the scene; with gui, the Gazebo 3D window
     opens too (RViz stays closed: on a CPU it costs the model and the detector too much, and the live page shows the
-    map, the lidar and the cameras). The rear cameras get their own bridges: the TurtleBot launch only knows the front one."""
-    from robot.ros.model import REAR_BRIDGES, REAR_INFO, urdf
+    map, the lidar and the cameras). The rear cameras get their own bridges: the TurtleBot launch only knows the front
+    one, and robot_localization's EKF fuses the wheels with the gyro into the odometry (robot/ros/model.py). The robot
+    localises in `map_file` (a map it built: robot/ros/explore.py), else in the simulator's own map of
+    the scene; with `slam` it has no map and builds one as it goes."""
+    from robot.ros.model import EKF, REAR_BRIDGES, REAR_INFO, urdf
 
     clear()
     sdf, yaml = export(world, out)
     body = out / "sprocket.urdf"
     body.write_text(urdf())
+    ekf = out / "ekf.yaml"
+    ekf.write_text(EKF)
     s = world.scene.start
-    args = [f"world:={sdf}", f"map:={yaml}", f"x_pose:={s.x}", f"y_pose:={s.y}", f"yaw:={math.radians(s.yaw)}",
-            f"robot_sdf:={body}", "robot_name:=sprocket", f"headless:={not gui}", "use_rviz:=False",
-            "use_keepout_zones:=False", "use_speed_zones:=False"]
+    args = [f"world:={sdf}", f"map:={map_file or yaml}", f"x_pose:={s.x}", f"y_pose:={s.y}",
+            f"yaw:={math.radians(s.yaw)}", f"robot_sdf:={body}", "robot_name:=sprocket", f"headless:={not gui}",
+            "use_rviz:=False", "use_keepout_zones:=False", "use_speed_zones:=False", f"slam:={slam}"]
     env = {**os.environ, "QT_QPA_PLATFORM": "xcb"}  # Qt windows draw through X11 under WSLg
     if os.path.exists("/dev/dxg"):  # WSL: Mesa falls back to drawing on the CPU (llvmpipe) unless told to use the
         env.update(GALLIUM_DRIVER="d3d12", MESA_D3D12_DEFAULT_ADAPTER_NAME="NVIDIA")  # GPU through Direct3D 12
@@ -184,7 +190,8 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False) -> Launched:
                               stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)]
     sim_time = ["--ros-args", "-p", "use_sim_time:=true"]
     for command in (["ros2", "run", "ros_gz_image", "image_bridge", *REAR_BRIDGES, *sim_time],
-                    ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *REAR_INFO, *sim_time]):
+                    ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *REAR_INFO, *sim_time],
+                    ["ros2", "run", "robot_localization", "ekf_node", "--ros-args", "--params-file", str(ekf)]):
         procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True))
     return Launched(procs)
 

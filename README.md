@@ -13,10 +13,11 @@ robot/
   agent/      the robot API and API card, the planner, the gate, the sandboxed runner, instant commands
   sim/        world.py: the 2D simulator behind the API (gate dry runs, test suite)
   ros/        the 3D simulation: Sprocket's body (3 cameras for 360 degrees, 2D lidar, IMU), Gazebo rooms with
-              Fuel furniture, Nav2, perception on ROS, and run3d.py to run the whole stack
+              Fuel furniture, Nav2, perception on ROS, mapping by exploration (explore.py), rooms from the map
+              (rooms.py), and run3d.py to run the whole stack
   perception/ YOLOE-26 detector, camera rig geometry, locating detections, colour, the map-frame tracker
-  mind/       client for the model (LFM3-VL-2B through llama-server)
-  interfaces/ the live page (instructions in, program and map out) and the 2D demo
+  mind/       client for the model (LFM3-VL-2B through llama-server), long-term memory (SQLite)
+  interfaces/ the live page (instructions typed or spoken, program and map out), speech (Whisper, Piper), 2D demo
   eval/       the 50-instruction suite, hand-written programs, red-team programs, photo check (M0)
   train/      fine-tuning data generator and the Kaggle notebook
 tests/     acceptance tests
@@ -36,9 +37,17 @@ YOLOE-26 weights in the working folder:
 
 ```bash
 python -m robot.ros.run3d --perception --brain http://127.0.0.1:8081    # what the robot sees, against the truth
+python -m robot.ros.run3d --perception --turn --watch 50 ...             # the same while turning, with steadiness
 python -m robot.ros.run3d --cases O1 O3 O6 --watch 30                    # hand-written programs, judged
-python -m robot.ros.run3d --interactive --gui --brain http://127.0.0.1:8081   # Gazebo and the page
+python -m robot.ros.run3d --cases O1 O3 --plan --brain http://127.0.0.1:8081   # the planner's programs, judged
+python -m robot.ros.run3d --explore --room "two rooms" --watch 300 ...   # map from scratch, save to ~/sprocket-maps
+python -m robot.ros.run3d --cases S1 S6 --own-map ...                    # localise and plan in the robot's own map
+python -m robot.ros.run3d --interactive --gui --brain http://127.0.0.1:8081   # Gazebo and the page (with memory)
 ```
+
+On the laptop everything heavy runs on the GPU inside WSL: llama-server built with CUDA (`-ngl 99 -fa on`, two slots,
+the vision projector), YOLOE on CUDA PyTorch, and Gazebo rendering through Mesa's Direct3D 12 driver. Speech needs
+`faster-whisper`, `piper-tts` and a Piper voice in `~/sprocket-models/voice`.
 
 The photo check for the model (M0) needs a `llama-server` build (b11960 or newer) running
 `LFM3-VL-2B-QAD-Q4_0.gguf` with `mmproj-LFM3-VL-2B-F16.gguf`:

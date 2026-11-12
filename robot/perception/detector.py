@@ -59,16 +59,19 @@ class Detector:
                                    strict=True)]
         kept: list[Seen] = []  # one box per thing: the model sometimes boxes a thing twice, or under two names
         for s in sorted(seen, key=lambda s: -s.score):
-            if not any(_same_thing(k.box, s.box) for k in kept):
+            if not any(_same_thing(k, s) for k in kept):
                 kept.append(s)
         return kept
 
 
-def _same_thing(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
-    """Boxes of about the same size, one mostly inside the other (a cup's box inside a table's is another thing)."""
-    area_a, area_b = (a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])
-    if min(area_a, area_b) <= 0 or max(area_a, area_b) > 2.5 * min(area_a, area_b):
+def _same_thing(a: Seen, b: Seen) -> bool:
+    """One box mostly inside the other: the same thing when they share a name (a person's whole body and upper body,
+    which otherwise became two people), or when they are about the same size (a cup's box inside a table's is
+    another thing)."""
+    (ax1, ay1, ax2, ay2), (bx1, by1, bx2, by2) = a.box, b.box
+    area_a, area_b = (ax2 - ax1) * (ay2 - ay1), (bx2 - bx1) * (by2 - by1)
+    if min(area_a, area_b) <= 0 or (a.label != b.label and max(area_a, area_b) > 2.5 * min(area_a, area_b)):
         return False
-    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
-    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
     return ix * iy > 0.7 * min(area_a, area_b)
