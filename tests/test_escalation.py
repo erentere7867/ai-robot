@@ -17,7 +17,7 @@ class Canned:
     def _result(self) -> PlanResult:
         return PlanResult("On my way.", "go", self.program, Reply(self.program))
 
-    def plan(self, context: str, instruction: str) -> PlanResult:
+    def plan(self, context: str, instruction: str, earlier: tuple = ()) -> PlanResult:
         return self._result()
 
     def repair(self, problem: str, context: str | None = None) -> PlanResult:
@@ -42,3 +42,21 @@ def test_when_nothing_works_the_robot_says_why_and_asks_instead_of_guessing():
     (said,) = [text for _, text in robot.trace.said]
     assert said.startswith("Sorry, I couldn't find what you meant") and said.endswith("another way?")
     assert robot.trace.poses[-1][1:3] == robot.trace.poses[0][1:3]  # and it did not move
+
+
+def test_the_planner_hears_what_was_done_before_so_the_other_one_has_a_meaning():
+    heard: list = []
+
+    class Listening(Canned):
+        def plan(self, context: str, instruction: str, earlier: tuple = ()) -> PlanResult:
+            heard.append(list(earlier))
+            return self._result()
+
+    robot = SimRobot(living_room())
+    agent = Agent(Listening(RIGHT))
+    agent.do("Go to the chair.", robot)
+    agent.do("No, the other one.", robot)
+    assert heard[0] == []
+    (line,) = heard[1]
+    chair = robot.where("chair")[0]
+    assert line.startswith('"Go to the chair."') and f"chair {chair.id}" in line and line.endswith("(done)")

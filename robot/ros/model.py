@@ -129,6 +129,10 @@ def urdf() -> str:
     <joint_name>left_wheel_joint</joint_name><joint_name>right_wheel_joint</joint_name>
     <topic>joint_states</topic><update_rate>30</update_rate>
   </plugin>
+  <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
+    <odom_frame>world</odom_frame><robot_base_frame>base_link</robot_base_frame><dimensions>2</dimensions>
+    <odom_topic>/ground_truth</odom_topic><odom_publish_frequency>20</odom_publish_frequency>
+  </plugin>
 </gazebo>""",
     ]
     return '<?xml version="1.0"?>\n<robot name="sprocket">\n' + "\n".join(parts) + "\n</robot>\n"
@@ -137,6 +141,8 @@ def urdf() -> str:
 REAR_BRIDGES = [f"/{name}/{part}" for name in ("rear_left_camera", "rear_right_camera") for part in ("image",)]
 REAR_INFO = [f"/{name}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo"
              for name in ("rear_left_camera", "rear_right_camera")]
+# Where the robot really is, from the simulator: for measuring localisation, never used by the robot itself.
+GROUND_TRUTH = "/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry"
 
 if __name__ == "__main__":
     print(urdf())

@@ -178,6 +178,29 @@ def range_errors(robot, truth) -> None:  # noqa: ANN001
               f"{len(long) / len(rows):9.0%} {lag:>16}")
 
 
+def tour(robot, truth) -> None:  # noqa: ANN001
+    """Drive to a free spot near each corner of the room and back to the start, the way a robot moves about a home."""
+    import numpy as np
+
+    from robot.sim.world import SimRobot
+
+    sim = SimRobot(truth)
+    nx, ny = sim.inflated.shape
+    free = np.argwhere(~sim.inflated)
+    cell = truth.width / nx
+    for sx, sy in ((1, 1), (1, -1), (-1, -1), (-1, 1)):
+        want = (sx * (truth.width / 2 - 1.2), sy * (truth.height / 2 - 1.0))
+        i, j = min(free, key=lambda c: math.dist(want, (-truth.width / 2 + (c[0] + 0.5) * cell,
+                                                        -truth.height / 2 + (c[1] + 0.5) * cell)))
+        goal = (-truth.width / 2 + (i + 0.5) * cell, -truth.height / 2 + (j + 0.5) * cell)
+        print(f"touring: to ({goal[0]:.1f}, {goal[1]:.1f})", flush=True)
+        try:
+            robot.go_to(goal)
+        except Exception as exc:  # noqa: BLE001 - one unreachable corner does not end the tour
+            print(f"touring: could not reach it: {exc}", flush=True)
+    robot.go_to("start")
+
+
 def annotated(robot, name: str, width: int = 0):  # noqa: ANN001, ANN201
     """A camera's latest frame with each tracked object's box and name drawn on it (RGB array), or None."""
     import numpy as np
@@ -328,6 +351,7 @@ def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, por
             robot._perceive_objects()
             begun = time.monotonic()
             if agent is not None:
+                agent.earlier.clear()  # each case is a conversation of its own
                 record = agent.do(case.say, robot)
                 ok = record.outcome == "done" and bool(case.check(judge(robot, truth)))
                 outcome = ("passed" if ok else "ran, check failed" if record.outcome == "done" else
@@ -380,6 +404,7 @@ def main() -> None:
     parser.add_argument("--perception", action="store_true", help="watch for a while and report what was seen")
     parser.add_argument("--watch", type=float, default=20.0, help="seconds of looking before reporting or a case")
     parser.add_argument("--turn", action="store_true", help="with --perception: turn once, slowly, while watching")
+    parser.add_argument("--tour", action="store_true", help="with --perception: drive round the room while watching")
     parser.add_argument("--interactive", action="store_true", help="the instruction page on --port")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--cases", nargs="+", help="suite cases to run on the full stack")
@@ -419,31 +444,58 @@ def main() -> None:
         elif args.perception:
             import threading
 
-            print(f"watching for {args.watch:.0f} s{', turning slowly' if args.turn else ''}...", flush=True)
-            samples: list[tuple[float, list]] = []
-            end = time.monotonic() + args.watch
+            from nav_msgs.msg import Odometry
 
+            what = "driving round the room" if args.tour else "turning slowly" if args.turn else "standing still"
+            print(f"watching, {what}...", flush=True)
+            samples: list[tuple[float, list]] = []
             corrections: list[tuple[float, float, float]] = []  # map -> odom: how localisation corrects odometry
+            lost: list[tuple[float, float]] = []  # localisation error: metres and degrees from the true pose
+            really: dict[str, tuple[float, float, float]] = {}
+            done = threading.Event()
+
+            def yaw_of(q: object) -> float:
+                return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+            def truth_pose(msg: object) -> None:
+                p = msg.pose.pose
+                really["pose"] = (p.position.x, p.position.y, yaw_of(p.orientation))
+
+            robot.node.create_subscription(Odometry, "/ground_truth", truth_pose, 10)
 
             def sample() -> None:
                 from rclpy.time import Time
 
-                while time.monotonic() < end:
+                while not done.is_set():
                     samples.append((time.monotonic(), robot.perception.objects()))
                     try:
                         tr = robot.tf.lookup_transform("map", "odom", Time()).transform
-                        q = tr.rotation
-                        corrections.append((tr.translation.x, tr.translation.y, math.degrees(math.atan2(
-                            2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)))))
+                        corrections.append((tr.translation.x, tr.translation.y, math.degrees(yaw_of(tr.rotation))))
+                        me = robot.tf.lookup_transform("map", "base_link", Time()).transform
+                        if "pose" in really:
+                            x, y, yaw = really["pose"]
+                            off = math.degrees(yaw_of(me.rotation) - yaw)
+                            lost.append((math.dist((me.translation.x, me.translation.y), (x, y)),
+                                         abs((off + 180) % 360 - 180)))
                     except Exception:  # noqa: BLE001 - not yet localised
                         pass
                     time.sleep(0.5)
 
             sampler = threading.Thread(target=sample, daemon=True)
             sampler.start()
-            if args.turn:
+            if args.tour:
+                tour(robot, truth)
+            elif args.turn:
                 robot.spin(turns=1.0, seconds=args.watch, direction="left")
+            else:
+                time.sleep(args.watch)
+            done.set()
             sampler.join()
+            if lost:
+                metres, degrees = sorted(m for m, _ in lost), sorted(d for _, d in lost)
+                print(f"localisation error against the true pose: median {metres[len(metres) // 2]:.2f} m and "
+                      f"{degrees[len(degrees) // 2]:.1f} deg, worst {metres[-1]:.2f} m and {degrees[-1]:.1f} deg "
+                      f"({len(lost)} samples)", flush=True)
             report(robot, truth)
             steadiness(robot, samples)
             range_errors(robot, truth)

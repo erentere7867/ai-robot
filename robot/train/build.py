@@ -21,7 +21,7 @@ from pathlib import Path
 from robot.agent.api import CATCHABLE, SAFE_BUILTINS, Preempted, api_card, geom
 from robot.agent.context import describe
 from robot.agent.gate import _static
-from robot.agent.planner import RULES
+from robot.agent.planner import RULES, _earlier
 from robot.eval.suite import CASES
 from robot.sim.world import BudgetSpent, SimRobot
 from robot.train.families import FAMILIES, Task
@@ -72,7 +72,7 @@ def example(t: Task, context: str) -> dict:
     answer = f"say: {t.say}\nplan: {t.plan}\n```python\n{t.program.rstrip()}\n```"
     return {"family": t.family, "category": t.category, "instruction": t.instruction,
             "messages": [{"role": "system", "content": f"{RULES}\n\nAPI:\n{api_card()}"},
-                         {"role": "user", "content": f"{context}\nInstruction: {t.instruction}"},
+                         {"role": "user", "content": f"{context}{_earlier(t.earlier)}\nInstruction: {t.instruction}"},
                          {"role": "assistant", "content": answer}]}
 
 

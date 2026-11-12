@@ -98,20 +98,53 @@ def test_the_vision_model_has_the_last_word_on_a_new_object():
     assert [(t.label, t.id) for t in tr.objects()] == [("table", table.id)]
 
 
+def _pixel(cam, bx: float, by: float, up: float = 0.0) -> tuple[float, float]:
+    """The pixel showing robot-frame point (bx, by) at height `up` (pinhole, as the simulator renders)."""
+    dx, dy = bx - cam.x, by - cam.y
+    fwd = dx * math.cos(cam.yaw) + dy * math.sin(cam.yaw)
+    left = -dx * math.sin(cam.yaw) + dy * math.cos(cam.yaw)
+    return cam.width / 2 - left / fwd * cam.focal, cam.height / 2 + (cam.z - up) / fwd * cam.focal
+
+
+def _edges(cam, bx: float, by: float, r: float) -> tuple[float, float]:
+    """The image columns of a round thing's two sides."""
+    bearing, half = math.atan2(by - cam.y, bx - cam.x) - cam.yaw, math.asin(r / math.dist((bx, by), (cam.x, cam.y)))
+    return tuple(cam.width / 2 - math.tan(bearing + s * half) * cam.focal for s in (1, -1))
+
+
 def test_size_and_place_hold_near_the_edge_of_the_wide_lens():
     cam = RIG["rear_left_camera"]
-    off, d, half = math.radians(60), 2.0, 0.15  # a 0.3 m wide thing 60 degrees off the lens axis, near face 2 m away
+    off, far, r = math.radians(60), 2.2, 0.15  # a round thing 0.3 m across, 2.2 m away, 60 degrees off the lens axis
+    middle = cam.to_base(far * math.cos(off), far * math.sin(off), 0.0)[:2]
+    # the lowest point of its outline: its nearest point along the lens axis
+    foot = _pixel(cam, middle[0] - r * math.cos(cam.yaw), middle[1] - r * math.sin(cam.yaw))
+    u1, u2 = _edges(cam, *middle, r)
+    place = locate(cam, (u1, foot[1] - 40, u2, foot[1]), foot=foot)
+    assert abs(place.radius - r) < 0.03 and math.dist((place.x, place.y), middle) < 0.05
 
-    def column(angle: float) -> float:  # image column of a direction from the camera (pinhole)
-        return cam.width / 2 - math.tan(angle) * cam.focal
 
-    u1, u2 = column(off + half / d), column(off - half / d)
-    v2 = cam.height / 2 + cam.z / (d * math.cos(off)) * cam.focal  # the floor line under its face
-    place = locate(cam, (u1, v2 - 40, u2, v2))
-    x, y, r = place.x, place.y, place.radius
-    assert abs(r - half) < 0.03
-    expected = (cam.x + (d + r) * math.cos(cam.yaw + off), cam.y + (d + r) * math.sin(cam.yaw + off))
-    assert math.dist((x, y), expected) < 0.1
+def test_a_person_straight_behind_is_put_in_one_place_by_both_rear_cameras():
+    """66-73 degrees off both rear lenses, half hidden by a box in front, cut by one picture's edge: the two cameras
+    put them 1 m apart from their boxes' bottom middles. From their visible foot and the lidar's view of their legs,
+    both find the same place."""
+    person, r = (-2.91, 0.2), 0.3
+    leg = (-2.787, 0.27)  # the leg both cameras see the foot of, and the lidar the front of
+    angles = -math.pi + np.arange(500) * 2 * math.pi / 500
+    deg = np.degrees(np.mod(angles, 2 * math.pi))
+    ranges = np.full(500, 4.5, dtype=np.float32)  # the wall
+    ranges[(deg >= 174) & (deg < 175.6)] = 2.80  # the legs
+    ranges[(deg >= 175.6) & (deg < 177)] = 3.54  # the sofa behind, between them
+    ranges[(deg >= 177) & (deg < 195)] = 1.43  # a box in front of the person, hiding their other leg
+    places = []
+    for name in ("rear_left_camera", "rear_right_camera"):
+        cam = RIG[name]
+        u1, u2 = sorted(_edges(cam, *person, r))
+        foot = _pixel(cam, *leg)
+        place = locate(cam, (max(u1, 0), 100, min(u2, cam.width), foot[1]), scan=(ranges, -math.pi, 2 * math.pi / 500),
+                       foot=foot, person=True)
+        assert place.how == "lidar" and math.dist((place.x, place.y), person) < 0.15, (name, place)
+        places.append((place.x, place.y))
+    assert math.dist(*places) < 0.05
 
 
 def test_depth_reads_the_near_face_of_an_open_thing():
@@ -311,3 +344,29 @@ def test_the_vision_model_can_tell_a_backpack_the_detector_took_for_a_person():
     (track,) = tr.objects()
     tr.verify(track, "backpack")
     assert track.label == "backpack" and not track.person
+
+
+def test_sightings_made_while_driving_join_their_thing_instead_of_making_twins():
+    rng = np.random.default_rng(3)
+    tr = Tracker()
+    for k in range(40):  # the sofa at (-1.4, 1.8), seen while driving: 0.25 m of scatter, sometimes called a chair
+        x, y = -1.4 + rng.normal(0, 0.25), 1.8 + rng.normal(0, 0.25)
+        tr.update([Detection("sofa" if k % 4 else "chair", x, y, 0.5, score=0.6, sigma=0.3)], k * 0.2)
+    assert len(tr.objects()) == 1 and math.dist((tr.objects()[0].x, tr.objects()[0].y), (-1.4, 1.8)) < 0.2
+    still = Tracker()  # seen precisely while still, a backpack 0.45 m from a chair is a backpack
+    for k in range(5):
+        still.update([Detection("chair", 2.2, 1.2, 0.35, score=0.8, sigma=0.03),
+                      Detection("backpack", 2.2, 1.65, 0.2, score=0.7, sigma=0.03)], k * 0.2)
+    assert sorted(t.label for t in still.objects()) == ["backpack", "chair"]
+
+
+def test_a_crop_for_naming_shows_only_its_thing():
+    from robot.ros.perceive import _only
+
+    picture = np.zeros((200, 300, 3), dtype=np.uint8)
+    picture[50:150, 100:200] = (30, 60, 200)  # a blue chair
+    picture[110:140, 120:150] = (220, 30, 30)  # a red ball in front of it
+    chair = _only(picture, (100, 50, 200, 150), [(120, 110, 150, 140)])
+    assert not ((chair[..., 0] > 200) & (chair[..., 1] < 50)).any()  # no red left in the chair's picture
+    ball = _only(picture, (120, 110, 150, 140), [(100, 50, 200, 150)])
+    assert ((ball[..., 0] > 200) & (ball[..., 1] < 50)).any()  # the bigger chair box is not painted over the ball

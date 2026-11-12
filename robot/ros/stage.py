@@ -169,7 +169,7 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
     one, and robot_localization's EKF fuses the wheels with the gyro into the odometry (robot/ros/model.py). The robot
     localises in `map_file` (a map it built: robot/ros/explore.py), else in the simulator's own map of
     the scene; with `slam` it has no map and builds one as it goes."""
-    from robot.ros.model import EKF, REAR_BRIDGES, REAR_INFO, urdf
+    from robot.ros.model import EKF, GROUND_TRUTH, REAR_BRIDGES, REAR_INFO, urdf
 
     clear()
     sdf, yaml = export(world, out)
@@ -180,7 +180,8 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
     s = world.scene.start
     args = [f"world:={sdf}", f"map:={map_file or yaml}", f"x_pose:={s.x}", f"y_pose:={s.y}",
             f"yaw:={math.radians(s.yaw)}", f"robot_sdf:={body}", "robot_name:=sprocket", f"headless:={not gui}",
-            "use_rviz:=False", "use_keepout_zones:=False", "use_speed_zones:=False", f"slam:={slam}"]
+            "use_rviz:=False", "use_keepout_zones:=False", "use_speed_zones:=False", f"slam:={slam}",
+            f"params_file:={_nav2_params(out)}"]
     env = {**os.environ, "QT_QPA_PLATFORM": "xcb"}  # Qt windows draw through X11 under WSLg
     if os.path.exists("/dev/dxg"):  # WSL: Mesa falls back to drawing on the CPU (llvmpipe) unless told to use the
         env.update(GALLIUM_DRIVER="d3d12", MESA_D3D12_DEFAULT_ADAPTER_NAME="NVIDIA")  # GPU through Direct3D 12
@@ -190,29 +191,49 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
                               stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)]
     sim_time = ["--ros-args", "-p", "use_sim_time:=true"]
     for command in (["ros2", "run", "ros_gz_image", "image_bridge", *REAR_BRIDGES, *sim_time],
-                    ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *REAR_INFO, *sim_time],
+                    ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *REAR_INFO, GROUND_TRUTH, *sim_time],
                     ["ros2", "run", "robot_localization", "ekf_node", "--ros-args", "--params-file", str(ekf)]):
         procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True))
     return Launched(procs)
 
 
+# Localisation tuned to this robot: Nav2's defaults suit a 60-beam view and wheel-only odometry. With them, AMCL was
+# 0.10 m and 1.2 degrees off the true pose while driving (worst 0.25 m and 6 degrees), and every object seen in that
+# moment was placed as far off. Sprocket's lidar gives 500 beams, and its odometry is fused with the gyro.
+AMCL = {"max_beams": 150, "update_min_d": 0.1, "update_min_a": 0.1, "alpha1": 0.1, "alpha2": 0.1, "alpha3": 0.1,
+        "alpha4": 0.1, "z_hit": 0.9, "z_rand": 0.1, "sigma_hit": 0.1, "transform_tolerance": 0.3}
+
+
+def _nav2_params(out: Path) -> Path:
+    """Nav2's parameters with AMCL tuned (AMCL above), written next to the world."""
+    import yaml
+
+    base = Path("/opt/ros/lyrical/share/nav2_bringup/params/nav2_params.yaml")
+    params = yaml.safe_load(base.read_text())
+    params["amcl"]["ros__parameters"].update(AMCL)
+    path = out / "nav2_params.yaml"
+    path.write_text(yaml.safe_dump(params, sort_keys=False))
+    return path
+
+
 def _wait_for_world(out: Path) -> Path:
     """A folder holding a `gz` that waits for its world file before starting the real one. Nav2's simulation launch
     starts `gz sim` on the world at the same moment as the xacro that writes it; Gazebo started first and exited at
-    once in three launches out of three on one evening, taking Nav2 down with it."""
+    once in three launches out of three on one evening, taking Nav2 down with it. Written in Ruby, like the real
+    `gz`: the launch starts the 3D window as `ruby <gz> sim -g`, and a shell script there killed the window."""
     import shutil
 
     real = shutil.which("gz")
     folder = out / "bin"
     folder.mkdir(exist_ok=True)
     shim = folder / "gz"
-    shim.write_text(f"""#!/usr/bin/env bash
-world="${{@: -1}}"
-case "$world" in /tmp/nav2_*.sdf)
-  for i in $(seq 1 300); do [ -s "$world" ] && break; sleep 0.1; done
-  sleep 0.5;;
-esac
-exec {real} "$@"
+    shim.write_text(f"""#!/usr/bin/env ruby
+world = ARGV.last.to_s
+if world.start_with?("/tmp/nav2_") && world.end_with?(".sdf")
+  300.times {{ break if File.size?(world); sleep 0.1 }}
+  sleep 0.5
+end
+exec("{real}", *ARGV)
 """)
     shim.chmod(0o755)
     return folder

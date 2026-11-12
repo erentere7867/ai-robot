@@ -3,18 +3,26 @@
 The front RGB-D camera reads the depth inside the box: the nearest depth a solid cluster of pixels agrees on, the object's near face, because through an
 open thing (a table's frame, a chair's legs) the middle of the box shows the wall behind. A box whose depth points all
 lie on the floor plane is the floor itself (the detector sometimes calls a stretch of wooden floor a table) and is
-dropped. The rear cameras have no depth (Fable): the floor estimate (the box's bottom edge, where the object meets the
-floor) gives the range, and the lidar return in the box's direction refines it when the two agree within the floor
-estimate's own error. The window is tight because the lidar's beam passes between chair legs and under a table's top
-and hits what stands behind: with a 35% window, lidar ranges ran a median 11-18% long while the robot turned, and the
-floor estimate alone was within 7%. The lidar is not used at all for things lower than its beam (a ball).
+dropped. The rear cameras have no depth: the floor estimate gives the range, from where the thing meets the floor,
+the lowest point of its outline (the detector's mask). That point's image row gives its distance along the lens axis
+and its column how far to the side. The box's bottom middle served before, and on the 155-degree rear lenses it is not
+where the thing stands: a person straight behind the robot, 66-73 degrees off both rear lenses, was put 0.6 m too far
+by one camera (a box hid half of them, so the box's middle missed their visible foot by 56 pixels) and 0.4 m too near
+by the other (their box cut by the picture's edge), and the track jumped between the two. The lidar refines the range:
+of its returns across the thing's span, those that agree with the floor estimate are the thing (its legs, its front);
+one beam through the box's middle passed between legs or hit what stood in front. The window is tight because the
+beam passes between chair legs and under a table's top and hits what stands behind: with a 35% window, lidar ranges ran
+a median 11-18% long while the robot turned, and the floor estimate alone was within 7%. The lidar is not used at all
+for things lower than its beam (a ball).
 
 The angle the box spans at that range gives its size (pixels are not a fixed angle on a wide lens: at the edge of the
-155-degree rear lens one pixel is a quarter of what it is in the middle); its centre lies one radius behind the visible
-surface. A box cut by the image's side edge is placed from its visible part: a wide thing close by (a coffee table
-1.5 m away spans 35 degrees) can straddle the seam between two cameras so that neither sees it whole, and the tracker
-joins the two parts by place and size. Each place comes with its uncertainty, so the tracker can weigh a depth
-reading over a floor estimate.
+155-degree rear lens one pixel is a quarter of what it is in the middle). Its middle lies one radius beyond its nearest
+point: along the lens axis for a camera's view (the lowest point of a round thing's outline, and the nearest depth, are
+its nearest along the axis), away from the lidar for a lidar return. A person's middle lies BODY beyond, however wide
+their arms make the box. A box cut by the image's side edge is placed from its visible part: a wide thing close by (a
+coffee table 1.5 m away spans 35 degrees) can straddle the seam between two cameras so that neither sees it whole, and
+the tracker joins the two parts by place and size. Each place comes with its uncertainty, so the tracker can weigh a
+depth reading over a floor estimate.
 """
 
 from __future__ import annotations
@@ -28,8 +36,13 @@ from robot.perception.rig import Camera
 from robot.ros.model import LIDAR_Z
 
 LIDAR_AGREES = 0.12  # the lidar is trusted within this fraction of the floor estimate (its middle half was within 7%)
+# A person's middle lies this far beyond their nearest point: their arms make their box wide, but the body is about a
+# quarter metre deep (the lidar found a standing person's legs 0.12 m nearer than their middle).
+BODY = 0.12
 # One standard deviation of a range, metres, by how it was found: a constant part plus a part growing with range.
-SIGMA = {"depth": (0.03, 0.03), "lidar": (0.03, 0.02), "floor": (0.05, 0.06)}
+# From driving tours against the true room: depth and lidar ranges held within about 5%, floor estimates spread 15-25%
+# (a chair's floor estimates scattered 0.4 m while claiming 0.18 m, and pulled the chair half a metre off).
+SIGMA = {"depth": (0.03, 0.04), "lidar": (0.03, 0.04), "floor": (0.05, 0.10)}  # (0.15 merged neighbours)
 
 
 @dataclass(frozen=True)
@@ -67,15 +80,34 @@ def near_face(depths: np.ndarray, depth_band: float = 0.15) -> float | None:
     return float(np.median(s[first:first + within[first]]))
 
 
+def lidar_near(scan: tuple[np.ndarray, float, float] | None, lo: float, hi: float,
+               guess: float) -> tuple[float, float] | None:
+    """The thing's own lidar returns: those between bearings lo and hi (robot frame) whose range agrees with the floor
+    estimate `guess`. Gives the nearest one's range and the middle of their bearings. Across the whole span, not one
+    beam through the middle: behind the robot that beam passed a person's legs and hit a box in front of them, while
+    their legs showed two degrees aside."""
+    if scan is None:
+        return None
+    ranges, angle_min, step = scan
+    angles = angle_min + np.arange(len(ranges)) * step
+    gap = math.atan2(math.sin(hi - lo), math.cos(hi - lo))
+    off = np.arctan2(np.sin(angles - lo - gap / 2), np.cos(angles - lo - gap / 2))
+    mine = (np.abs(off) <= abs(gap) / 2) & np.isfinite(ranges) &         (np.abs(ranges - guess) <= LIDAR_AGREES * guess + 0.05)
+    if not mine.any():
+        return None
+    return float(ranges[mine].min()), lo + gap / 2 + float(np.mean(off[mine]))
+
+
 def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarray | None = None,
-           scan: tuple[np.ndarray, float, float] | None = None) -> Place | None:
+           scan: tuple[np.ndarray, float, float] | None = None, foot: tuple[float, float] | None = None,
+           person: bool = False) -> Place | None:
     """Where the object in pixel box (x1, y1, x2, y2) stands, in the robot frame; None when out of reach or when the
-    box holds only floor."""
+    box holds only floor. `foot`: the pixel where its outline meets the floor (the lowest point of the detector's
+    mask), else the box's bottom middle. `person`: their middle lies BODY beyond their nearest point, not a radius."""
     x1, y1, x2, y2 = box
-    u = (x1 + x2) / 2
-    bearing = cam.bearing(u)
-    surface: float | None = None  # horizontal distance from the camera to the object's near face
-    how = "depth"
+    a, b = cam.bearing(x1), cam.bearing(x2)
+    middle, span = (a + b) / 2, abs(a - b)  # the middle direction: on a wide lens the middle pixel is not
+    axis = (math.cos(cam.yaw), math.sin(cam.yaw))
     if depth is not None and cam.depth:
         r0, r1 = int(y1), max(int(y2), int(y1) + 1)
         patch = depth[r0:r1, int(x1):max(int(x2), int(x1) + 1)]
@@ -85,31 +117,41 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
             heights = cam.z - down * patch  # height above the floor of each pixel's point
             if np.percentile(heights[good], 90) < 0.04:
                 return None  # all floor
-            d = near_face(patch[good & (heights > 0.03)])
+            d = near_face(patch[good & (heights > 0.03)])  # along the lens axis, as depth cameras measure
             if d is not None:
-                px, py, _ = cam.point(u, (y1 + y2) / 2, d)
-                surface = math.hypot(px - cam.x, py - cam.y)
-    if surface is None:
-        # where it meets the floor, unless the box runs off the bottom of the picture: then the picture's edge is not
-        # the thing's foot, and the estimate came out half the true range
-        floor = cam.floor(u, y2) if y2 < cam.height - 2 else None
-        guess = math.hypot(floor[0] - cam.x, floor[1] - cam.y) if floor else None
-        lidar = lidar_range(scan, bearing)
-        if floor is not None:  # how tall is it? the lidar's beam passes over anything lower than the lidar
-            forward = (floor[0] - cam.x) * math.cos(cam.yaw) + (floor[1] - cam.y) * math.sin(cam.yaw)
-            if cam.point(u, y1, forward)[2] < LIDAR_Z:
-                lidar = None  # (a 25 cm ball under the 27 cm beam took the wall's range behind it, 1 m too far)
-        if lidar is not None:  # from the robot's centre; to the camera, roughly the camera's offset less
-            lidar -= math.hypot(cam.x, cam.y) * math.cos(bearing - cam.yaw)
-        if lidar is not None and guess is not None and abs(lidar - guess) <= LIDAR_AGREES * guess + 0.05:
-            surface, how = lidar, "lidar"
-        else:
-            surface, how = guess, "floor"
-    if surface is None or not 0.15 <= surface <= 6.0:
+                seen = d / math.cos(middle - cam.yaw)
+                radius = _radius(seen, span)
+                forward = d + (BODY if person else radius)  # its middle, further along the axis on the middle ray
+                x, y, _ = cam.to_base(forward, forward * math.tan(middle - cam.yaw), 0.0)
+                return _place(x, y, radius, "depth", seen)
+    # where it meets the floor, unless the box runs off the bottom of the picture: then the picture's edge is not the
+    # thing's foot, and the estimate came out half the true range
+    fu, fv = foot if foot is not None else ((x1 + x2) / 2, y2)
+    contact = cam.floor(fu, fv) if y2 < cam.height - 2 else None
+    if contact is None:
         return None
-    span = abs(cam.bearing(x1) - cam.bearing(x2))
-    radius = max(0.04, min(1.0, surface * math.tan(span / 2)))
-    reach = surface + radius
+    seen = math.hypot(contact[0] - cam.x, contact[1] - cam.y)
+    radius = _radius(seen, span)
+    behind = BODY if person else radius
+    forward = (contact[0] - cam.x) * axis[0] + (contact[1] - cam.y) * axis[1]
+    if cam.point(fu, y1, forward)[2] >= LIDAR_Z:  # the lidar's beam passes over anything lower than the lidar
+        # (a 25 cm ball under the 27 cm beam took the wall's range behind it, 1 m too far)
+        lo, hi = (math.atan2(cam.y + seen * math.sin(e), cam.x + seen * math.cos(e)) for e in (a, b))  # from the lidar
+        lidar = lidar_near(scan, lo, hi, math.hypot(*contact))
+        if lidar is not None:  # the nearest of its returns: its middle lies beyond, away from the lidar
+            reach, bearing = lidar[0] + behind, lidar[1]
+            return _place(reach * math.cos(bearing), reach * math.sin(bearing), radius, "lidar", lidar[0])
+    # the lowest point of a thing's outline is its nearest along the lens axis: its middle lies further along the axis
+    return _place(contact[0] + behind * axis[0], contact[1] + behind * axis[1], radius, "floor", seen)
+
+
+def _radius(seen: float, span: float) -> float:
+    """The radius of a thing whose near side is `seen` metres away and which spans `span` radians."""
+    return max(0.04, min(1.0, seen * math.tan(span / 2)))
+
+
+def _place(x: float, y: float, radius: float, how: str, seen: float) -> Place | None:
+    if not 0.15 <= seen <= 6.0:
+        return None
     base, per_metre = SIGMA[how]
-    return Place(cam.x + reach * math.cos(bearing), cam.y + reach * math.sin(bearing), radius, how,
-                 base + per_metre * surface)
+    return Place(x, y, radius, how, base + per_metre * seen)

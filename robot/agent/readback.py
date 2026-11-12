@@ -30,8 +30,9 @@ def _thing(target: Any, here: tuple[float, float, float]) -> str:
     """A target in words, as seen from where the robot was when the call started."""
     if isinstance(target, list) and target:
         target = target[0]
-    if isinstance(target, Object):
-        return f"the {target.color} {target.label}".replace("  ", " ") if target.color else f"the {target.label}"
+    if isinstance(target, Object):  # with its id, so a later "the other one" knows which one this was
+        return f"the {target.color} {target.label} {target.id}".replace("  ", " ") if target.color else \
+            f"the {target.label} {target.id}"
     if isinstance(target, str):
         return f'"{target}"'
     if isinstance(target, Pose):

@@ -23,16 +23,24 @@ the API below.
 
 Rules:
 - Use only robot, geom, math, the four exceptions and plain Python. No imports, no print.
-- Prefer skills: search to find something, orbit to circle something, follow to follow a person, go_to to drive \
-somewhere. Use move, turn and spin for plain motion, with directions as words.
-- The table of known objects gives each object's id, colour, distance and side as seen from the robot. Use \
-robot.obj(id) for an object in the table.
-- robot.where looks through everything seen so far; robot.detect only what is in view now; robot.search goes looking.
-- "Me" and "the user" are robot.user().
-- Before leaving a place you must come back to, call robot.save_place("start"); robot.go_to("start") returns there.
-- If two things match the instruction equally well, ask with robot.ask.
+- Known objects are in the table, by id: use robot.obj(id). Use robot.where or robot.search for anything else.
+- Every turn and move needs its direction in words: robot.turn(90, "left"), robot.move(1.0, "backward"). "Back up"
+  is robot.move(metres, "backward"); "spin" is robot.spin(turns), on the spot.
+- go_to(thing, distance=0.3): distance is how far short of it to stop, never the thing's own distance.
+- Behind, in front of, left or right of a thing: robot.go_to(robot.spot(thing, side="behind")).
+- Around a thing: robot.orbit(thing, laps=2, direction="right"); "right" is clockwise, "left" anticlockwise.
+- To look for something not in the table: robot.search(description, area=...): "everywhere" unless a room is named.
+- Whether a thing is open, on, empty or the like: robot.check("Is the door open?", thing). Free space in front:
+  robot.clearance("ahead").
+- What the user told you to remember: robot.recall(words). Where you last saw a thing: robot.where(description)[0],
+  with .position and .last_seen.
+- "Me" and "the user" are robot.user(). "Come here": robot.go_to(robot.user(), distance=0.5).
+- "start" is saved by itself when a task begins: robot.go_to("start") comes back to it. Never save_place("start").
+- Do only what was asked: come back to "start" only when told to.
+- "Earlier" lists what you did before. Use it for "the other one", "that one", "again" or a correction ("no, ...").
+- Ask with robot.ask only when two things fit equally well and nothing earlier decides.
 - If the robot cannot do it (it has wheels but no arms, and cannot fly or climb), say so with robot.say and stop.
-- Answer the user with robot.say. When the task is done, say what you did.
+- Keep the program short. When it is done, say what you did with robot.say.
 
 Answer in exactly this form:
 say: <one short sentence to speak now>
@@ -48,81 +56,95 @@ line ::= [^\n`]*
 
 
 def _context(room: str, objects: list[tuple[int, str, str, float, float, float]], user: int | None = None,
-             others: str = "none") -> str:
+             others: str = "none", earlier: tuple[str, ...] = ()) -> str:
     """A worked example's situation, built by the same code as real ones: (id, label, colour, metres, bearing, seen)."""
     table = scene_table([Object(i, label, (0.0, 0.0), d, b, side(b), 0.3, color, seen)
                          for i, label, color, d, b, seen in objects], user)
-    return f"Robot: in room {room}, battery 85%. Other rooms: {others}.\nKnown objects:\n{table}"
+    return f"Robot: in room {room}, battery 85%. Other rooms: {others}.\nKnown objects:\n{table}" + _earlier(earlier)
 
 
+def _earlier(earlier: tuple[str, ...] | list[str]) -> str:
+    return ("\nEarlier:\n" + "\n".join(f"- {line}" for line in earlier)) if earlier else ""
+
+
+# Each example teaches one pattern the untrained model got wrong (directions as words, spot for behind or in front,
+# orbit, coming back to "start", following, searching, the conversation so far). None solves a task in the suite.
 SEEDS: list[tuple[str, str, str]] = [
+    (_context("lounge", [(2, "sofa", "grey", 2.1, 60, 0), (5, "lamp", "white", 3.0, -40, 0)]),
+     "Go and wait behind the sofa.",
+     """say: Going behind the sofa.
+plan: Find the free spot behind the sofa and drive there.
+```python
+robot.go_to(robot.spot(robot.obj(2), side="behind"))
+robot.say("I'm behind the sofa.")
+```"""),
+    (_context("hall", []),
+     "Turn right 45 degrees, then drive forward a metre and a half.",
+     """say: Turning, then driving forward.
+plan: Turn right 45 degrees, then move forward 1.5 metres.
+```python
+robot.turn(45, "right")
+robot.move(1.5, "forward")
+robot.say("Done: I turned right and drove a metre and a half.")
+```"""),
+    (_context("conservatory", [(7, "plant", "green", 1.8, -25, 0)]),
+     "Do a lap around the plant, clockwise, then come back.",
+     """say: Going round the plant.
+plan: Orbit the plant once clockwise, then return to where the task began.
+```python
+robot.orbit(robot.obj(7), laps=1, direction="right")
+robot.go_to("start")
+robot.say("I went round the plant and came back.")
+```"""),
+    (_context("kitchen", [(3, "cup", "red", 0.4, 10, 0), (8, "cup", "green", 2.2, -70, 0)],
+              earlier=('"Go to the cup": you drove to the red cup 3 (1.6 m away); said "Here." (done)',)),
+     "No, the other one.",
+     """say: Going to the other cup.
+plan: Earlier I went to cup 3, so go to the other cup, 8.
+```python
+robot.go_to(robot.obj(8), distance=0.3)
+robot.say("Here is the other cup, the green one.")
+```"""),
+    (_context("study", [(4, "desk", "brown", 1.5, 0, 0)], others="hall, kitchen"),
+     "Is there an umbrella anywhere?",
+     """say: Let me look for an umbrella.
+plan: It is not in the table, so search everywhere and report.
+```python
+umbrella = robot.search("umbrella", area="everywhere")
+if umbrella:
+    robot.say(f"Yes, there is a {umbrella.color} umbrella in the {robot.room()}.")
+else:
+    robot.say("I couldn't find an umbrella.")
+```"""),
+    (_context("hall", [(6, "person", "", 1.4, 20, 0)], user=6),
+     "Walk with me for a minute.",
+     """say: I'll walk with you.
+plan: Follow the user at a metre for sixty seconds.
+```python
+me = robot.user()
+if me:
+    robot.follow(me, distance=1.0, seconds=60)
+    robot.say("That was a minute.")
+else:
+    robot.say("I can't see you.")
+```"""),
+    (_context("playroom", [(3, "toy", "green", 0.9, -20, 0), (8, "toy", "yellow", 2.6, 75, 0)]),
+     "Bring me to a toy.",
+     """say: Which toy?
+plan: Two toys fit equally, so ask which one, then go to it.
+```python
+answer = (robot.ask("The green toy or the yellow one?") or "green").lower()
+toy = robot.obj(8) if "yellow" in answer else robot.obj(3)
+robot.go_to(toy, distance=0.3)
+robot.say(f"Here is the {toy.color} toy.")
+```"""),
     (_context("hall", [(2, "lamp", "white", 2.3, 40, 0)]),
      "How far away is the lamp?",
      """say: Let me check.
-plan: Look the lamp up in memory and report its distance and side.
+plan: Read the lamp's distance and side from the table.
 ```python
-lamps = robot.where("lamp")
-if lamps:
-    robot.say(f"The lamp is {lamps[0].distance:.1f} metres away, {lamps[0].side} of me.")
-else:
-    robot.say("I haven't seen a lamp.")
-```"""),
-    (_context("study", [(4, "person", "", 1.2, -100, 0), (7, "window", "", 3.1, 10, 0)], user=4),
-     "Drive to the window, then turn to face me.",
-     """say: Heading to the window.
-plan: Go to the window from the table, then face the user.
-```python
-try:
-    robot.go_to(robot.obj(7))
-    robot.face(robot.user())
-    robot.say("I'm at the window.")
-except PathBlocked:
-    robot.say("Something is blocking the way to the window.")
-```"""),
-    (_context("garden room", []),
-     "Stay here until you see a dog, then bark.",
-     """say: I'll keep watch for a dog.
-plan: Wait until a dog is in view, face it and bark.
-```python
-dog = robot.wait_for("dog")
-robot.face(dog)
-robot.say("Woof!")
-```"""),
-    (_context("bedroom", [(5, "shoe", "red", 1.4, 130, 12)]),
-     "Turn to look at the shoe and tell me what it's made of.",
-     """say: Let me look at the shoe.
-plan: Face the shoe from the table, ask the vision model, and report.
-```python
-shoe = robot.obj(5)
-robot.face(shoe)
-material = robot.describe(shoe, question="What is this shoe made of?")
-robot.say(f"The shoe looks like {material}.")
-```"""),
-    (_context("playroom", [(3, "toy", "green", 0.9, -20, 0), (8, "toy", "yellow", 2.6, 75, 0)]),
-     "Pick a toy for me to play with.",
-     """say: Let me find you a toy.
-plan: Ask whether the user wants the closest or the biggest toy, then go to it.
-```python
-toys = robot.where("toy")
-if not toys:
-    robot.say("I don't see any toys.")
-else:
-    answer = (robot.ask("Do you want the closest toy or the biggest one?") or "closest").lower()
-    toy = max(toys, key=lambda t: t.radius) if "big" in answer else min(toys, key=lambda t: t.distance)
-    robot.go_to(toy, distance=0.3)
-    robot.say(f"Here is the {toy.color} {toy.label}.")
-```"""),
-    (_context("hall", [(6, "person", "", 1.0, 0, 0)], user=6, others="garage, kitchen"),
-     "Go and see whether my bike is in the garage, then come back.",
-     """say: I'll go and look for your bike.
-plan: Save this spot, search the garage for the bike, and always come back to report.
-```python
-robot.save_place("start")
-try:
-    bike = robot.search("bike", area="garage")
-finally:
-    robot.go_to("start")
-robot.say("Your bike is in the garage." if bike else "I couldn't find a bike in the garage.")
+lamp = robot.obj(2)
+robot.say(f"The lamp is {lamp.distance:.1f} metres away, {lamp.side} of me.")
 ```"""),
 ]
 
@@ -168,8 +190,10 @@ class LocalPlanner:
             raise FormatError(reply.text[:200])
         return PlanResult(match["say"].strip(), match["plan"].strip(), match["program"].rstrip() + "\n", reply)
 
-    def plan(self, context: str, instruction: str) -> PlanResult:
-        self.messages = [*self.prefix, {"role": "user", "content": f"{context}\nInstruction: {instruction}"}]
+    def plan(self, context: str, instruction: str, earlier: list[str] | tuple[str, ...] = ()) -> PlanResult:
+        """`earlier`: one line for each of the last few instructions and what the robot did about them."""
+        self.messages = [*self.prefix, {"role": "user",
+                                        "content": f"{context}{_earlier(earlier)}\nInstruction: {instruction}"}]
         return self._write()
 
     def judge(self, instruction: str, readback: str, threshold: float | None = None) -> tuple[bool, float]:

@@ -29,8 +29,10 @@ class Task:
     plan: str
     program: str
     check: Callable[[SimRobot], bool]
+    earlier: tuple[str, ...] = ()  # the conversation before this instruction, as the planner is shown it
 
 
+NL = "\n"  # a line break inside a program text
 FAMILIES: list[tuple[str, str, Callable[[random.Random], Task | None]]] = []
 
 
@@ -974,3 +976,86 @@ def unknown_thing(rng: random.Random) -> Task | None:
                 f'thing = robot.where("{word}") or robot.search("{word}", "here")\nif thing:\n    robot.go_to(thing)\n'
                 f'else:\n    robot.say("I couldn\'t find a {word}.")\n',
                 lambda s: said(s, "couldn't", "can't", "no ") and s.trace.bumps == 0)
+
+
+# ---- the conversation so far ----------------------------------------------------------------------------------
+def _after(scene: Scene, program: str, instruction: str) -> tuple[Scene, str] | None:
+    """Run a first instruction's program in the room: the room with the robot where it ended, and the "Earlier" line
+    the planner would be shown for it (the same readback the agent records)."""
+    from dataclasses import replace
+
+    from robot.agent.api import Pose
+    from robot.agent.gate import check
+    from robot.agent.readback import readback
+
+    gate = check(program, SimRobot(scene))
+    if not gate.ok:
+        return None
+    _, x, y, yaw = gate.trace.poses[-1]
+    return (replace(scene, start=Pose(x, y, math.degrees(yaw))),
+            f'"{instruction}": {readback(gate.trace, gate.ended_by)} (done)')
+
+
+@family("conversation")
+def the_other_one(rng: random.Random) -> Task | None:
+    """Two things of a kind; the robot went to one; "no, the other one" means the one it did not go to."""
+    got = setup(rng)
+    if not got:
+        return None
+    scene, probe = got
+    kinds: dict[str, list[Thing]] = {}
+    for t in known(probe, nameable=False):
+        kinds.setdefault(t.label, []).append(t)
+    pairs = [k for k in kinds.values() if len(k) >= 2]
+    if not pairs:
+        return None
+    first, other = rng.sample(rng.choice(pairs), 2)
+    label = first.label
+    asked = rng.choice([f"Go to the {label}.", f"Take me to the {label}.", f"Drive to the {label}."])
+    went = f'robot.go_to(robot.obj({first.id}), distance=0.3)' + NL + 'robot.say("Here.")' + NL
+    after = _after(scene, went, asked)
+    if after is None:
+        return None
+    scene, line = after
+    text = rng.choice(["No, the other one.", f"Not that one, the other {label}.", f"Wrong {label}. The other one.",
+                       f"I meant the other {label}.", "The other one, please."])
+    program = f'robot.go_to(robot.obj({other.id}), distance=0.3)' + NL + f'robot.say("Here is the other {label}.")' + NL
+    t = task("the_other_one", "conversation", scene, spoken(rng, text), f"Going to the other {label}.",
+             f"Earlier I went to {label} {first.id}, so go to the other one, {other.id}.", program,
+             lambda s: near(s, other.id))
+    t.earlier = (line,)
+    return t
+
+
+@family("conversation")
+def again(rng: random.Random) -> Task | None:
+    """A motion just done; "again" means the same program once more, from where the robot is now."""
+    got = setup(rng)
+    if not got:
+        return None
+    scene, _ = got
+    asked, program, kind = rng.choice([("Turn left 90 degrees.", 'robot.turn(90, "left")' + NL, "turn"),
+                                       ("Turn right 45 degrees.", 'robot.turn(45, "right")' + NL, "turn"),
+                                       ("Spin around once.", "robot.spin(1)" + NL, "spin"),
+                                       ("Drive forward half a metre.", 'robot.move(0.5, "forward")' + NL, "move")])
+    after = _after(scene, program, asked)
+    if after is None:
+        return None
+    scene, line = after
+    text = rng.choice(["Do that again.", "Again!", "Once more.", "Same again, please.", "Do it one more time."])
+    if kind == "turn":
+        deg = 90 if "90" in asked else 45
+        sign = 1 if "left" in asked else -1
+
+        def check(s: SimRobot) -> bool:
+            return abs(turned(s) - sign * math.radians(deg)) < 0.14 and moved(s) < 0.1
+    elif kind == "spin":
+        def check(s: SimRobot) -> bool:
+            return abs(abs(turned(s)) - 2 * math.pi) < 0.3 and moved(s) < 0.1
+    else:
+        def check(s: SimRobot) -> bool:
+            return abs(along(s)[0] - 0.5) < 0.1
+    t = task("again", "conversation", scene, spoken(rng, text), "Doing it again.", f"Repeat what I did: {asked}",
+             program, check)
+    t.earlier = (line,)
+    return t

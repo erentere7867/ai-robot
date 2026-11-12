@@ -19,6 +19,7 @@ from robot.agent.runner import Runner
 
 MAX_GATE_RETRIES = 2
 MAX_REPAIRS = 3
+EARLIER = 4  # instructions of the conversation the planner sees
 # What went wrong, in words the user can act on; the robot says it and asks to be told another way, never guessing.
 PLAINLY = (("nothing matched", "I couldn't find what you meant"), ("NotFound", "I couldn't find what you meant"),
            ("list index out of range", "I couldn't find what you meant"),
@@ -73,6 +74,7 @@ class Agent:
         has used its repairs; then the robot says plainly what went wrong and asks to be told another way."""
         self.escalate = escalate
         self.planner = planner
+        self.earlier: list[str] = []  # the conversation so far: each instruction and what the robot did about it
         self.readback = readback  # check each program's dry run, in words, against the instruction before it runs
         self.live = live  # robot.interfaces.live.Live, or None
 
@@ -99,7 +101,8 @@ class Agent:
             robot.begin()  # "start" now names where this task began
         self._show(status="planning", instruction=instruction, say_first="", plan="", program="", line=0, readback="",
                    problems=[])
-        result = self._ask_planner(record, lambda: self.planner.plan(describe(robot.snapshot()), instruction))
+        result = self._ask_planner(record, lambda: self.planner.plan(describe(robot.snapshot()), instruction,
+                                                                     earlier=self.earlier[-EARLIER:]))
         gate_retries, spoke = 0, False
         while result is not None:
             self._show(status="checking", say_first=result.say_first, plan=result.plan, program=result.program, line=0,
@@ -133,6 +136,7 @@ class Agent:
             run = Runner(robot, on_call=self._on_call(robot)).run(result.program)
             if run.status in ("done", "preempted"):
                 record.outcome = run.status
+                self._remember(instruction, f"{readback(gate.trace, gate.ended_by)} ({run.status})")
                 self._show(status="done" if run.status == "done" else "stopped", line=0)
                 if self.live is not None:
                     self.live.show_world(robot)
@@ -151,12 +155,18 @@ class Agent:
                 record.outcome = again.outcome
                 return record
         self._show(status="failed", problems=list(record.problems))
+        self._remember(instruction, f"could not do it: {plainly(record.problems)} (failed)")
         if speak:
             try:
                 robot.say(f"Sorry, {plainly(record.problems)}. Could you tell me another way?")
             except Exception:  # noqa: BLE001 - a robot that cannot speak still reports on the page
                 pass
         return record
+
+    def _remember(self, instruction: str, what: str) -> None:
+        """One line of the conversation for the next plan: "the other one" and "no, ..." need to know what was done
+        (the robot went to one of two tables, and told "no, the other one" it only said it saw two)."""
+        self.earlier = [*self.earlier, f'"{instruction}": {what[:240]}'][-EARLIER:]
 
     def _on_call(self, robot: Any) -> Any:
         if self.live is None:

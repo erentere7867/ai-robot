@@ -5,7 +5,10 @@ track inside a gate that has its label, or another label and a similar size: the
 differently from different sides (a low coffee table is sometimes a "tv"), so a track's label is a vote of its
 sightings weighted by score. People are kept apart from things. A thing's place is the precision-weighted mean of its
 sightings (a scalar Kalman filter: a depth reading counts more than a far floor estimate, and the place settles as
-sightings add up, instead of being pulled a fixed share toward each new one, which made things twitch on the map);
+sightings add up, instead of being pulled a fixed share toward each new one, which made things twitch on the map).
+A sighting's uncertainty includes the robot's own (localisation's, and timing while it turns): matching and merging
+allow for it, so a sighting made while driving, a few tenths of a metre off, joins its thing instead of starting a
+twin, and moves it little;
 a person's place may move faster (WALKS), so it follows a walking person. Twins of one name left by renaming are
 merged. A detection near no track starts one, which counts as an object once it has been seen twice (a person seen
 clearly counts at once). The vision model then looks at each new object's crop and names it (`verify`): the fast
@@ -77,6 +80,8 @@ class Track:
     sized: bool = True  # False while it has only been seen cut by a picture's edge
     var: float = 0.01  # variance of its place, square metres: shrinks as sightings agree
     look: Any = None  # a person's appearance, averaged over sightings, for knowing them again
+    noise: float = 0.1  # how far its sightings usually scatter, metres (their sigma, averaged)
+    sure: bool = False  # its name was confirmed by the vision model (a close-up rename turned a ball into a pillow)
 
     @property
     def color(self) -> str:
@@ -113,18 +118,21 @@ class Tracker:
                         float(np.minimum(t.look, d.look).sum()) < UNLIKE:
                     continue  # someone else, dressed differently: two people passing close do not swap
                 gap = math.dist((t.x, t.y), (d.x, d.y))
+                # how far apart one thing's places may honestly be; never over a metre, or neighbours run together
+                unsure = min(1.0, 2.5 * math.sqrt(t.var + d.sigma ** 2))
                 if same:
-                    limit = max(self.gate, 1.5 * t.radius) * (2.5 if t.person else 1.0)  # people move between frames
+                    limit = max(self.gate, 1.5 * t.radius, unsure) * (2.5 if t.person else 1.0)  # people move
                 elif d.cut:  # the visible strip's middle can be a whole radius from the thing's own
-                    limit = max(self.gate, t.radius + d.radius)
+                    limit = max(self.gate, t.radius + d.radius, unsure)
                 else:  # another name for the same footprint: a backpack beside a chair stays a backpack
-                    limit = max(t.radius, d.radius)
+                    limit = max(t.radius, d.radius, unsure)
                 if gap < limit and gap + (0.0 if same else 0.25) < best_gap:
                     best, best_gap = t, gap + (0.0 if same else 0.25)
             if best is None and label == "person":
                 best = self._known_again(d, now, touched)
             if best is None:
-                best = Track(self._next, label, d.x, d.y, d.radius, now, now, sized=not d.cut, var=d.sigma ** 2)
+                best = Track(self._next, label, d.x, d.y, d.radius, now, now, sized=not d.cut, var=d.sigma ** 2,
+                             noise=d.sigma)
                 self.tracks[best.id] = best
                 self._next += 1
             else:  # weigh each sighting by its precision; a thing settles as sightings add up, a person may walk on
@@ -139,6 +147,7 @@ class Tracker:
                 best.hits += 1
                 best.last_seen = now
             best.misses, best.present = 0, True
+            best.noise = 0.8 * best.noise + 0.2 * d.sigma
             best.votes[label] += d.score
             best.score = max(best.score, d.score)
             if not best.person and not best.verified:
@@ -173,18 +182,24 @@ class Tracker:
 
     def _merge(self, pairs: list[tuple[Detection, Track]]) -> None:
         """One thing, one track: two tracks of the same name whose centres lie inside each other's footprint are
-        merged into the older (a track renamed for a while can leave a twin behind). Two person tracks merge when
-        they stand within half a metre and look alike: one person seen from two cameras in different light."""
+        merged into the older (a track renamed for a while can leave a twin behind); so are two things of about the
+        same size, whatever their names, closer than their sightings' scatter allows (a sighting a few tenths of a
+        metre off while driving, under another name, started a twin that later sightings fed). Two person tracks merge
+        when they stand within half a metre and look alike: one person seen from two cameras in different light."""
         for t in sorted(self.tracks.values(), key=lambda t: t.id):
             if t.id not in self.tracks:
                 continue
-            for o in [o for o in self.tracks.values() if o.id > t.id and o.label == t.label]:
-                if t.person:
-                    near = math.dist((t.x, t.y), (o.x, o.y)) < 0.5
+            for o in [o for o in self.tracks.values() if o.id > t.id and o.person == t.person]:
+                gap = math.dist((t.x, t.y), (o.x, o.y))
+                scatter = min(0.6, 2.5 * math.sqrt(t.var + o.var + max(t.noise, o.noise) ** 2))  # merging is surer to hurt
+                if t.person:  # closer than 0.3 m is one person, however the cameras saw their clothes
                     alike = t.look is None or o.look is None or float(np.minimum(t.look, o.look).sum()) >= LIKE
-                    if not (near and alike):
+                    if not (gap < 0.3 or (gap < 0.5 and alike)):
                         continue
-                elif math.dist((t.x, t.y), (o.x, o.y)) >= max(t.radius, o.radius, 0.15):
+                elif o.label == t.label:
+                    if gap >= max(t.radius, o.radius, 0.15, scatter):
+                        continue
+                elif not (_alike(t.radius, o.radius) and gap < scatter):
                     continue
                 w = o.var / (t.var + o.var)  # the more certain place counts more
                 t.x, t.y = t.x + (1 - w) * (o.x - t.x), t.y + (1 - w) * (o.y - t.y)
@@ -205,10 +220,11 @@ class Tracker:
         if track.misses >= 3:
             track.present = False
 
-    def verify(self, track: Track, label: str | None, pixels: int = 0) -> None:
+    def verify(self, track: Track, label: str | None, pixels: int = 0, sure: bool = False) -> None:
         """The vision model's name for the track's crop of `pixels` pixels; None means it saw no object. Its word
-        wins either way: the detector called a backpack a person, which "follow me" could have followed."""
-        track.verified, track.named_from = True, pixels
+        wins either way: the detector called a backpack a person, which "follow me" could have followed. `sure`:
+        the model confirmed the detector's own name (a yes or no), which is not asked again."""
+        track.verified, track.named_from, track.sure = True, pixels, sure
         if label is None:
             track.rejected = True
         else:
@@ -219,7 +235,8 @@ class Tracker:
         twice as large as when it was last named (a far backpack can look like a book; close up it does not)."""
         tracks = sorted((t for t in self.objects() if t.id in crops), key=lambda t: t.first_seen)
         fresh = next((t for t in tracks if not t.verified), None)
-        return fresh or next((t for t in tracks if not t.person and pixels(crops[t.id]) >= 2 * t.named_from), None)
+        return fresh or next((t for t in tracks if not t.person and not t.sure
+                              and pixels(crops[t.id]) >= 2 * t.named_from), None)
 
     def objects(self) -> list[Track]:
         return [t for t in self.tracks.values() if t.confirmed and not t.rejected]
@@ -231,9 +248,10 @@ def pixels(image: object) -> int:
 
 
 def _alike(a: float, b: float) -> bool:
-    """Sizes close enough to be one thing named two ways (a cup on a table is not the table; the part of a table that
-    one camera sees past the edge of its picture is)."""
-    return max(a, b) <= 3.0 * max(min(a, b), 0.05)
+    """Sizes close enough to be one thing named two ways: a cup on a table is not the table, and a ball (0.13 m)
+    beside a chair (0.39 m) is not the chair (at three times, it was merged into it). A part cut by a picture's edge
+    is matched by its own rule, its size saying nothing."""
+    return max(a, b) <= 2.0 * max(min(a, b), 0.05)
 
 
 def look(pixels: Any, bins: int = 8) -> Any:

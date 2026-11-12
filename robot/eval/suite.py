@@ -366,6 +366,7 @@ def run_planner(tag: str, only: list[str], think: int = 0, check_readback: bool 
         scene = case.scene()
         scene.noise = noise
         sim = SimRobot(scene)
+        agent.earlier.clear()  # each case is a conversation of its own
         record = agent.do(case.say, sim)
         try:
             checked = bool(case.check(sim))
