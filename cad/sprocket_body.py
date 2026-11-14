@@ -460,3 +460,64 @@ def build():
     size = [round((box3.maxPoint.asArray()[i] - box3.minPoint.asArray()[i]) / MM) for i in range(3)]
     bodies = sum(o.bRepBodies.count for o in root.allOccurrences)
     print(f"Sprocket built: {size[0]} x {size[1]} x {size[2]} mm (L x W x H), {bodies} bodies, lidar at x={lx}")
+
+
+# ------------------------------------------------------------------ meshes for the simulator
+WHEEL_PARTS = ("Tyre", "Hub motor", "Hub cap")
+HIDDEN = ("Electronics",)  # components nobody sees from outside
+HIDDEN_BODIES = ("Display", "Front camera board", "Front camera lens", "camera board", "camera lens")
+
+
+def export_meshes(folder):
+    """The model as the simulator wants it (robot/ros/model.py): one binary STL per colour for everything fixed to
+    the body, and three for one wheel about its own axle; metres, robot axes. index.json lists each file's colour."""
+    import json
+    import os
+    import struct
+
+    design = adsk.fusion.Design.cast(adsk.core.Application.get().activeProduct)
+    os.makedirs(folder, exist_ok=True)
+    groups, colours = {}, {}
+
+    def colour(appearance):
+        for p in appearance.appearanceProperties:
+            c = adsk.core.ColorProperty.cast(p)
+            if c and c.name == "Color" and c.value:
+                return [round(c.value.red / 255, 3), round(c.value.green / 255, 3), round(c.value.blue / 255, 3)]
+        return [0.7, 0.7, 0.72]
+
+    def triangles(body, to_world, shift):
+        calc = body.meshManager.createMeshCalculator()
+        calc.setQuality(adsk.fusion.TriangleMeshQualityOptions.LowQualityTriangleMesh)
+        mesh = calc.calculate()
+        points = []
+        for p in mesh.nodeCoordinates:
+            q = p.copy()
+            q.transformBy(to_world)
+            points.append(((q.x - shift[0]) * 0.01, (q.y - shift[1]) * 0.01, (q.z - shift[2]) * 0.01))
+        idx = mesh.nodeIndices
+        return [(points[idx[k]], points[idx[k + 1]], points[idx[k + 2]]) for k in range(0, len(idx), 3)]
+
+    for occ in design.rootComponent.occurrences:
+        if occ.component.name in HIDDEN:
+            continue
+        for body in occ.component.bRepBodies:
+            if any(word in body.name for word in HIDDEN_BODIES):
+                continue
+            wheel = body.name.startswith(WHEEL_PARTS)
+            if wheel and not occ.component.name.endswith("FL"):
+                continue  # one wheel serves all four
+            look = body.appearance.name.replace("Sprocket ", "").lower().replace(" ", "_")
+            name = "wheel_" + look if wheel else look
+            shift = (AX * MM, AY * MM, AZ * MM) if wheel else (0.0, 0.0, 0.0)
+            groups.setdefault(name, []).extend(triangles(body, occ.transform2, shift))
+            colours[name] = colour(body.appearance)
+    for name, faces in groups.items():
+        with open(os.path.join(folder, name + ".stl"), "wb") as f:
+            f.write(b"Sprocket " + name.encode().ljust(71)[:71])
+            f.write(struct.pack("<I", len(faces)))
+            for a, b, c in faces:
+                f.write(struct.pack("<12fH", 0.0, 0.0, 0.0, *a, *b, *c, 0))
+    with open(os.path.join(folder, "index.json"), "w") as f:
+        json.dump(colours, f, indent=1, sort_keys=True)
+    print({name: len(faces) for name, faces in sorted(groups.items())})

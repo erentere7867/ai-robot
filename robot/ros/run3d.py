@@ -235,7 +235,9 @@ def snapshots(robot, folder: Path) -> None:  # noqa: ANN001
 
 
 def scan_points(robot, every: int = 3) -> list[tuple[float, float]]:  # noqa: ANN001
-    """The lidar's hits on the map (the lidar sits over the robot's centre)."""
+    """The lidar's hits on the map (the lidar sits LIDAR_X ahead of the robot's centre)."""
+    from robot.ros.model import LIDAR_X
+
     scan = robot.perception.scan
     if scan is None:
         return []
@@ -245,7 +247,8 @@ def scan_points(robot, every: int = 3) -> list[tuple[float, float]]:  # noqa: AN
         r = float(ranges[k])
         if math.isfinite(r) and 0.05 < r < 12.0:
             a = robot.yaw + angle_min + k * step
-            points.append((round(robot.x + r * math.cos(a), 2), round(robot.y + r * math.sin(a), 2)))
+            points.append((round(robot.x + LIDAR_X * math.cos(robot.yaw) + r * math.cos(a), 2),
+                           round(robot.y + LIDAR_X * math.sin(robot.yaw) + r * math.sin(a), 2)))
     return points
 
 

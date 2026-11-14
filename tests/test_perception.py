@@ -1,23 +1,48 @@
 """The perception pipeline's geometry and bookkeeping, without a detector or ROS: rig, locate, colour, tracker."""
 
 import math
+from dataclasses import replace
 
 import numpy as np
 
 from robot.perception import colour
-from robot.perception.locate import locate
+from robot.perception.locate import foot_of, locate
 from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import Detection, Tracker
+from robot.ros.model import LIDAR_X
+
+DEPTH_FRONT = replace(RIG["front_camera"], depth=True)  # the body with an RGB-D front camera, as model.py offers
 
 
-def test_a_pixel_and_its_depth_give_back_the_point():
-    cam = RIG["front_camera"]
-    point = (2.0, 0.5, 0.3)  # robot frame
-    # project by hand: forward and left of the camera, then into pixels
-    fwd, left, up = point[0] - cam.x, point[1] - cam.y, point[2] - cam.z
-    u, v = cam.width / 2 - left / fwd * cam.focal, cam.height / 2 - up / fwd * cam.focal
-    x, y, z = cam.point(u, v, fwd)
-    assert math.dist((x, y, z), point) < 1e-6
+def _slab(cam, d: float, half: float, height: float, left: float = 0.0) -> tuple[tuple, list]:
+    """An upright slab facing the camera, its near face `d` metres along the lens axis on the floor and `half`
+    metres wide to each side: its pixel box, and the lower edge of its outline."""
+    def at(side: float, z: float) -> tuple[float, float]:
+        return cam.pixel(*cam.to_base(d, left + side * half, z - cam.z))
+
+    corners = [at(side, z) for side in (1, -1) for z in (0.0, height)]
+    us, vs = [c[0] for c in corners], [c[1] for c in corners]
+    return (min(us), min(vs), max(us), max(vs)), [at(side, 0.0) for side in np.linspace(-1, 1, 9)]
+
+
+def _reach(cam, place) -> float:
+    return math.hypot(place.x - cam.x, place.y - cam.y)
+
+
+def test_the_cameras_look_where_the_tilted_head_points_them():
+    front, left = RIG["front_camera"], RIG["rear_left_camera"]
+    tilt, round_ = math.radians(10), math.radians(120)
+    assert math.dist(front.ray(front.width / 2, front.height / 2), (math.cos(tilt), 0.0, math.sin(tilt))) < 1e-9
+    # 120 degrees round a head that looks up: mostly sideways and back, a little down, and leaning
+    axis = (math.cos(round_) * math.cos(tilt), math.sin(round_), math.cos(round_) * math.sin(tilt))
+    assert math.dist(left.ray(left.width / 2, left.height / 2), axis) < 1e-9
+    assert abs(math.degrees(math.asin(axis[2])) + 5.0) < 0.1 and abs(left.turn[2][1]) > 0.14  # 5 down, leaning 8+
+    for cam in (front, left):
+        point = cam.to_base(2.0, 0.5, 0.3 - cam.z)  # 2 m along its axis on the floor, half a metre left, 0.3 m up
+        u, v = cam.pixel(*point)
+        depth = sum(cam.turn[k][0] * (point[k] - (cam.x, cam.y, cam.z)[k]) for k in range(3))
+        assert math.dist(cam.point(u, v, depth), point) < 1e-9
+        assert math.dist(cam.floor(*cam.pixel(point[0], point[1], 0.0)), point[:2]) < 1e-9
 
 
 def test_the_rear_cameras_cover_what_the_front_one_does_not():
@@ -30,20 +55,34 @@ def test_a_box_on_the_floor_is_located_from_its_bottom_edge():
     cam = RIG["rear_left_camera"]
     # a 0.3 m wide box whose near face is 2 m from the camera, straight along the camera's axis
     d, half = 2.0, 0.15
-    u1, u2 = cam.width / 2 - half / d * cam.focal, cam.width / 2 + half / d * cam.focal
-    v2 = cam.height / 2 + cam.z / d * cam.focal  # the floor line under the box's face
-    place = locate(cam, (u1, v2 - 60, u2, v2))
+    box, edge = _slab(cam, d, half, 0.3)
+    place = locate(cam, box, foot=foot_of(cam, edge))
     x, y, r = place.x, place.y, place.radius
     expected = (cam.x + (d + r) * math.cos(cam.yaw), cam.y + (d + r) * math.sin(cam.yaw))
     assert math.dist((x, y), expected) < 0.05 and abs(r - half) < 0.03
 
 
-def test_depth_wins_on_the_front_camera():
-    cam = RIG["front_camera"]
+def test_a_leaning_camera_places_a_wide_thing_by_the_middle_of_its_face():
+    """The rear cameras lean with the head, so the lowest pixel of a wide box is one of its corners. Taken as where
+    the box stands, that corner put a 1.2 m wide box 0.6 m to the side."""
+    cam = RIG["rear_left_camera"]
+    d, half = 2.0, 0.6
+    box, edge = _slab(cam, d, half, 0.5)
+    edge += [(u, v - 40) for u, v in edge[3:6]]  # and the underside of an overhang, which is not on the floor
+    place = locate(cam, box, foot=foot_of(cam, edge))
+    middle = cam.to_base(d + place.radius, 0.0, 0.0)
+    assert math.dist((place.x, place.y), middle[:2]) < 0.08
+    corner = max(edge, key=lambda p: p[1])
+    assert math.dist(cam.floor(*corner), cam.to_base(d, 0.0, 0.0)[:2]) > 0.5  # what the lowest pixel alone says
+
+
+def test_depth_wins_on_a_camera_that_has_it():
+    cam = DEPTH_FRONT
     depth = np.full((cam.height, cam.width), 3.0, dtype=np.float32)
-    place = locate(cam, (300, 200, 340, 300), depth=depth)
-    x, y, r = place.x, place.y, place.radius
-    assert abs(math.hypot(x - cam.x, y - cam.y) - (3.0 + r)) < 0.1
+    place = locate(cam, (600, 300, 680, 600), depth=depth)
+    face = cam.point(640, 450, 3.0)  # 3 m along a lens axis that looks 10 degrees up
+    assert place.how == "depth" and abs(_reach(cam, place) - (math.dist(face[:2], (cam.x, cam.y)) + place.radius)) < 0.1
+    assert locate(RIG["front_camera"], (600, 300, 680, 600), depth=depth).how == "floor"  # as drawn: no depth
 
 
 def test_colour_names():
@@ -98,28 +137,24 @@ def test_the_vision_model_has_the_last_word_on_a_new_object():
     assert [(t.label, t.id) for t in tr.objects()] == [("table", table.id)]
 
 
-def _pixel(cam, bx: float, by: float, up: float = 0.0) -> tuple[float, float]:
-    """The pixel showing robot-frame point (bx, by) at height `up` (pinhole, as the simulator renders)."""
-    dx, dy = bx - cam.x, by - cam.y
-    fwd = dx * math.cos(cam.yaw) + dy * math.sin(cam.yaw)
-    left = -dx * math.sin(cam.yaw) + dy * math.cos(cam.yaw)
-    return cam.width / 2 - left / fwd * cam.focal, cam.height / 2 + (cam.z - up) / fwd * cam.focal
-
-
-def _edges(cam, bx: float, by: float, r: float) -> tuple[float, float]:
-    """The image columns of a round thing's two sides."""
-    bearing, half = math.atan2(by - cam.y, bx - cam.x) - cam.yaw, math.asin(r / math.dist((bx, by), (cam.x, cam.y)))
-    return tuple(cam.width / 2 - math.tan(bearing + s * half) * cam.focal for s in (1, -1))
+def _edges(cam, bx: float, by: float, r: float, up: float) -> tuple[float, float]:
+    """The image columns of a round thing's two sides, `up` metres above the floor."""
+    reach = math.dist((bx, by), (cam.x, cam.y))
+    bearing, half = math.atan2(by - cam.y, bx - cam.x), math.asin(r / reach)
+    side = reach * math.cos(half)
+    return tuple(sorted(cam.pixel(cam.x + side * math.cos(bearing + s * half), cam.y + side * math.sin(bearing + s * half),
+                                  up)[0] for s in (1, -1)))
 
 
 def test_size_and_place_hold_near_the_edge_of_the_wide_lens():
     cam = RIG["rear_left_camera"]
     off, far, r = math.radians(60), 2.2, 0.15  # a round thing 0.3 m across, 2.2 m away, 60 degrees off the lens axis
     middle = cam.to_base(far * math.cos(off), far * math.sin(off), 0.0)[:2]
-    # the lowest point of its outline: its nearest point along the lens axis
-    foot = _pixel(cam, middle[0] - r * math.cos(cam.yaw), middle[1] - r * math.sin(cam.yaw))
-    u1, u2 = _edges(cam, *middle, r)
-    place = locate(cam, (u1, foot[1] - 40, u2, foot[1]), foot=foot)
+    # where its outline meets the floor: its nearest point along the lens axis
+    foot = cam.pixel(middle[0] - r * math.cos(cam.yaw), middle[1] - r * math.sin(cam.yaw), 0.0)
+    top = cam.pixel(*middle, 0.3)[1]
+    u1, u2 = _edges(cam, *middle, r, 0.15)
+    place = locate(cam, (u1, top, u2, foot[1]), foot=foot)
     assert abs(place.radius - r) < 0.03 and math.dist((place.x, place.y), middle) < 0.05
 
 
@@ -131,16 +166,17 @@ def test_a_person_straight_behind_is_put_in_one_place_by_both_rear_cameras():
     leg = (-2.787, 0.27)  # the leg both cameras see the foot of, and the lidar the front of
     angles = -math.pi + np.arange(500) * 2 * math.pi / 500
     deg = np.degrees(np.mod(angles, 2 * math.pi))
-    ranges = np.full(500, 4.5, dtype=np.float32)  # the wall
-    ranges[(deg >= 174) & (deg < 175.6)] = 2.80  # the legs
-    ranges[(deg >= 175.6) & (deg < 177)] = 3.54  # the sofa behind, between them
-    ranges[(deg >= 177) & (deg < 195)] = 1.43  # a box in front of the person, hiding their other leg
+    ranges = np.full(500, 4.5, dtype=np.float32)  # the wall; all as the lidar sees it, LIDAR_X ahead of the centre
+    ranges[(deg >= 174) & (deg < 175.6)] = 2.80 + LIDAR_X  # the legs
+    ranges[(deg >= 175.6) & (deg < 177)] = 3.54 + LIDAR_X  # the sofa behind, between them
+    ranges[(deg >= 177) & (deg < 195)] = 1.43 + LIDAR_X  # a box in front of the person, hiding their other leg
     places = []
     for name in ("rear_left_camera", "rear_right_camera"):
         cam = RIG[name]
-        u1, u2 = sorted(_edges(cam, *person, r))
-        foot = _pixel(cam, *leg)
-        place = locate(cam, (max(u1, 0), 100, min(u2, cam.width), foot[1]), scan=(ranges, -math.pi, 2 * math.pi / 500),
+        u1, u2 = _edges(cam, *person, r, 0.85)
+        foot = cam.pixel(*leg, 0.0)
+        head = cam.pixel(*person, 1.7)[1]
+        place = locate(cam, (max(u1, 0), head, min(u2, cam.width), foot[1]), scan=(ranges, -math.pi, 2 * math.pi / 500),
                        foot=foot, person=True)
         assert place.how == "lidar" and math.dist((place.x, place.y), person) < 0.15, (name, place)
         places.append((place.x, place.y))
@@ -148,13 +184,13 @@ def test_a_person_straight_behind_is_put_in_one_place_by_both_rear_cameras():
 
 
 def test_depth_reads_the_near_face_of_an_open_thing():
-    cam = RIG["front_camera"]
+    cam = DEPTH_FRONT
     depth = np.full((cam.height, cam.width), 4.0, dtype=np.float32)  # the wall, seen through a table's frame
-    depth[200:215, 280:400] = 2.0  # the table top
-    depth[200:300, 280:290] = depth[200:300, 390:400] = 2.0  # its legs
-    place = locate(cam, (280, 200, 400, 300), depth=depth)
-    x, y, r = place.x, place.y, place.radius
-    assert abs(math.hypot(x - cam.x, y - cam.y) - (2.0 + r)) < 0.15
+    depth[300:315, 580:700] = 2.0  # the table top
+    depth[300:400, 580:590] = depth[300:400, 690:700] = 2.0  # its legs
+    place = locate(cam, (580, 300, 700, 400), depth=depth)
+    face = cam.point(640, 350, 2.0)
+    assert abs(_reach(cam, place) - (math.dist(face[:2], (cam.x, cam.y)) + place.radius)) < 0.15
 
 
 def test_a_part_seen_past_the_picture_edge_joins_its_thing_and_neighbours_stay_apart():
@@ -200,13 +236,10 @@ def test_a_cut_view_joins_the_thing_whose_middle_it_misses():
 def test_a_thing_under_the_lidar_beam_ignores_the_wall_the_beam_hits_behind_it():
     cam = RIG["rear_left_camera"]
     d, half, height = 2.0, 0.12, 0.24  # a ball's near face 2 m away on the lens axis; the wall 2.8 m behind
-    u1, u2 = cam.width / 2 - half / d * cam.focal, cam.width / 2 + half / d * cam.focal
-    v2 = cam.height / 2 + cam.z / d * cam.focal
-    v1 = cam.height / 2 + (cam.z - height) / d * cam.focal
+    box, edge = _slab(cam, d, half, height)
     ranges = np.full(360, 2.8 + math.hypot(cam.x, cam.y), dtype=np.float32)
-    place = locate(cam, (u1, v1, u2, v2), scan=(ranges, -math.pi, 2 * math.pi / 360))
-    x, y, r = place.x, place.y, place.radius
-    assert abs(math.hypot(x - cam.x, y - cam.y) - (d + r)) < 0.1
+    place = locate(cam, box, scan=(ranges, -math.pi, 2 * math.pi / 360), foot=foot_of(cam, edge))
+    assert place.how == "floor" and abs(_reach(cam, place) - (d + place.radius)) < 0.1
 
 
 def test_a_still_thing_settles_on_the_precise_sightings_instead_of_twitching():
@@ -221,30 +254,30 @@ def test_a_still_thing_settles_on_the_precise_sightings_instead_of_twitching():
 
 
 def test_a_box_that_holds_only_floor_is_no_thing():
-    cam = RIG["front_camera"]
-    rows = np.arange(cam.height, dtype=np.float32)[:, None]
-    down = np.maximum((rows - cam.height / 2) / cam.focal, 1e-3)
-    depth = np.broadcast_to(cam.z / down, (cam.height, cam.width)).astype(np.float32).copy()  # the floor everywhere
-    assert locate(cam, (0, 300, 640, 480), depth=depth) is None
+    cam = DEPTH_FRONT
+    down = (np.arange(cam.height, dtype=np.float32)[:, None] - cam.height / 2) / cam.focal
+    right = (np.arange(cam.width, dtype=np.float32)[None, :] - cam.width / 2) / cam.focal
+    falls = cam.turn[2][0] - right * cam.turn[2][1] - down * cam.turn[2][2]  # each pixel's ray: metres down per metre
+    depth = np.where(falls < -1e-3, cam.z / -np.minimum(falls, -1e-3), 20.0).astype(np.float32)  # the floor everywhere
+    assert locate(cam, (300, 560, 980, 719), depth=depth) is None
 
 
 def test_a_lidar_return_far_behind_the_floor_estimate_is_not_believed():
     cam = RIG["rear_left_camera"]
     d, half, height = 2.0, 0.2, 0.6  # a chair-height thing, 2 m away; the beam passes its legs to a wall at 2.5 m
-    u1, u2 = cam.width / 2 - half / d * cam.focal, cam.width / 2 + half / d * cam.focal
-    v2 = cam.height / 2 + cam.z / d * cam.focal
-    v1 = cam.height / 2 + (cam.z - height) / d * cam.focal
+    box, edge = _slab(cam, d, half, height)
     ranges = np.full(360, 2.5 + math.hypot(cam.x, cam.y), dtype=np.float32)
-    place = locate(cam, (u1, v1, u2, v2), scan=(ranges, -math.pi, 2 * math.pi / 360))
-    assert place.how == "floor" and abs(math.hypot(place.x - cam.x, place.y - cam.y) - (d + place.radius)) < 0.1
+    place = locate(cam, box, scan=(ranges, -math.pi, 2 * math.pi / 360), foot=foot_of(cam, edge))
+    assert place.how == "floor" and abs(_reach(cam, place) - (d + place.radius)) < 0.1
 
 
 def test_depth_finds_a_thin_thing_that_fills_little_of_its_box():
-    cam = RIG["front_camera"]
+    cam = DEPTH_FRONT
     depth = np.full((cam.height, cam.width), 4.0, dtype=np.float32)  # the wall behind
-    depth[150:300, 300:306] = depth[150:300, 394:400] = 2.0  # two thin chair legs: 6% of the box
-    place = locate(cam, (290, 150, 410, 300), depth=depth)
-    assert abs(math.hypot(place.x - cam.x, place.y - cam.y) - (2.0 + place.radius)) < 0.15
+    depth[250:400, 590:596] = depth[250:400, 684:690] = 2.0  # two thin chair legs: 6% of the box
+    place = locate(cam, (580, 250, 700, 400), depth=depth)
+    face = cam.point(640, 325, 2.0)
+    assert abs(_reach(cam, place) - (math.dist(face[:2], (cam.x, cam.y)) + place.radius)) < 0.15
 
 
 def test_a_thing_whose_foot_is_below_the_picture_gets_no_floor_estimate():
@@ -274,6 +307,18 @@ def test_a_standing_person_stops_jumping_and_a_walking_one_is_followed():
     for k in range(30):  # then walks 1.5 m in 3 s
         tr.update([Detection("person", -1.4 + 0.05 * k, 0.9, 0.3, score=0.9, sigma=0.1)], 3.0 + k * 0.1)
     assert abs(person.x - 0.05) < 0.3
+
+
+def test_the_lower_edge_of_a_mask_is_its_lowest_pixel_in_each_column():
+    import pytest
+
+    torch = pytest.importorskip("torch")
+    from robot.perception.detector import _outlines
+
+    mask = torch.zeros((2, 40, 60))
+    mask[0, 10:30, 20:26] = mask[0, 10:14, 20:40] = 1.0  # a leg with a top reaching to the right; the other is empty
+    edge, nothing = _outlines(mask)
+    assert nothing is None and {v for u, v in edge if u < 26} == {30.0} and {v for u, v in edge if u > 26} == {14.0}
 
 
 def test_a_person_boxed_twice_is_one_detection_and_a_cup_on_a_table_is_two():

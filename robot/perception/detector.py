@@ -23,7 +23,7 @@ class Seen:
     label: str
     score: float
     box: tuple[float, float, float, float]  # pixels: x1, y1, x2, y2
-    foot: tuple[float, float] | None = None  # pixels: where its outline meets the floor (the middle of its lowest rows)
+    outline: list[tuple[float, float]] | None = None  # pixels along the lower edge of its mask (locate.foot_of)
 
 
 class Detector:
@@ -57,10 +57,10 @@ class Detector:
                                     verbose=False)[0]  # BGR in; masks at the camera's own pixels
         if result.boxes is None:
             return []
-        feet = _feet(result.masks.data) if result.masks is not None else [None] * len(result.boxes)
-        seen = [Seen(result.names[int(c)], float(s), tuple(b), f)
-                for b, c, s, f in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
-                                      result.boxes.conf.tolist(), feet, strict=True)]
+        edges = _outlines(result.masks.data) if result.masks is not None else [None] * len(result.boxes)
+        seen = [Seen(result.names[int(c)], float(s), tuple(b), e)
+                for b, c, s, e in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist(),
+                                      result.boxes.conf.tolist(), edges, strict=True)]
         kept: list[Seen] = []  # one box per thing: the model sometimes boxes a thing twice, or under two names
         for s in sorted(seen, key=lambda s: -s.score):
             if not any(_same_thing(k, s) for k in kept):
@@ -68,24 +68,26 @@ class Detector:
         return kept
 
 
-def _feet(masks: Any, rows: int = 3) -> list[tuple[float, float] | None]:
-    """Where each thing meets the floor: the middle of its mask's lowest few rows (a person's feet, a chair's front
-    legs), as a pixel. Worked out on the device the masks are on; only two numbers a thing come back."""
-    import torch
-
+def _outlines(masks: Any, samples: int = 32) -> list[list[tuple[float, float]] | None]:
+    """The lower edge of each thing's mask: in up to `samples` columns across it, the lowest pixel that is the
+    thing (a person's feet, a chair's legs, and between the legs the underside of its seat). Which of these is
+    where it stands on the floor depends on how the camera is tilted, so the rig decides (locate.foot_of). The
+    lowest row of every column is worked out on the device the masks are on; one row of numbers a thing comes back."""
     inside = masks > 0.5  # (things, height, width)
     if inside.shape[0] == 0:
         return []
-    filled = inside.any(dim=2)  # which rows hold some of the thing
     height = inside.shape[1]
-    lowest = height - 1 - filled.flip(1).int().argmax(dim=1)
-    band = filled & (torch.arange(height, device=inside.device)[None, :] >= (lowest - rows + 1)[:, None])
-    per_column = (inside & band[:, :, None]).sum(dim=1)  # (things, width)
-    count = per_column.sum(dim=1)
-    columns = torch.arange(inside.shape[2], device=inside.device, dtype=torch.float32)
-    middle = (per_column.float() * columns).sum(dim=1) / count.clamp(min=1)
-    return [(u + 0.5, v + 1.0) if n > 0 else None  # pixel centres; the bottom edge of the lowest row
-            for u, v, n in zip(middle.tolist(), lowest.tolist(), count.tolist(), strict=True)]
+    lowest = (height - 1 - inside.flip(1).int().argmax(dim=1)).cpu().numpy()  # (things, width)
+    filled = inside.any(dim=1).cpu().numpy()
+    edges: list[list[tuple[float, float]] | None] = []
+    for rows, has in zip(lowest, filled, strict=True):
+        columns = np.flatnonzero(has)
+        if columns.size == 0:
+            edges.append(None)
+            continue
+        chosen = columns[np.linspace(0, columns.size - 1, min(samples, columns.size)).astype(int)]
+        edges.append([(float(u) + 0.5, float(rows[u]) + 1.0) for u in chosen])  # pixel centres; a row's bottom edge
+    return edges
 
 
 def _same_thing(a: Seen, b: Seen) -> bool:

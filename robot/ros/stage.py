@@ -144,7 +144,7 @@ def clear() -> None:
 
 
 class Launched:
-    """The simulation's processes: Gazebo with Nav2 and Sprocket, and the rear cameras' bridges."""
+    """The simulation's processes: Gazebo with Nav2 and Sprocket, and the cameras' bridges."""
 
     def __init__(self, procs: list[subprocess.Popen]) -> None:
         self.procs = procs
@@ -165,16 +165,18 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
            map_file: Path | None = None) -> Launched:
     """Nav2's simulation launch with Sprocket's body (robot/ros/model.py) in the scene; with gui, the Gazebo 3D window
     opens too (RViz stays closed: on a CPU it costs the model and the detector too much, and the live page shows the
-    map, the lidar and the cameras). The rear cameras get their own bridges: the TurtleBot launch only knows the front
-    one, and robot_localization's EKF fuses the wheels with the gyro into the odometry (robot/ros/model.py). The robot
+    map, the lidar and the cameras). The plain cameras get their own bridges: the TurtleBot launch only knows an
+    RGB-D one, and robot_localization's EKF fuses the wheels with the gyro into the odometry (robot/ros/model.py). The robot
     localises in `map_file` (a map it built: robot/ros/explore.py), else in the simulator's own map of
     the scene; with `slam` it has no map and builds one as it goes."""
-    from robot.ros.model import EKF, GROUND_TRUTH, REAR_BRIDGES, REAR_INFO, urdf
+    import shutil
+
+    from robot.ros.model import CAMERA_BRIDGES, CAMERA_INFO, EKF, GROUND_TRUTH, MESHES, urdf
 
     clear()
     sdf, yaml = export(world, out)
     body = out / "sprocket.urdf"
-    body.write_text(urdf())
+    body.write_text(urdf(shutil.copytree(MESHES, out / "meshes")))  # Gazebo reads them from a plain path
     ekf = out / "ekf.yaml"
     ekf.write_text(EKF)
     s = world.scene.start
@@ -190,8 +192,8 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
     procs = [subprocess.Popen(["ros2", "launch", "nav2_bringup", "tb4_simulation_launch.py", *args],
                               stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)]
     sim_time = ["--ros-args", "-p", "use_sim_time:=true"]
-    for command in (["ros2", "run", "ros_gz_image", "image_bridge", *REAR_BRIDGES, *sim_time],
-                    ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *REAR_INFO, GROUND_TRUTH, *sim_time],
+    for command in (["ros2", "run", "ros_gz_image", "image_bridge", *CAMERA_BRIDGES, *sim_time],
+                    ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *CAMERA_INFO, GROUND_TRUTH, *sim_time],
                     ["ros2", "run", "robot_localization", "ekf_node", "--ros-args", "--params-file", str(ekf)]):
         procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True))
     return Launched(procs)
@@ -205,12 +207,19 @@ AMCL = {"max_beams": 150, "update_min_d": 0.1, "update_min_a": 0.1, "alpha1": 0.
 
 
 def _nav2_params(out: Path) -> Path:
-    """Nav2's parameters with AMCL tuned (AMCL above), written next to the world."""
+    """Nav2's parameters with AMCL tuned (AMCL above) and Sprocket's outline in place of the TurtleBot's circle,
+    written next to the world."""
     import yaml
+
+    from robot.ros.model import FOOTPRINT
 
     base = Path("/opt/ros/lyrical/share/nav2_bringup/params/nav2_params.yaml")
     params = yaml.safe_load(base.read_text())
     params["amcl"]["ros__parameters"].update(AMCL)
+    for costmap in ("local_costmap", "global_costmap"):
+        settings = params[costmap][costmap]["ros__parameters"]
+        settings.pop("robot_radius", None)
+        settings["footprint"] = str([[round(x, 3), round(y, 3)] for x, y in FOOTPRINT])
     path = out / "nav2_params.yaml"
     path.write_text(yaml.safe_dump(params, sort_keys=False))
     return path

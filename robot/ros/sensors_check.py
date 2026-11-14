@@ -3,8 +3,8 @@
     python3 -m robot.ros.sensors_check            # headless
     python3 -m robot.ros.sensors_check --gui      # with the Gazebo window and RViz
 
-Prints messages per second for the lidar, the three cameras, the depth image, odometry and the IMU, and whether the
-robot is localised on the map (the map -> base_link transform exists).
+Prints messages per second for the lidar, the three cameras, odometry and the IMU, and whether the robot is
+localised on the map (the map -> base_link transform exists).
 """
 
 from __future__ import annotations
@@ -14,11 +14,11 @@ import tempfile
 import time
 from pathlib import Path
 
+from robot.ros.model import CAMERAS, image_topic
+
 TOPICS = {  # topic: message type
-    "/scan": "sensor_msgs/msg/LaserScan", "/rgbd_camera/image": "sensor_msgs/msg/Image",
-    "/rgbd_camera/depth_image": "sensor_msgs/msg/Image", "/rear_left_camera/image": "sensor_msgs/msg/Image",
-    "/rear_right_camera/image": "sensor_msgs/msg/Image", "/odom": "nav_msgs/msg/Odometry",
-    "/imu": "sensor_msgs/msg/Imu",
+    "/scan": "sensor_msgs/msg/LaserScan", **{image_topic(name): "sensor_msgs/msg/Image" for name in CAMERAS},
+    "/odom": "nav_msgs/msg/Odometry", "/imu": "sensor_msgs/msg/Imu",
 }
 
 

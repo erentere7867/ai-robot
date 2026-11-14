@@ -1,7 +1,7 @@
 """Perception on ROS: Sprocket's three cameras and lidar, through YOLOE-26, into one map-frame tracker.
 
 A worker thread takes the newest frame from each camera in turn, runs the detector, places each detection on the map
-(depth on the front camera; lidar or the floor on the rear ones; robot pose from TF at the frame's time), and folds
+(depth where a camera has it, else lidar or the floor; robot pose from TF at the frame's time), and folds
 them into the tracker. A camera that clearly views where a known object should be, without seeing it, counts a miss
 against it (negative evidence). Each object keeps its latest crop, so the vision model can answer about it; with a
 brain, a second thread has the vision model confirm each new object's name from its crop ("is there a chair?"),
@@ -21,12 +21,12 @@ import numpy as np
 
 from robot.perception import colour
 from robot.perception.camera import data_url
-from robot.perception.locate import lidar_range, locate
+from robot.perception.locate import foot_of, lidar_range, locate
 from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import Detection, Track, Tracker, canonical, look, pixels
+from robot.ros.model import LIDAR_X, image_topic
 
-TOPICS = {"front_camera": "/rgbd_camera/image", "rear_left_camera": "/rear_left_camera/image",
-          "rear_right_camera": "/rear_right_camera/image"}
+TOPICS = {name: image_topic(name) for name in RIG}
 SEE_FAR = 3.5  # beyond this a miss is not evidence: the detector may simply not resolve it
 
 
@@ -221,7 +221,7 @@ class Perception:
         scan, _ = taken_with(self.scans, t, 0.06)
         detections, boxes, hows = [], {}, {}
         for s in seen:
-            place = locate(cam, s.box, depth, scan, s.foot, canonical(s.label) == "person")
+            place = locate(cam, s.box, depth, scan, foot_of(cam, s.outline), canonical(s.label) == "person")
             if place is None:
                 continue
             mx, my = to_map(pose, place.x, place.y)
@@ -261,8 +261,8 @@ class Perception:
                 fits = dist - track.radius > 0.6 and 2 * math.atan2(track.radius, dist) < 0.6 * cam.hfov
                 if not (fits and dist < SEE_FAR and cam.sees(bx, by, margin=0.15)):
                     continue
-                lidar = lidar_range(self.scan, math.atan2(by, bx))
-                if lidar is not None and lidar < dist - track.radius - 0.3:  # something nearer hides it
+                lidar = lidar_range(self.scan, math.atan2(by, bx - LIDAR_X))
+                if lidar is not None and lidar < math.hypot(bx - LIDAR_X, by) - track.radius - 0.3:  # hidden
                     continue
                 self.tracker.missed(track)
 
