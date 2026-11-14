@@ -1,14 +1,10 @@
-"""Instant commands: a few spoken words act at once and never wait for a model.
-
-"Stop" must halt the robot within half a second whatever the planner is doing, so it is matched by keyword on the
-transcript, before any model sees it. "Wait" stops the running program and holds still. "Come back" stops and
-returns to the speaker. Anything longer than a short phrase is an instruction for the planner, so "stop at the door"
-is not a stop: only an utterance that is the command alone (with filler words and politeness) counts.
-"""
+"""Instant commands: a few spoken words act at once and never wait for a model."""
 
 from __future__ import annotations
 
 import re
+
+from robot.agent.api import Intent
 
 COMMANDS = {
     "stop": ("stop", "stop it", "stop now", "halt", "freeze", "stop moving", "enough", "that's enough"),
@@ -16,7 +12,15 @@ COMMANDS = {
     "come back": ("come back", "come back here", "get back here", "return"),
 }
 FILLER = {"please", "ok", "okay", "hey", "sprocket", "robot", "now", "right", "just", "oh", "uh", "um", "no"}
-COME_BACK = "robot.go_to(robot.user(), distance=1.0)\nrobot.face(robot.user())\n"
+
+COME_BACK_INTENT = Intent(
+    say="Coming back to you.",
+    chime="listen",
+    posture="listening",
+    action="pursue",
+    target="user",
+    params={"distance": 1.0},
+)
 
 
 def instant(text: str) -> str | None:

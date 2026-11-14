@@ -27,6 +27,7 @@ from robot.agent.api import (
     Point,
     Pose,
     Preempted,
+    SafetyStop,
     TargetLost,
     choose,
     geom,
@@ -34,6 +35,7 @@ from robot.agent.api import (
     wrap,
     xy,
 )
+from robot.body.controller import BodyController
 
 RES = 0.05  # occupancy cell, m
 PLAN = 2  # planning cell = PLAN * RES
@@ -43,7 +45,24 @@ V_MAX, W_MAX, TURN_RATE, CRUISE = 0.5, 1.5, 1.0, 0.4  # firmware ceilings and no
 STOP_ZONE, SLOW_ZONE, PERSON_ZONE = 0.25, 0.6, 1.5  # collision monitor
 SEE_RANGE, PERCEIVE_EVERY, STALL_S, ASK_S = 4.5, 0.2, 10.0, 2.0
 SPIN_RATES = {"slow": 0.5, "normal": 1.0, "fast": 1.5}  # rad/s
-MOTION = {"move", "turn", "spin", "face", "go_to", "drive", "drive_path", "stop", "orbit", "follow"}
+MOTION = {
+    "move",
+    "turn",
+    "spin",
+    "face",
+    "go_to",
+    "drive",
+    "drive_path",
+    "stop",
+    "orbit",
+    "follow",
+    "peek",
+    "look_under",
+    "express",
+    "wake_turn",
+    "motion_sequence",
+    "pursue",
+}
 BASE_VOCABULARY = frozenset("""person chair sofa couch table desk box ball backpack bag cup mug bottle plant lamp tv bed
 door shoe book laptop phone cat dog charger bin toy pillow shelf cabinet fridge sink window basket""".split())
 COLORS = frozenset("red orange yellow green blue purple pink brown black white grey gray".split())
@@ -112,11 +131,15 @@ class Scene:
     stop_at: float | None = None  # the user says "stop" at this time
     noise: float = 0.0  # 0 sees perfectly; 1 is a poor detector: misses grow with distance, positions jitter
     seed: int = 0  # for the noise, so a run can be repeated
+    snag_at: tuple[float, float] | None = None
+    cliffs: list[tuple[float, float, float]] = field(default_factory=list)  # (x, y, radius)
+    steps: list[tuple[float, float, float, float]] = field(default_factory=list)  # (x, y, radius, delta_z)
 
 
 @dataclass
 class Event:
     """One API call, for the readback: when, what, and where the robot was when it started."""
+
     t: float
     name: str
     args: dict[str, Any]
@@ -136,6 +159,8 @@ class Trace:
     bumps: int = 0
     calls: int = 0
     events: list[Event] = field(default_factory=list)
+    chimes: list[tuple[float, str]] = field(default_factory=list)
+    postures: list[tuple[float, str]] = field(default_factory=list)
 
 
 class BudgetSpent(BaseException):
@@ -169,6 +194,9 @@ class SimRobot:
         self.replies = sorted(scene.replies)
         self.places: dict[str, Pose] = {"start": Pose(self.x, self.y, math.degrees(self.yaw))}
         self.trace = Trace(poses=[(0.0, self.x, self.y, self.yaw)])
+        self.body = BodyController()
+        self.posture = "neutral"
+        self.scratchpad_summary = ""
         self._cancel = threading.Event()
         self._last_perceive = -1.0
         self._build_grid()
@@ -436,32 +464,98 @@ class SimRobot:
             here, k = points[far], far + 1
         return short
 
-    def _pursue(self, points: list[Point], speed: float, end_tol: float = 0.1, goal: Point | None = None,
-                reach: float = 0.0) -> None:
-        """Drive through the points in order; PathBlocked after STALL_S seconds without getting closer.
+    def _check_hazard(self) -> Any:
+        try:
+            from robot.perception.depth import StepHazard
+        except ImportError:
 
-        Arrival is being within `reach` of `goal`, or held by the collision monitor right at the end: the monitor keeps
-        0.25 m from everything, so a goal next to a wall or an object counts as reached from there.
-        """
-        best, since, i = math.inf, self.t, 0
-        while i < len(points):
-            tx, ty = points[i]
+            @dataclass
+            class StepHazard:
+                kind: str
+                delta_z: float
+                distance: float
+                torque_boost: bool = False
+
+        for cx, cy, r in self.scene.cliffs:
+            d = math.hypot(cx - self.x, cy - self.y)
+            if d <= r + RADIUS:
+                return StepHazard(kind="cliff", delta_z=-0.06, distance=d)
+
+        for sx, sy, r, dz in self.scene.steps:
+            d = math.hypot(sx - self.x, sy - self.y)
+            if d <= r + RADIUS:
+                is_trav = abs(dz) <= 0.022
+                kind = "traversable" if is_trav else ("cliff" if dz < -0.04 else "obstacle")
+                return StepHazard(kind=kind, delta_z=dz, distance=d, torque_boost=(is_trav and dz >= 0.008))
+        return None
+
+    def _pursue(
+        self,
+        points: list[Point],
+        speed: float,
+        end_tol: float = 0.1,
+        goal: Point | None = None,
+        reach: float = 0.0,
+    ) -> None:
+        """Drive through points in order using BodyController.step_pursuit (non-stop waypoint spline pursuit)."""
+        best, since, idx = math.inf, self.t, 0
+        waypoints = [(float(p[0]), float(p[1])) for p in points]
+        while idx < len(waypoints):
+            self._interrupts()
+            tx, ty = waypoints[idx]
             d = math.hypot(tx - self.x, ty - self.y)
-            last = i == len(points) - 1
-            if goal is not None and math.dist(goal, (self.x, self.y)) <= reach or last and self.held and d < 0.5:
+            last = idx == len(waypoints) - 1
+            if (goal is not None and math.dist(goal, (self.x, self.y)) <= reach) or (last and self.held and d < 0.5):
                 break
-            if d < (end_tol if last else 0.2):
-                i += 1
-                continue
-            remaining = d + sum(math.dist(points[k], points[k + 1]) for k in range(i, len(points) - 1))
+
+            # Proprioception & cable snag / step hazards
+            hazard = self._check_hazard()
+            is_snagged = self.scene.snag_at is not None and math.dist((self.x, self.y), self.scene.snag_at) < 0.35
+            v_actual = 0.0 if (is_snagged and abs(self.v_now) > 0.08) else self.v_now
+            status, v_safe, w_safe, torque = self.body.check_proprioception(
+                self.v_now or speed, self.w_now, v_actual, self.w_now, DT, pitch_rad=0.0, hazard=hazard
+            )
+            if status == "cliff_stop":
+                self._step(v_safe, 0.0)
+                self._halt()
+                raise SafetyStop("cliff detected by ToF")
+            if status == "snag_recovery":
+                self._step(v_safe, 0.0)
+                self._halt()
+                raise PathBlocked("cable snag detected, backed off")
+
+            # Extract moving people for predictive social yielding
+            people = []
+            for t, p in self._people():
+                vx = vy = 0.0
+                if t.route and t.speed > 0:
+                    p_next = t.at(self.t + 0.5)
+                    if p_next:
+                        vx = (p_next[0] - p[0]) / 0.5
+                        vy = (p_next[1] - p[1]) / 0.5
+                people.append((p[0], p[1], vx, vy))
+
+            v_cmd, w_cmd, next_idx, arrived = self.body.step_pursuit(
+                (self.x, self.y, self.yaw),
+                waypoints,
+                idx,
+                blend_r=0.28,
+                v_cruise=speed,
+                occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
+                people=people,
+            )
+            idx = next_idx
+            if arrived:
+                break
+
+            remaining = d + sum(math.dist(waypoints[k], waypoints[k + 1]) for k in range(idx, len(waypoints) - 1))
             if remaining < best - 0.05:
                 best, since = remaining, self.t
             elif self.t - since > STALL_S:
                 self._halt()
                 raise PathBlocked(f"no progress toward ({tx:.1f}, {ty:.1f}) for {STALL_S:.0f} s")
-            err = wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw)
-            v = 0.0 if abs(err) > 0.7 else speed * math.cos(err) * (min(1.0, d / 0.4) if last else 1.0)
-            self._step(max(v, 0.05) if v else 0.0, 2.5 * err)
+
+            self._step(v_cmd * torque, w_cmd)
         self._halt()
 
     def _reach(self, target: Point | Pose | Object, stop_dist: float) -> tuple[Point, float]:
@@ -785,6 +879,125 @@ class SimRobot:
                     return round(p[0], 2), round(p[1], 2)
         raise NotFound(f"no free spot {side} it")
 
+    def peek(self, target: Any) -> None:
+        self._call("peek", target=target)
+        target_pt = xy(self._target(target))
+        peek_pt = self.body.plan_peek(
+            (self.x, self.y, self.yaw), target_pt, lambda x, y: self._occ(x, y, self.inflated)
+        )
+        if peek_pt is not None:
+            self.go_to(peek_pt)
+            self.face(target_pt)
+
+    def look_under(self, anchor: Any) -> None:
+        self._call("look_under", anchor=anchor)
+        t = self._target(anchor)
+        anchor_radius = t.radius if isinstance(t, Object) else 0.5
+        anchor_xy = xy(t)
+        look_pt = self.body.plan_look_under(
+            (self.x, self.y, self.yaw), anchor_xy, anchor_radius, lambda x, y: self._occ(x, y, self.inflated)
+        )
+        if look_pt is not None:
+            self.go_to(look_pt)
+            self.face(anchor_xy)
+
+    def express(self, posture: str, chime_kind: str = "", seconds: float = 0.6) -> None:
+        self._call("express", posture=posture, chime_kind=chime_kind)
+        self.posture = posture
+        self.trace.postures.append((round(self.t, 2), posture))
+        if chime_kind:
+            self.trace.chimes.append((round(self.t, 2), chime_kind))
+        steps = max(1, round(float(seconds) / DT))
+        for s in range(steps):
+            t_in = s * DT
+            v, w = self.body.aliveness_velocity(posture, t_in, (self.x, self.y, self.yaw))
+            self._step(v, w)
+        self._halt()
+
+    def wake_turn(self, doa_rad: float) -> None:
+        self._call("wake_turn", doa_rad=doa_rad)
+        self._rotate(wrap(doa_rad), rate=2.5)
+        self.express("listening", chime_kind="wake", seconds=0.3)
+
+    def motion_sequence(self, steps: list[Any]) -> None:
+        self._call("motion_sequence", count=len(steps))
+        for step in steps:
+            if isinstance(step, dict):
+                v = float(step.get("v", 0.0))
+                w = float(step.get("w", 0.0))
+                sec = float(step.get("seconds", step.get("s", 0.5)))
+            elif isinstance(step, (list, tuple)) and len(step) >= 3:
+                v, w, sec = float(step[0]), float(step[1]), float(step[2])
+            else:
+                continue
+            n = max(1, round(sec / DT))
+            for _ in range(n):
+                self._step(v, w)
+        self._halt()
+
+    def pursue(self, target: Any, distance: float = 1.0, seconds: float | None = None) -> None:
+        self._call("pursue", target=target, distance=distance, seconds=seconds)
+        tgt = self._target(target)
+        end = self.t + float(seconds) if seconds is not None else math.inf
+        while self.t < end:
+            self._interrupts()
+            if isinstance(tgt, Object) and tgt.id in self.things:
+                th = self.things[tgt.id]
+                pt = self._where(th) or (th.x, th.y)
+            elif isinstance(tgt, str) and tgt == "user":
+                u = self.user()
+                if not u:
+                    break
+                pt = u.position
+            else:
+                pt = xy(tgt)
+            d = math.hypot(pt[0] - self.x, pt[1] - self.y)
+            if d <= distance + 0.15:
+                err = wrap(math.atan2(pt[1] - self.y, pt[0] - self.x) - self.yaw)
+                if abs(err) > 0.15:
+                    self._step(0.0, 2.0 * err)
+                else:
+                    break
+            else:
+                route = self._plan(pt, distance)
+                if not route:
+                    route = [pt]
+                people = [(p[0], p[1], 0.0, 0.0) for _, p in self._people()]
+                v, w, _, _ = self.body.step_pursuit(
+                    (self.x, self.y, self.yaw),
+                    route,
+                    0,
+                    blend_r=0.28,
+                    v_cruise=CRUISE,
+                    occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
+                    people=people,
+                )
+                self._step(v, w)
+        self._halt()
+
+    def render_view(self, width: int = 320, height: int = 240) -> np.ndarray:
+        """Fast synthetic top-down or perspective RGB camera frame of visible objects & floor."""
+        frame = np.full((height, width, 3), 220, dtype=np.uint8)
+        cx, cy = width // 2, height // 2
+        frame[max(0, cy - 3):min(height, cy + 4), max(0, cx - 3):min(width, cx + 4)] = [50, 50, 200]
+        for t in self._visible():
+            p = self._where(t)
+            if p is None:
+                continue
+            dx, dy = p[0] - self.x, p[1] - self.y
+            xf = dx * math.cos(self.yaw) + dy * math.sin(self.yaw)
+            yf = -dx * math.sin(self.yaw) + dy * math.cos(self.yaw)
+            scale = 25.0
+            px = int(cx - yf * scale)
+            py = int(cy - xf * scale)
+            r_px = max(3, int(t.radius * scale))
+            if 0 <= px < width and 0 <= py < height:
+                y0, y1 = max(0, py - r_px), min(height, py + r_px + 1)
+                x0, x1 = max(0, px - r_px), min(width, px + r_px + 1)
+                color = [30, 160, 30] if t.label != "person" else [200, 80, 40]
+                frame[y0:y1, x0:x1] = color
+        return frame
+
     def wait_for(self, description: str, seconds: float | None = None) -> Object | None:
         self._call("wait_for", description=description, seconds=seconds)
         self._watch(description)
@@ -996,14 +1209,22 @@ class SimRobot:
 
     # ---- for the agent, the gate and the suite (not part of the program API) ------------------------------------
     def snapshot(self) -> dict[str, Any]:
-        """What the context builder needs: pose, room, rooms, battery and every object in memory."""
+        """What the context builder needs: pose, room, rooms, battery, objects, user, scratchpad, notes."""
         user = next((t for t, _ in self._people() if t.user), None)
         objects = [self._object(self.things[i], where, when) for i, (where, when) in self.memory.items()]
         if user is not None and user.id not in self.memory:
             objects.append(self._object(user))
-        return {"pose": Pose(round(self.x, 2), round(self.y, 2), round(math.degrees(self.yaw), 1)), "room": self._room_at(self.x, self.y),
-                "rooms": list(self.scene.rooms), "battery": max(0.0, 1.0 - self.t / 10800.0), "objects": objects,
-                "user": user.id if user else None}
+        return {
+            "pose": Pose(round(self.x, 2), round(self.y, 2), round(math.degrees(self.yaw), 1)),
+            "room": self._room_at(self.x, self.y),
+            "rooms": list(self.scene.rooms),
+            "battery": max(0.0, 1.0 - self.t / 10800.0),
+            "objects": objects,
+            "user": user.id if user else None,
+            "scratchpad": getattr(self, "scratchpad_summary", ""),
+            "notes": list(self.notes),
+            "posture": getattr(self, "posture", "neutral"),
+        }
 
     def begin(self) -> None:
         """A new task starts here: "start" names this spot, and an earlier stop no longer applies."""

@@ -57,6 +57,12 @@ class Detection:
     cut: bool = False  # cut by the picture's edge: its place is roughly right, its size says nothing
     sigma: float = 0.1  # one standard deviation of its place, metres (from how its range was found)
     look: Any = None  # a person's appearance: a normalised hue-saturation histogram of the clothes (`look`)
+    width: float = 0.0
+    depth_extent: float = 0.0
+    orientation_yaw: float = 0.0
+    pose: Any = None  # HumanPose
+    visual_vec: np.ndarray | None = None
+    voice_id: str | None = None
 
 
 @dataclass
@@ -82,6 +88,19 @@ class Track:
     look: Any = None  # a person's appearance, averaged over sightings, for knowing them again
     noise: float = 0.1  # how far its sightings usually scatter, metres (their sigma, averaged)
     sure: bool = False  # its name was confirmed by the vision model (a close-up rename turned a ball into a pillow)
+    vx: float = 0.0
+    vy: float = 0.0
+    width: float = 0.0
+    depth_extent: float = 0.0
+    orientation_yaw: float = 0.0
+    pose: Any = None  # HumanPose
+    visual_vec: np.ndarray | None = None
+    voice_id: str | None = None
+    cut: bool = False
+
+    def predict(self, dt: float) -> tuple[float, float]:
+        """Predicted 2D position (x, y) at dt seconds into the future."""
+        return self.x + self.vx * dt, self.y + self.vy * dt
 
     @property
     def color(self) -> str:
@@ -117,6 +136,11 @@ class Tracker:
                 if t.person and t.look is not None and d.look is not None and \
                         float(np.minimum(t.look, d.look).sum()) < UNLIKE:
                     continue  # someone else, dressed differently: two people passing close do not swap
+                if t.person and t.visual_vec is not None and d.visual_vec is not None:
+                    v_dot = float(np.dot(t.visual_vec, d.visual_vec))
+                    v_norm = float(np.linalg.norm(t.visual_vec) * np.linalg.norm(d.visual_vec))
+                    if v_norm > 1e-6 and v_dot / v_norm < 0.2:
+                        continue
                 gap = math.dist((t.x, t.y), (d.x, d.y))
                 # how far apart one thing's places may honestly be; never over a metre, or neighbours run together
                 unsure = min(1.0, 2.5 * math.sqrt(t.var + d.sigma ** 2))
@@ -132,11 +156,22 @@ class Tracker:
                 best = self._known_again(d, now, touched)
             if best is None:
                 best = Track(self._next, label, d.x, d.y, d.radius, now, now, sized=not d.cut, var=d.sigma ** 2,
-                             noise=d.sigma)
+                             noise=d.sigma, width=d.width, depth_extent=d.depth_extent,
+                             orientation_yaw=d.orientation_yaw, pose=d.pose,
+                             visual_vec=d.visual_vec.copy() if d.visual_vec is not None else None,
+                             voice_id=d.voice_id, cut=d.cut)
                 self.tracks[best.id] = best
                 self._next += 1
             else:  # weigh each sighting by its precision; a thing settles as sightings add up, a person may walk on
-                spread = best.var + (WALKS if best.person else MOVED) * max(0.0, now - best.last_seen)
+                dt = max(0.0, now - best.last_seen)
+                if dt > 0.02:
+                    meas_vx = (d.x - best.x) / dt
+                    meas_vy = (d.y - best.y) / dt
+                    if math.hypot(meas_vx, meas_vy) < 4.0:
+                        beta = 0.25
+                        best.vx = (1.0 - beta) * best.vx + beta * meas_vx
+                        best.vy = (1.0 - beta) * best.vy + beta * meas_vy
+                spread = best.var + (WALKS if best.person else MOVED) * dt
                 a = spread / (spread + d.sigma ** 2)
                 best.var = (1 - a) * spread
                 best.x += a * (d.x - best.x)
@@ -146,6 +181,16 @@ class Tracker:
                     best.sized = True
                 best.hits += 1
                 best.last_seen = now
+                best.cut = d.cut
+                if d.width > 0:
+                    best.width = (1 - 0.3) * best.width + 0.3 * d.width if best.width > 0 else d.width
+                if d.depth_extent > 0:
+                    best.depth_extent = (1 - 0.3) * best.depth_extent + 0.3 * d.depth_extent if best.depth_extent > 0 else d.depth_extent
+                best.orientation_yaw = d.orientation_yaw
+                if d.pose is not None:
+                    best.pose = d.pose
+                if d.voice_id is not None:
+                    best.voice_id = d.voice_id
             best.misses, best.present = 0, True
             best.noise = 0.8 * best.noise + 0.2 * d.sigma
             best.votes[label] += d.score
@@ -156,6 +201,14 @@ class Tracker:
                 best.colors[d.color] += 1
             if d.look is not None:
                 best.look = d.look if best.look is None else 0.8 * best.look + 0.2 * d.look
+            if d.visual_vec is not None:
+                if best.visual_vec is None:
+                    best.visual_vec = d.visual_vec.copy()
+                else:
+                    best.visual_vec = 0.8 * best.visual_vec + 0.2 * d.visual_vec
+                    v_norm = float(np.linalg.norm(best.visual_vec))
+                    if v_norm > 1e-6:
+                        best.visual_vec = best.visual_vec / v_norm
             touched.append(best)
             pairs.append((d, best))
         self._merge(pairs)
@@ -163,17 +216,24 @@ class Tracker:
 
     def _known_again(self, d: Detection, now: float, touched: list[Track]) -> Track | None:
         """A person near no track who looks like someone lost from view within the last half-minute, and could have
-        walked to where they are now: the same person, so "follow me" and "the user" keep them."""
-        if d.look is None:
+        walked to where they are now: the same person, so 'follow me' and 'the user' keep them."""
+        if d.look is None and d.visual_vec is None:
             return None
         best, best_likeness = None, LIKE
         for t in self.tracks.values():
             away = now - t.last_seen
-            if not t.person or t in touched or t.look is None or not 0.3 < away < 30.0:
+            if not t.person or t in touched or not 0.3 < away < 30.0:
                 continue
             if math.dist((t.x, t.y), (d.x, d.y)) > 1.0 + 1.5 * away:  # walking pace
                 continue
-            likeness = float(np.minimum(t.look, d.look).sum())  # histogram intersection, 1 for the same colours
+            likeness = 0.0
+            if t.look is not None and d.look is not None:
+                likeness = float(np.minimum(t.look, d.look).sum())  # histogram intersection, 1 for the same colours
+            if t.visual_vec is not None and d.visual_vec is not None:
+                v_dot = float(np.dot(t.visual_vec, d.visual_vec))
+                v_norm = float(np.linalg.norm(t.visual_vec) * np.linalg.norm(d.visual_vec))
+                if v_norm > 1e-6:
+                    likeness = max(likeness, v_dot / v_norm)
             if likeness > best_likeness:
                 best, best_likeness = t, likeness
         if best is not None:
@@ -267,4 +327,19 @@ def look(pixels: Any, bins: int = 8) -> Any:
     hue = np.where(high == r, (g - b) / span % 6, np.where(high == g, (b - r) / span + 2, (r - g) / span + 4)) / 6
     hist, _, _ = np.histogram2d(hue, saturation, bins=bins, range=((0, 1), (0, 1)))
     return hist / hist.sum()
+
+
+def needs_active_vision(track: Track | None, decision_prob: float | None = None,
+                        target_anchor: Track | None = None,
+                        robot_xy: tuple[float, float] = (0.0, 0.0)) -> str | None:
+    """Determine if active vision behavior (peek, step_closer, step_back_under) is triggered."""
+    if target_anchor is not None and math.dist(robot_xy, (target_anchor.x, target_anchor.y)) < 1.0:
+        return "step_back_under"
+    if decision_prob is not None and 0.30 <= decision_prob <= 0.80:
+        is_cut = getattr(track, "cut", False) if track is not None else False
+        hits = getattr(track, "hits", 0) if track is not None else 0
+        return "peek" if (track is None or is_cut or hits < 3) else "step_closer"
+    if track is not None and (not track.sized or track.noise > 0.25):
+        return "step_closer"
+    return None
 

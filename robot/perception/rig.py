@@ -62,6 +62,20 @@ class Camera:
         bearing = math.atan2(math.sin(bearing), math.cos(bearing))
         return abs(bearing) <= self.hfov / 2 - margin
 
+    def project(self, bx: float, by: float, bz: float = 0.0) -> tuple[float, float] | None:
+        """Project a 3D robot-frame point (bx, by, bz) into (u, v) pixel coordinates."""
+        dx, dy = bx - self.x, by - self.y
+        fwd = dx * math.cos(self.yaw) + dy * math.sin(self.yaw)
+        if fwd <= 0.05:
+            return None
+        left = -dx * math.sin(self.yaw) + dy * math.cos(self.yaw)
+        up = bz - self.z
+        u = self.width / 2 - (left / fwd) * self.focal
+        v = self.height / 2 - (up / fwd) * self.focal
+        if not (0.0 <= u < self.width and 0.0 <= v < self.height):
+            return None
+        return float(u), float(v)
+
 
 RIG = {name: Camera(name, yaw, fov, w, h, CAMERA_R * math.cos(yaw), CAMERA_R * math.sin(yaw), CAMERA_Z, depth)
        for name, (yaw, fov, w, h, _, depth) in CAMERAS.items()}

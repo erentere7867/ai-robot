@@ -1,10 +1,9 @@
-"""The robot API on the full stack: motion through Nav2, and perception from the cameras instead of the scene.
+"""Sprocket v2 full ROS 2 robot stack: Nav2 motion, 3-CSI perception, Brain VLM, and CirculatingMemory.
 
-`RealRobot` is a `RosRobot` whose objects, memory and user come from YOLOE-26 and the tracker (robot/ros/perceive.py),
-whose vision questions go to LFM3-VL-2B with the object's camera crop, and whose answers from the user arrive from the
-page or the microphone. Planning uses the saved map, the one the robot localises in. The gate's dry run plays out in
-the world as perceived, never in the scene the simulator was built from: that scene is used only to judge a run
-afterwards (`judge`).
+`RealRobot` is a `RosRobot` whose objects, 3D bounds, velocities, and people come from YOLOE-26 and the tracker
+(robot/ros/perceive.py), whose vision checks/descriptions go to LFM3-VL-2B via `Brain` with Set-of-Mark / object
+crops, and whose long-term spatial habits, clear-space observations, and speaker identity persist in
+`CirculatingMemory` (robot/mind/memory.py). The scene truth is used solely for post-run evaluation (`judge`).
 """
 
 from __future__ import annotations
@@ -13,28 +12,31 @@ import math
 import queue
 import threading
 import time
-from dataclasses import replace
 from typing import Any
 
+import numpy as np
+
 from robot.agent.api import Object, Pose
+from robot.mind.memory import ANCHOR_LABELS, CANONICAL_SYNONYMS
 from robot.perception.camera import data_url
+from robot.perception.rig import to_robot
 from robot.ros.perceive import Perception
-from robot.ros.robot import RosRobot
+from robot.ros.robot import RosRobot, _resize_rgb
 from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing
 
 # Other names for what perception calls a thing. "desk" answers to "table" only when no table is known (a word match
 # scores below a whole name): from low down a coffee table is often seen as a desk.
 NAMES = {"sofa": ("couch", "seat", "something to sit on"), "chair": ("seat", "something to sit on"),
          "cup": ("mug",), "backpack": ("bag",), "ball": ("toy",), "bin": ("trash can",), "desk": ("work table",)}
-SMALL = {"cup", "bottle", "ball", "shoe", "phone", "keys", "remote", "book", "toy"}  # under the lidar, not obstacles
+SMALL = {"cup", "bottle", "ball", "shoe", "phone", "keys", "remote", "book", "toy"}  # small objects, not obstacles
 SEEN_NOW = 1.5  # seconds: a track seen this recently is "in view now"
 
 
 class RealRobot(RosRobot):
     def __init__(self, scene: Scene, *, detector: Any, brain: Any = None, max_time: float = 600.0,
                  nudge: Any = None, store: Any = None, grid: Any = None) -> None:
-        """`store` (robot/mind/memory.py) keeps what the robot sees, is told and is shown across restarts; `grid` is
-        the occupancy of the map the robot built itself (robot/ros/explore.py), for planning and dry runs."""
+        """`store` (CirculatingMemory) persists seen objects, habits, speakers, facts and places across restarts;
+        `grid` is the occupancy of the map the robot built itself (robot/ros/explore.py), for planning."""
         self._ready = False
         super().__init__(scene, max_time=max_time, nudge=nudge)
         self._rooms: list = []  # room masks of the robot's own map, named again as it learns (robot/ros/rooms.py)
@@ -44,10 +46,17 @@ class RealRobot(RosRobot):
 
             self.set_occupied(grid)
             self._rooms = segment(~grid, RES)
-        self.perception = Perception(self.node, detector, self._pose_at, brain)
+        self.perception = Perception(self.node, detector, self._pose_at, brain,
+                                     scan_bridge=getattr(self, "_scan_bridge", None))
         self.brain = brain
         self.things, self.memory = {}, {}
-        self.answers: queue.Queue[str] = queue.Queue()  # what the user types or says while a program waits
+        self._people_velocities: dict[int, tuple[float, float]] = {}
+        self._cleared_tracks: set[int] = set()
+        self._habit_recorded: dict[int, str] = {}
+        self.human_pose: Any = None
+        self.speaker_profile: Any = None
+        self._candidate_paths: list[tuple[str, list[tuple[float, float]]]] = []
+        self.answers: queue.Queue[str] = queue.Queue()  # what the user types or says while listening
         self.waiting = False
         self._user: int | None = None
         self.store, self._closed = store, False
@@ -96,10 +105,20 @@ class RealRobot(RosRobot):
             return
         now = time.monotonic()
         things, memory, detected = {}, {}, set()
-        people = []
-        for tr in self.perception.objects():
+        people, people_vel = [], {}
+        tracks = self.perception.objects()
+        anchors: list[Any] = []
+        movables: list[Any] = []
+        human_pose = None
+        for tr in tracks:
             if not tr.present:
-                continue  # looked at clearly and not there: forgotten as a place to go
+                if self.store is not None and tr.id not in self._cleared_tracks and hasattr(
+                    self.store, "observe_clear_space"
+                ):
+                    self.store.observe_clear_space(tr.x, tr.y, radius=max(0.6, tr.radius + 0.3))
+                    self._cleared_tracks.add(tr.id)
+                continue  # looked at clearly and not there: marked clear in CirculatingMemory
+            self._cleared_tracks.discard(tr.id)
             thing = Thing(tr.label, round(tr.x, 3), round(tr.y, 3), round(tr.radius, 3), tr.color,
                           names=NAMES.get(tr.label, ()), solid=not tr.person and tr.label not in SMALL,
                           id=tr.id)
@@ -108,17 +127,108 @@ class RealRobot(RosRobot):
             if now - tr.last_seen <= SEEN_NOW:
                 detected.add(tr.id)
             if tr.person:
-                people.append(thing)
-        if people:  # the user is the person the robot has known longest (on the robot: the voice's direction too)
-            self._user = self._user if self._user in things else min(p.id for p in people)
+                people.append((tr, thing))
+                people_vel[tr.id] = (float(getattr(tr, "vx", 0.0)), float(getattr(tr, "vy", 0.0)))
+                if getattr(tr, "pose", None) is not None and human_pose is None:
+                    human_pose = tr.pose
+            elif tr.confirmed and not tr.rejected:
+                c_label = CANONICAL_SYNONYMS.get(tr.label.lower(), tr.label.lower())
+                if c_label in ANCHOR_LABELS or tr.label.lower() in ANCHOR_LABELS:
+                    anchors.append(tr)
+                else:
+                    movables.append(tr)
+        if self.store is not None and anchors and movables and hasattr(self.store, "record_habit"):
+            for mv in movables:
+                best_anc = min(anchors, key=lambda a: math.hypot(mv.x - a.x, mv.y - a.y))
+                if math.hypot(mv.x - best_anc.x, mv.y - best_anc.y) <= (best_anc.radius + mv.radius + 1.2):
+                    if self._habit_recorded.get(mv.id) != best_anc.label:
+                        self.store.record_habit(mv.label, best_anc.label)
+                        self._habit_recorded[mv.id] = best_anc.label
+        if people:
+            speaker_name = getattr(self.speaker_profile, "name", None)
+            matched_speaker = next((t.id for tr, t in people if speaker_name and tr.voice_id == speaker_name), None)
+            if matched_speaker is not None:
+                self._user = matched_speaker
+            elif self._user not in things:
+                self._user = min(t.id for _, t in people)
             things[self._user].user = True
         self.things, self.memory, self._detected = things, memory, detected
+        self._people_velocities = people_vel
+        self.human_pose = human_pose
         if self._rooms and now - self._named_at > 5.0:  # rooms take names from the tour and the furniture seen
             from robot.ros.rooms import name
 
             self._named_at = now
             self.scene.rooms = name(self._rooms, RES, (self.scene.width, self.scene.height), list(things.values()),
                                     self.places)
+
+    def observe_clear_space(self, x: float | None = None, y: float | None = None, radius: float = 0.6) -> None:
+        """Record empty floor in CirculatingMemory, clearing stale movable items and route blockers."""
+        if self.store is not None and hasattr(self.store, "observe_clear_space"):
+            px = self.x if x is None else float(x)
+            py = self.y if y is None else float(y)
+            self.store.observe_clear_space(px, py, radius=radius)
+
+    def record_habit(self, item_label: str, anchor_name: str, alpha: float = 0.3) -> None:
+        if self.store is not None and hasattr(self.store, "record_habit"):
+            self.store.record_habit(item_label, anchor_name, alpha=alpha)
+
+    def usual_anchors(self, item_label: str, limit: int = 5) -> list[tuple[str, float]]:
+        if self.store is not None and hasattr(self.store, "usual_anchors"):
+            return self.store.usual_anchors(item_label, limit=limit)
+        return []
+
+    def identify_speaker(self, voice_vec: Any, look_vec: Any = None, threshold: float = 0.65) -> Any:
+        """Identify the active speaker via CirculatingMemory and bind them as the active user track."""
+        if self.store is None or not hasattr(self.store, "identify_speaker"):
+            return None
+        profile = self.store.identify_speaker(voice_vec, look_vec=look_vec, threshold=threshold)
+        if profile is None:
+            return None
+        self.speaker_profile = profile
+        with self.perception.lock:
+            person_tracks = [t for t in self.perception.tracker.tracks.values() if t.person and t.present]
+            for tr in person_tracks:
+                if self._user == tr.id or len(person_tracks) == 1:
+                    tr.voice_id = profile.name
+        return profile
+
+    def snapshot(self) -> dict[str, Any]:
+        snap = super().snapshot()
+        snap["human_pose"] = self.human_pose
+        snap["posture"] = self.posture
+        if self.speaker_profile is not None:
+            snap["speaker"] = getattr(self.speaker_profile, "name", "")
+        if self.store is not None and hasattr(self.store, "notes"):
+            try:
+                stored_notes = list(self.store.notes())
+                merged = list(dict.fromkeys([*stored_notes, *snap.get("notes", [])]))
+                snap["notes"] = merged
+            except Exception:
+                pass
+        return snap
+
+    def _pivot_paths(self) -> list[tuple[str, list[tuple[float, float]]]]:
+        if self._candidate_paths:
+            return list(self._candidate_paths)
+        pose = (self.x, self.y, self.yaw)
+        u = self.user()
+        goal = u.position if u is not None else (self.x + 2.0 * math.cos(self.yaw), self.y + 2.0 * math.sin(self.yaw))
+        try:
+            rollouts = self.body.rollout_trajectories(
+                pose, goal, lambda x, y: self._occ(x, y, self.inflated), people=self._people_with_vel(), horizon_s=1.2
+            )
+        except Exception:
+            return []
+        return [(c.label, [to_robot(pose, wx, wy) for wx, wy in c.points]) for c in rollouts[:3]]
+
+    def render_view(self, width: int = 320, height: int = 240, candidate_paths: Any = ()) -> np.ndarray:
+        """Latest front CSI view with Set-of-Mark box IDs and *PIVOT* floor trajectory ribbons."""
+        paths = list(candidate_paths) if candidate_paths else self._pivot_paths()
+        annotated = self.perception.render_annotated_view(candidate_paths=paths)
+        if annotated is None or annotated.size == 0:
+            return super().render_view(width=width, height=height)
+        return _resize_rgb(annotated, width, height)
 
     def _visible(self) -> list[Thing]:
         return [self.things[i] for i in self._detected if i in self.things]
@@ -173,19 +283,6 @@ class RealRobot(RosRobot):
             return None
         finally:
             self.waiting = False
-
-    # ---- the dry run happens in the world as perceived -----------------------------------------------------------
-    def clone(self, **limits: Any) -> SimRobot:
-        things = [Thing(t.label, t.x, t.y, t.radius, t.color, names=t.names, solid=t.solid, user=t.user, id=t.id)
-                  for t in self.things.values()]
-        scene = replace(self.scene, things=things, start=Pose(self.x, self.y, math.degrees(self.yaw)), seen=[],
-                        replies=[], noise=0.0)
-        twin = SimRobot(scene, **limits)
-        twin.set_occupied(self.occupied | twin.occupied)  # the saved map, plus what perception found
-        twin.t, twin.memory, twin.notes = self.t, dict(self.memory), list(self.notes)
-        twin.places, twin.coverage = dict(self.places), self.coverage.copy()
-        return twin
-
 
 def judge(robot: SimRobot, truth: Scene) -> SimRobot:
     """The run as the scene's truth sees it: the suite's checks read things and rooms from the scene the simulator was

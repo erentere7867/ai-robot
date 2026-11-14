@@ -1,7 +1,7 @@
 [project]
 name = "sprocket-robot"
 version = "0.3.0"
-description = "A general-purpose wheeled robot on the Arduino VENTUNO Q: a vision-language brain above a behavior-tree executive"
+description = "Sprocket v2: living general-purpose wheeled robot with 3-CSI pure vision, circulating hybrid memory, and a closed-loop visual mind on the Arduino VENTUNO Q"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26", "pyyaml>=6.0", "httpx>=0.27.0"]
 

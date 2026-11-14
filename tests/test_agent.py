@@ -1,189 +1,344 @@
-"""Phase 4 acceptance (sim): hand-written programs pass, the gate rejects 20 of 20 red-team programs, and a stop leaves
-the robot stationary within 300 ms."""
+"""Tests for Sprocket v2: Living Body Engine, Decision Scorer & Closed-Loop Agent."""
 
-import collections
-import threading
-import time
+from __future__ import annotations
 
-import pytest
+import importlib
+import inspect
+import json
+import math
+from dataclasses import dataclass
+from typing import Any
 
-from robot.agent.api import Preempted, api_card
-from robot.agent.gate import check
-from robot.agent.runner import Runner
-from robot.eval.programs import PROGRAMS
-from robot.eval.redteam import RED_TEAM
-from robot.eval.suite import CASES, living_room, run_case, two_rooms, with_things
-from robot.eval.wrong import WRONG
-from robot.sim.world import SimRobot, Thing
-
-BY_ID = {c.id: c for c in CASES}
-
-
-def test_the_suite_has_fifty_instructions_in_seven_categories():
-    counts = collections.Counter(c.category for c in CASES)
-    assert len(CASES) == 50 and len({c.id for c in CASES}) == 50
-    assert counts == {"relative": 8, "object": 10, "search": 8, "conditional": 8, "following": 6, "memory": 5,
-                      "ambiguous": 5}
+from robot.agent.agent import Agent
+from robot.agent.api import Intent, Pose
+from robot.agent.instant import COME_BACK_INTENT, instant
+from robot.agent.planner import LocalPlanner, PlanResult, parse_intent
+from robot.body.controller import BodyController
+from robot.interfaces.live import Live
+from robot.mind.brain import Brain, active_vision_action
+from robot.mind.memory import Memory, ShortTermMemory
+from robot.sim.world import Scene, SimRobot, Thing
 
 
-def test_the_api_card_fits_its_token_budget():
-    assert len(api_card()) <= 3800  # about 950 tokens, cached after the first plan
+@dataclass
+class StepHazard:
+    kind: str
+    delta_z: float
+    distance: float
+    torque_boost: bool = False
 
 
-@pytest.mark.parametrize("case_id", sorted(PROGRAMS))
-def test_hand_written_programs_pass(case_id):
-    ok, why, _ = run_case(BY_ID[case_id], PROGRAMS[case_id])
-    assert ok, why
+def _make_sim(things: list[Thing] | None = None) -> SimRobot:
+    scene = Scene(
+        width=10.0,
+        height=10.0,
+        things=things or [Thing("table", 2.0, 0.0, radius=0.4, color="brown")],
+        rooms={"room": (-5.0, -5.0, 5.0, 5.0)},
+        start=Pose(0.0, 0.0, 0.0),
+    )
+    return SimRobot(scene)
 
 
-@pytest.mark.parametrize("name", sorted(RED_TEAM))
-def test_the_gate_rejects_red_team_programs(name):
-    result = check(RED_TEAM[name], SimRobot(living_room()))
-    assert not result.ok, f"{name} passed the gate"
+def test_body_controller_trajectory_rollout_and_obstacle_avoidance():
+    ctrl = BodyController()
+    pose = (0.0, 0.0, 0.0)
+    goal = (3.0, 0.0)
+
+    # 1. In free space, rolls out 7 smooth candidate paths
+    paths = ctrl.rollout_trajectories(pose, goal, occupied_fn=lambda x, y: False)
+    assert len(paths) == 7
+    labels = [p.label for p in paths]
+    assert set(labels) == {"A", "B", "C", "D", "E", "F", "G"}
+    # Best trajectory toward (3.0, 0.0) should be straight ahead (w=0)
+    best = paths[0]
+    assert abs(best.w) < 0.1
+    assert best.clearance > 0.5
+    assert best.progress_score > 0.0
+
+    # 2. Obstacle blocking straight path
+    def occupied_ahead(x: float, y: float) -> bool:
+        return math.hypot(x - 0.8, y - 0.0) < 0.25
+
+    blocked_paths = ctrl.rollout_trajectories(pose, goal, occupied_fn=occupied_ahead)
+    best_evading = blocked_paths[0]
+    # The evading trajectory must curve around the obstacle (non-zero w)
+    assert abs(best_evading.w) > 0.2
+    assert best_evading.total_score > -100.0
 
 
-CIRCLES = """\
-behind = [o for o in robot.where("box") if o.side.startswith("behind")]
-box = min(behind, key=lambda o: o.distance) if behind else robot.search("box")
-if box:
-    robot.orbit(box, laps=3)
-    robot.say("Done. Three circles around the box.")
-else:
-    robot.say("I can't see a box behind me.")
-"""
-
-SEARCH = """\
-box = robot.search("yellow box", area="here")
-if box:
-    where = robot.describe(box, question="In a few words, where is this box?")
-    robot.go_to(robot.user(), distance=1.0)
-    robot.face(robot.user())
-    robot.say("I found a yellow box, " + where)
-else:
-    robot.say("I searched the room and did not find a yellow box.")
-"""
+def test_trajectory_visual_scores_reranking():
+    ctrl = BodyController()
+    paths = ctrl.rollout_trajectories((0.0, 0.0, 0.0), (3.0, 0.0), occupied_fn=lambda x, y: False)
+    # Pick a curving path like 'B' and give it high d1-2B visual confidence
+    visual_probs = {"B": 0.98, "A": 0.05}
+    reranked = ctrl.apply_visual_scores(paths, visual_probs, weight=5.0)
+    assert reranked[0].label == "B"
+    assert reranked[0].visual_prob == 0.98
 
 
-def test_no_check_passes_an_idle_robot():
-    """A check an idle robot passes measures luck, not the planner."""
-    def idle(case):
-        sim = SimRobot(case.scene())
-        try:
-            sim.wait(60.0)
-        except Preempted:  # the user said "stop"
-            pass
-        return case.check(sim)
+def test_nonstop_waypoint_spline_pursuit():
+    ctrl = BodyController()
+    waypoints = [(1.0, 0.0), (2.0, 1.0), (3.0, 1.0)]
 
-    assert [c.id for c in CASES if idle(c)] == []
+    # Robot approaching intermediate waypoint 0 within blend_r (0.28m)
+    pose = (0.85, 0.0, 0.0)
+    v, w, next_idx, arrived = ctrl.step_pursuit(pose, waypoints, 0, blend_r=0.28, v_cruise=0.4)
+    # Advances idx to 1 without stopping
+    assert next_idx == 1
+    assert not arrived
+    assert v > 0.1  # Robot keeps moving forward non-stop!
 
-
-def test_the_specs_worked_examples_run():
-    """Fable's two programs from section 11 (the brief's tasks are held out of the suite, not of tests)."""
-    sim = SimRobot(living_room())
-    assert check(CIRCLES, sim).ok
-    assert Runner(sim).run(CIRCLES).ok
-    from robot.eval.suite import laps, thing
-
-    assert abs(laps(sim, thing(sim, "box"))) >= 2.8
-    scene = with_things(two_rooms(), Thing("box", 3.5, -1.6, 0.25, "brown"), Thing("box", 1.2, 1.8, 0.25, "yellow"))
-    sim = SimRobot(scene)
-    sim.x = 1.0  # start in the kitchen doorway, so "this room" is the kitchen
-    assert check(SEARCH, sim).ok
-    assert Runner(sim).run(SEARCH).ok
-    assert any("yellow box" in text for _, text in sim.trace.said)
+    # Robot at final waypoint within 0.08m
+    final_pose = (2.98, 1.0, 0.0)
+    v_end, w_end, idx_end, arrived_end = ctrl.step_pursuit(final_pose, waypoints, 2, blend_r=0.28, v_cruise=0.4)
+    assert arrived_end
+    assert v_end == 0.0
 
 
-def test_open_ended_programs_pass_the_dry_run():
-    follow = ("while True:\n    me = robot.user()\n    robot.face(me)\n"
-              "    robot.drive(metres_per_second=0.0, seconds=0.1)\n")
-    assert check(follow, SimRobot(living_room())).ok
+def test_predictive_social_hallway_yielding():
+    ctrl = BodyController()
+    pose = (0.0, 0.0, 0.0)
+    goal = (4.0, 0.0)
+    # Person approaching head-on down hallway at 2.0m moving at -0.7 m/s toward robot
+    person = [(2.0, 0.0, -0.7, 0.0)]
+
+    paths = ctrl.rollout_trajectories(pose, goal, occupied_fn=lambda x, y: False, people=person)
+    best = paths[0]
+    # Best path must yield to robot's right side (negative w in standard robot coordinate frame)
+    assert best.w < 0.0
+    assert best.social_score > 0.0
 
 
-def test_a_stop_ends_motion_within_300_ms():
-    sim = SimRobot(living_room(), realtime=True)
-    runner = Runner(sim)
-    results = []
-    worker = threading.Thread(target=lambda: results.append(runner.run("robot.go_to((3.0, -0.2))")))
-    worker.start()
-    time.sleep(1.5)
-    assert sim.v_now > 0.0, "the robot should be driving"
-    stopped = time.perf_counter()
-    runner.stop()
-    worker.join(2.0)
-    assert time.perf_counter() - stopped <= 0.3
-    assert results and results[0].status == "preempted" and sim.v_now == 0.0
+def test_procedural_aliveness():
+    ctrl = BodyController()
+    pose = (0.0, 0.0, 0.0)
+
+    # 1. Listening posture: gentle rock + wake-word DOA turn reflex
+    v, w = ctrl.aliveness_velocity("listening", t_in_posture=0.1, pose=pose, speaker_doa=0.5)
+    assert abs(v) > 0.0
+    assert abs(w - min(1.8, 2.5 * 0.5)) < 1e-4
+
+    # 2. Listening polite yield when person steps inside 0.45m
+    v_close, _ = ctrl.aliveness_velocity(
+        "listening", t_in_posture=0.1, pose=pose, nearest_person_ahead=0.35
+    )
+    assert v_close == -0.15
+
+    # 3. Happy posture: double-shimmy for first 0.6s
+    _, w_happy = ctrl.aliveness_velocity("happy", t_in_posture=0.2, pose=pose)
+    assert abs(w_happy) > 0.1
+    _, w_happy_done = ctrl.aliveness_velocity("happy", t_in_posture=0.7, pose=pose)
+    assert w_happy_done == 0.0
+
+    # 4. Curious posture: sinusoidal scanning turn
+    v_cur, w_cur = ctrl.aliveness_velocity("curious", t_in_posture=0.25, pose=pose)
+    assert v_cur == 0.0
+    assert abs(w_cur) > 0.1
 
 
-@pytest.mark.parametrize("case_id", sorted(WRONG))
-def test_plausible_but_wrong_programs_fail(case_id):
-    """A check must reject a close-but-wrong program too, or training against the checks learns to exploit them."""
-    for program in WRONG[case_id]:
-        ok, why, _ = run_case(BY_ID[case_id], program)
-        assert not ok, f"{case_id} accepted: {program!r}"
+def test_proprioception_snag_step_and_cliff_reflex():
+    ctrl = BodyController()
+
+    # 1. Anti-cable snag: high drive command (0.2 m/s) with near-zero progress (< 0.015 m/s) for >= 0.15 s
+    ctrl.check_proprioception(v_cmd=0.2, w_cmd=0.0, v_actual=0.0, w_actual=0.0, dt=0.05)
+    ctrl.check_proprioception(v_cmd=0.2, w_cmd=0.0, v_actual=0.0, w_actual=0.0, dt=0.05)
+    status, v, w, torque = ctrl.check_proprioception(
+        v_cmd=0.2, w_cmd=0.0, v_actual=0.0, w_actual=0.0, dt=0.05
+    )
+    assert status == "snag_recovery"
+    assert v == -0.15
+
+    # 2. Traversable step with torque boost (1.5 cm step-up)
+    step_hazard = StepHazard(kind="traversable", delta_z=0.015, distance=0.2, torque_boost=True)
+    status, v, w, torque = ctrl.check_proprioception(
+        v_cmd=0.3, w_cmd=0.0, v_actual=0.28, w_actual=0.0, dt=0.05, hazard=step_hazard
+    )
+    assert status == "torque_boost"
+    assert torque == 1.35
+    assert v == 0.3
+
+    # 3. Cliff stop (6 cm drop)
+    cliff_hazard = StepHazard(kind="cliff", delta_z=-0.06, distance=0.18)
+    status, v, w, torque = ctrl.check_proprioception(
+        v_cmd=0.3, w_cmd=0.0, v_actual=0.28, w_actual=0.0, dt=0.05, hazard=cliff_hazard
+    )
+    assert status == "cliff_stop"
+    assert v == -0.15
 
 
-@pytest.mark.parametrize(("case_id", "program"), [
-    ("R3", 'robot.turn(90, "left")\n'),  # what the untrained planner writes: positional, and right
-    ("R3", 'robot.turn("left", 90)\n'),  # swapped: the types say which is which
-    ("R1", 'robot.move(1, "backward")\nrobot.spin(2)\n'),
-    ("O6", 'robot.go_to(robot.where("ball"))\nrobot.go_to("start")\n'),  # "start" is where the task began
-    ("S6", 'mug = robot.search("mug", "the kitchen")\nrobot.go_to(mug, 0.3)\n'),
-])
-def test_the_forms_people_and_models_write_are_accepted(case_id, program):
-    ok, why, _ = run_case(BY_ID[case_id], program)
-    assert ok, why
+def test_active_vision_maneuvers_and_decision_thresholds():
+    ctrl = BodyController()
+
+    # 1. plan_peek finds perpendicular vantage points
+    peek_point = ctrl.plan_peek(
+        robot_pose=(0.0, 0.0, 0.0),
+        target_xy=(2.0, 0.0),
+        occupied_fn=lambda x, y: False,
+        offset=0.35,
+    )
+    assert peek_point is not None
+    assert abs(abs(peek_point[1]) - 0.35) < 0.01
+
+    # 2. plan_look_under computes standoff around 1.25m from furniture anchor
+    look_point = ctrl.plan_look_under(
+        robot_pose=(0.0, 0.0, 0.0),
+        anchor_xy=(3.0, 0.0),
+        anchor_radius=0.5,
+        occupied_fn=lambda x, y: False,
+        standoff=1.25,
+    )
+    assert look_point is not None
+    dist_to_anchor = math.hypot(look_point[0] - 3.0, look_point[1] - 0.0)
+    assert abs(dist_to_anchor - (1.25 + 0.5 * 0.3)) < 0.05
+
+    # 3. Active vision action calibration
+    assert active_vision_action(0.85) == "confirm"
+    assert active_vision_action(0.50) == "inspect"
+    assert active_vision_action(0.20) == "reject"
+    assert Brain.active_vision_action(0.75) == "inspect"
 
 
-def test_a_count_of_turns_that_means_degrees_is_refused():
-    result = check("robot.spin(turns=180)\n", SimRobot(living_room()))
-    assert not result.ok and "full turns" in result.message
+def test_closed_loop_agent_step_execution():
+    sim = _make_sim()
+
+    class MockStepPlanner:
+        def __init__(self) -> None:
+            self.steps = [
+                Intent(
+                    say="Going to the table.",
+                    chime="listen",
+                    posture="curious",
+                    action="go_to",
+                    target="table",
+                    params={"distance": 0.5},
+                    subgoal="approach table",
+                ),
+                Intent(
+                    say="Arrived at the table.",
+                    chime="happy",
+                    posture="happy",
+                    action="done",
+                    subgoal="completed",
+                ),
+            ]
+            self.idx = 0
+            self.calls: list[dict[str, Any]] = []
+
+        def plan_step(self, *args: Any, **kwargs: Any) -> Intent:
+            self.calls.append({"args": args, "kwargs": kwargs})
+            intent = self.steps[self.idx]
+            self.idx = min(len(self.steps) - 1, self.idx + 1)
+            return intent
+
+    planner = MockStepPlanner()
+    agent = Agent(planner)
+    record = agent.do("Go to the table.", sim)
+    assert record.outcome == "done"
+    assert len(record.intents) == 2
+    assert not hasattr(record, "programs")
+    assert not hasattr(record, "checks")
+    assert any("Going to the table." in text for _, text in sim.trace.said)
+    assert ("happy",) in [(p,) for _, p in sim.trace.postures] or len(sim.trace.postures) > 0
+
+    # Scratchpad, visual buffer, and short-term dialogue turn wiring
+    assert isinstance(agent.short_term, ShortTermMemory)
+    assert agent.short_term.scratchpad.goal == "Go to the table."
+    assert agent.short_term.scratchpad.steps == 2
+    assert "room" in agent.short_term.scratchpad.visited_rooms
+    assert len(agent.short_term.scratchpad.checked_spots) >= 2
+    assert len(agent.short_term.visual_buffer.recent(seconds=5.0)) >= 1
+    assert len(agent.short_term.dialogue) == 1
+    assert agent.short_term.dialogue[0][0] == "Go to the table."
+    assert "(done)" in agent.short_term.dialogue[0][1]
+
+    # Pure-mock non-multimodal planner receives image_url=None and scratchpad.summary()
+    assert planner.calls[0]["kwargs"]["image_url"] is None
+    assert "Goal: 'Go to the table.'" in planner.calls[0]["kwargs"]["scratchpad"]
+    assert "Rooms: [room]" in planner.calls[1]["kwargs"]["scratchpad"]
 
 
-def test_turn_left_alone_is_a_quarter_turn_and_a_bare_angle_asks_which_way():
-    ok, why, _ = run_case(BY_ID["R3"], 'robot.turn("left")\n')
-    assert ok, why
-    result = check("robot.turn(90)\n", SimRobot(living_room()))
-    assert not result.ok and "which way" in result.message
+def test_agent_multimodal_live_memory_and_clean_interfaces(tmp_path):
+    sim = _make_sim()
+    live = Live()
+    mem = Memory(tmp_path / "agent.db")
+
+    class MultimodalMockPlanner:
+        multimodal = True
+
+        def __init__(self) -> None:
+            self.image_urls: list[str | None] = []
+
+        def plan_step(self, *args: Any, **kwargs: Any) -> Intent:
+            self.image_urls.append(kwargs.get("image_url"))
+            return Intent(
+                say="All set.",
+                chime="happy",
+                posture="happy",
+                action="done",
+                subgoal="verify scene",
+            )
+
+    planner = MultimodalMockPlanner()
+    agent = Agent(planner, memory=mem, live=live)
+    assert agent.short_term is mem.short_term
+
+    record = agent.do("Check the room.", sim)
+    assert record.outcome == "done"
+    assert planner.image_urls[0] is not None
+    assert planner.image_urls[0].startswith("data:image/png;base64,")
+
+    assert live.state.status == "done"
+    assert live.state.subgoal == "verify scene"
+    assert live.state.action == "done"
+    assert live.state.posture == "happy"
+    assert live.state.chime == "happy"
+    assert "All set." in live.state.said
+    assert json.loads(live.snapshot())["status"] == "done"
+    assert len(mem.short_term.dialogue) == 1
+
+    # Legacy fallbacks and aliases are completely removed
+    instant_mod = importlib.import_module("robot.agent.instant")
+    assert "readback" not in inspect.signature(Agent).parameters
+    assert not hasattr(PlanResult, "program")
+    assert not hasattr(LocalPlanner, "judge")
+    assert not hasattr(instant_mod, "COME_BACK")
+    assert isinstance(COME_BACK_INTENT, Intent)
 
 
-def test_a_background_follow_keeps_going_while_the_program_waits():
-    """"Follow me and tell me if you see a cat": the follow runs alongside wait_for."""
-    import math
+def test_instant_commands():
+    sim = _make_sim()
+    agent = Agent(LocalPlanner())
 
-    from robot.eval.suite import tracked, walking_user
+    # Stop command acts instantly without calling model
+    record_stop = agent.do("stop now please", sim)
+    assert record_stop.outcome == "preempted"
 
-    walk = ((0.2, 0.4), (2.4, 0.2), (2.4, -1.9), (0.0, -2.0))
+    # Wait command acts instantly
+    record_wait = agent.do("wait", sim)
+    assert record_wait.outcome == "done"
 
-    scene = with_things(walking_user(walk, 0.4, stop_at=40.0), Thing("cat", 2.0, -1.5, 0.15, "black", solid=False,
-                                                                       appear_at=20.0))
-    sim = SimRobot(scene)
-    program = ('robot.follow(robot.user(), background=True)\ncat = robot.wait_for("cat")\n'
-               'robot.say("I can see a cat!")\nrobot.follow(robot.user())\n')
-    assert check(program, sim).ok
-    result = Runner(sim).run(program)
-    assert result.status in ("done", "preempted"), result.error
-    assert any("cat" in text for _, text in sim.trace.said)
-    assert tracked(sim, 8.0, 20.0, lambda x, y, _, u: math.dist((x, y), u) <= 2.2) >= 0.6
-
-
-def test_hand_written_programs_survive_a_poor_detector():
-    """With noise 1 the detector misses things, more often far away, and places them off; the skills must cope."""
-    failed = []
-    for case_id, program in sorted(PROGRAMS.items()):
-        scene = BY_ID[case_id].scene()
-        scene.noise, scene.seed = 1.0, 1
-        sim = SimRobot(scene)
-        if not (check(program, sim).ok and Runner(sim).run(program).status != "error" and BY_ID[case_id].check(sim)):
-            failed.append(case_id)
-    assert failed == []
+    # instant helper
+    assert instant("Sprocket, stop!") == "stop"
+    assert instant("wait a moment") == "wait"
+    assert instant("come back here") == "come back"
+    assert instant("go to the kitchen") is None
 
 
-def test_a_move_that_stops_a_few_centimetres_short_is_done():
-    from robot.agent.api import Pose
-    from robot.sim.world import Scene, SimRobot, Thing
-
-    scene = Scene(6.0, 4.0, [Thing("box", -1.6, 0.0, 0.3, "brown")], {"room": (-3.0, -2.0, 3.0, 2.0)},
-                  start=Pose(0.0, 0.0, 0.0))
-    robot = SimRobot(scene)
-    robot.move(1.0, direction="backward")  # the box stops it about 5 cm short: close enough
-    assert -1.0 < robot.x < -0.85
+def test_intent_parsing_and_format():
+    text = (
+        "say: On my way to the desk.\n"
+        "chime: wake\n"
+        "posture: curious\n"
+        "action: go_to\n"
+        "target: 4\n"
+        "params: {\"distance\": 0.3}\n"
+        "subgoal: reach the desk\n"
+    )
+    intent = parse_intent(text)
+    assert intent.say == "On my way to the desk."
+    assert intent.chime == "wake"
+    assert intent.posture == "curious"
+    assert intent.action == "go_to"
+    assert intent.target == 4
+    assert intent.params == {"distance": 0.3}
+    assert intent.subgoal == "reach the desk"

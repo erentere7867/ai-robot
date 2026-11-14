@@ -33,8 +33,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from robot.perception.rig import Camera
-from robot.ros.model import LIDAR_Z
 
+SCAN_Z = 0.25  # beam height for scan refinement (replaces legacy spinning lidar)
 LIDAR_AGREES = 0.12  # the lidar is trusted within this fraction of the floor estimate (its middle half was within 7%)
 # A person's middle lies this far beyond their nearest point: their arms make their box wide, but the body is about a
 # quarter metre deep (the lidar found a standing person's legs 0.12 m nearer than their middle).
@@ -52,6 +52,9 @@ class Place:
     radius: float
     how: str  # "depth", "lidar" or "floor"
     sigma: float  # one standard deviation of the position, metres
+    width: float = 0.0
+    depth_extent: float = 0.0
+    orientation_yaw: float = 0.0
 
 
 def lidar_range(scan: tuple[np.ndarray, float, float] | None, bearing: float, spread: float = 0.04) -> float | None:
@@ -117,13 +120,44 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
             heights = cam.z - down * patch  # height above the floor of each pixel's point
             if np.percentile(heights[good], 90) < 0.04:
                 return None  # all floor
-            d = near_face(patch[good & (heights > 0.03)])  # along the lens axis, as depth cameras measure
+            valid_mask = good & (heights > 0.03)
+            d = near_face(patch[valid_mask])  # along the lens axis, as depth cameras measure
             if d is not None:
                 seen = d / math.cos(middle - cam.yaw)
                 radius = _radius(seen, span)
                 forward = d + (BODY if person else radius)  # its middle, further along the axis on the middle ray
                 x, y, _ = cam.to_base(forward, forward * math.tan(middle - cam.yaw), 0.0)
-                return _place(x, y, radius, "depth", seen)
+
+                # 3D extents (width, depth_extent) and orientation_yaw from depth cluster
+                width, depth_extent, ori_yaw = 2 * radius, (BODY * 2 if person else 2 * radius), cam.yaw
+                v_rel, u_rel = np.where(valid_mask)
+                if len(v_rel) >= 10:
+                    u_abs = int(x1) + u_rel
+                    d_pts = patch[valid_mask]
+                    near_pts = (d_pts >= d - 0.15) & (d_pts <= d + 0.6)
+                    if np.count_nonzero(near_pts) >= 6:
+                        u_f = u_abs[near_pts]
+                        d_f = d_pts[near_pts]
+                        x_opt = (u_f.astype(np.float32) - cam.width / 2) / cam.focal
+                        xc = d_f
+                        yc = -x_opt * d_f
+                        cos_y, sin_y = math.cos(cam.yaw), math.sin(cam.yaw)
+                        xb_pts = cam.x + xc * cos_y - yc * sin_y
+                        yb_pts = cam.y + xc * sin_y + yc * cos_y
+                        coords = np.stack([xb_pts, yb_pts], axis=1)
+                        cov = np.cov(coords, rowvar=False)
+                        if cov.shape == (2, 2) and np.isfinite(cov).all():
+                            eigvals, eigvecs = np.linalg.eigh(cov)
+                            main_vec = eigvecs[:, 1]
+                            ori_yaw = float(math.atan2(main_vec[1], main_vec[0]))
+                            proj1 = coords @ main_vec
+                            proj2 = coords @ np.array([-main_vec[1], main_vec[0]])
+                            span1 = float(np.percentile(proj1, 95) - np.percentile(proj1, 5))
+                            span2 = float(np.percentile(proj2, 95) - np.percentile(proj2, 5))
+                            width = max(0.04, span1)
+                            depth_extent = max(0.04, span2)
+
+                return _place(x, y, radius, "depth", seen, width, depth_extent, ori_yaw)
     # where it meets the floor, unless the box runs off the bottom of the picture: then the picture's edge is not the
     # thing's foot, and the estimate came out half the true range
     fu, fv = foot if foot is not None else ((x1 + x2) / 2, y2)
@@ -134,15 +168,16 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
     radius = _radius(seen, span)
     behind = BODY if person else radius
     forward = (contact[0] - cam.x) * axis[0] + (contact[1] - cam.y) * axis[1]
-    if cam.point(fu, y1, forward)[2] >= LIDAR_Z:  # the lidar's beam passes over anything lower than the lidar
-        # (a 25 cm ball under the 27 cm beam took the wall's range behind it, 1 m too far)
-        lo, hi = (math.atan2(cam.y + seen * math.sin(e), cam.x + seen * math.cos(e)) for e in (a, b))  # from the lidar
+    if scan is not None and cam.point(fu, y1, forward)[2] >= SCAN_Z:  # scan beam passes over low things
+        lo, hi = (math.atan2(cam.y + seen * math.sin(e), cam.x + seen * math.cos(e)) for e in (a, b))
         lidar = lidar_near(scan, lo, hi, math.hypot(*contact))
-        if lidar is not None:  # the nearest of its returns: its middle lies beyond, away from the lidar
+        if lidar is not None:  # the nearest of its returns: its middle lies beyond
             reach, bearing = lidar[0] + behind, lidar[1]
-            return _place(reach * math.cos(bearing), reach * math.sin(bearing), radius, "lidar", lidar[0])
+            return _place(reach * math.cos(bearing), reach * math.sin(bearing), radius, "lidar", lidar[0],
+                          2 * radius, behind * 2, bearing)
     # the lowest point of a thing's outline is its nearest along the lens axis: its middle lies further along the axis
-    return _place(contact[0] + behind * axis[0], contact[1] + behind * axis[1], radius, "floor", seen)
+    return _place(contact[0] + behind * axis[0], contact[1] + behind * axis[1], radius, "floor", seen,
+                  2 * radius, behind * 2, middle)
 
 
 def _radius(seen: float, span: float) -> float:
@@ -150,8 +185,11 @@ def _radius(seen: float, span: float) -> float:
     return max(0.04, min(1.0, seen * math.tan(span / 2)))
 
 
-def _place(x: float, y: float, radius: float, how: str, seen: float) -> Place | None:
+def _place(x: float, y: float, radius: float, how: str, seen: float,
+           width: float = 0.0, depth_extent: float = 0.0, orientation_yaw: float = 0.0) -> Place | None:
     if not 0.15 <= seen <= 6.0:
         return None
     base, per_metre = SIGMA[how]
-    return Place(x, y, radius, how, base + per_metre * seen)
+    w = width if width > 0.0 else 2 * radius
+    de = depth_extent if depth_extent > 0.0 else 2 * radius
+    return Place(x, y, radius, how, base + per_metre * seen, w, de, orientation_yaw)

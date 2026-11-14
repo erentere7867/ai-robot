@@ -1,14 +1,15 @@
-"""Run suite cases in Gazebo with Nav2: the same room, program and check as in the 2D world.
+"""Run suite cases closed-loop in Gazebo with Nav2: the same room, agent and check as in the 2D world.
 
 Each case gets a fresh simulation. Its scene becomes a Gazebo world (walls as boxes, things as cylinders) and a
-Nav2 map (the 2D world's occupancy grid), and Nav2's TurtleBot 4 simulation is launched in it with the robot at the
-scene's start pose. Then the program goes through the same gate and runner as anywhere else, on `RosRobot`.
+Nav2 map (the 2D world's occupancy grid), and Nav2's TurtleBot 4 simulation is launched in it with Sprocket's 3-CSI
+pure-vision URDF at the scene's start pose. Calibrated synthetic /scan from 3-CSI depth feeds AMCL/Nav2 without a
+hardware lidar, and `Agent(LocalPlanner(...))` runs closed-loop against `RosRobot`.
 
-    python3 -m robot.ros.stage                 # the hand-written programs whose rooms hold still
-    python3 -m robot.ros.stage --cases R1 O3   # some of them
+    python3 -m robot.ros.stage                 # all static-room suite cases
+    python3 -m robot.ros.stage --cases R1 O3   # specific case IDs
 
-Runs inside WSL (or on the board) with ROS 2 sourced. Imports of ROS stay inside functions: the runner's sandbox
-process re-imports this module and must stay small.
+Runs inside WSL (or on the board) with ROS 2 sourced. Imports of ROS stay inside functions so this module stays
+lightweight when imported elsewhere.
 """
 
 from __future__ import annotations
@@ -165,10 +166,10 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
            map_file: Path | None = None) -> Launched:
     """Nav2's simulation launch with Sprocket's body (robot/ros/model.py) in the scene; with gui, the Gazebo 3D window
     opens too (RViz stays closed: on a CPU it costs the model and the detector too much, and the live page shows the
-    map, the lidar and the cameras). The rear cameras get their own bridges: the TurtleBot launch only knows the front
-    one, and robot_localization's EKF fuses the wheels with the gyro into the odometry (robot/ros/model.py). The robot
-    localises in `map_file` (a map it built: robot/ros/explore.py), else in the simulator's own map of
-    the scene; with `slam` it has no map and builds one as it goes."""
+    map, synthetic /scan and the cameras). The rear cameras get their own RGB and depth bridges: the TurtleBot launch
+    only knows the front one, and robot_localization's EKF fuses the wheels with the gyro into the odometry
+    (robot/ros/model.py). The robot localises in `map_file` (a map it built: robot/ros/explore.py), else in the
+    simulator's own map of the scene; with `slam` it has no map and builds one as it goes."""
     from robot.ros.model import EKF, GROUND_TRUTH, REAR_BRIDGES, REAR_INFO, urdf
 
     clear()
@@ -199,7 +200,8 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
 
 # Localisation tuned to this robot: Nav2's defaults suit a 60-beam view and wheel-only odometry. With them, AMCL was
 # 0.10 m and 1.2 degrees off the true pose while driving (worst 0.25 m and 6 degrees), and every object seen in that
-# moment was placed as far off. Sprocket's lidar gives 500 beams, and its odometry is fused with the gyro.
+# moment was placed as far off. Sprocket's calibrated 3-CSI depth rig publishes a synthetic 360-degree /scan (360
+# beams) without hardware lidar, and its odometry is fused with the gyro.
 AMCL = {"max_beams": 150, "update_min_d": 0.1, "update_min_a": 0.1, "alpha1": 0.1, "alpha2": 0.1, "alpha3": 0.1,
         "alpha4": 0.1, "z_hit": 0.9, "z_rand": 0.1, "sigma_hit": 0.1, "transform_tolerance": 0.3}
 
@@ -256,14 +258,23 @@ def set_initial_pose(node: object, world: SimRobot) -> None:
         time.sleep(0.5)
 
 
-def run_case(case: object, program: str) -> tuple[bool, str, SimRobot | None]:
-    """Like robot.eval.suite.run_case, in Gazebo."""
+def run_case(
+    case: object,
+    planner: object | None = None,
+    *,
+    brain_url: str = "http://127.0.0.1:8080",
+    think: int = 0,
+) -> tuple[bool, str, SimRobot | None]:
+    """Like robot.eval.suite.run_case, closed-loop in Gazebo on RosRobot."""
     import rclpy
 
-    from robot.agent.gate import check
-    from robot.agent.runner import Runner
+    from robot.agent.agent import Agent
+    from robot.agent.planner import LocalPlanner
+    from robot.mind.brain import Brain
     from robot.ros.robot import RosRobot
 
+    if planner is None:
+        planner = LocalPlanner(Brain(brain_url), think=think)
     scene = case.scene()
     out = Path(tempfile.mkdtemp(prefix=f"sprocket-{case.id}-"))
     sim = launch(SimRobot(scene), out)
@@ -277,14 +288,14 @@ def run_case(case: object, program: str) -> tuple[bool, str, SimRobot | None]:
         if not robot.actions["navigate_to_pose"].wait_for_server(timeout_sec=120.0):
             return False, "Nav2 did not come up", robot
         time.sleep(3.0)
-        gate = check(program, robot)
-        if not gate.ok:
-            return False, f"gate: {gate}", robot
-        result = Runner(robot).run(program)
-        if result.status == "error":
-            return False, f"run: {result.error} (line {result.line})", robot
-        ok = bool(case.check(robot))
-        return ok, "passed" if ok else "check failed", robot
+        record = Agent(planner, brain=getattr(planner, "brain", None)).do(case.say, robot)
+        checked = bool(case.check(robot))
+        ok = checked and record.outcome in ("done", "preempted", "refused")
+        if ok:
+            why = "passed"
+        else:
+            why = "; ".join(record.problems[-2:]) or f"{record.outcome or 'failed'}, check failed"
+        return ok, why, robot
     finally:
         if robot is not None:
             robot.shutdown()
@@ -296,29 +307,34 @@ def run_case(case: object, program: str) -> tuple[bool, str, SimRobot | None]:
 def main() -> None:
     import argparse
 
-    from robot.eval.programs import PROGRAMS
-    from robot.eval.suite import CASES
+    from robot.agent.planner import LocalPlanner
+    from robot.eval.suite import CASES, end, turned
+    from robot.eval.suite import run_case as suite_run_case
+    from robot.mind.brain import Brain
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", nargs="*", default=[])
+    parser.add_argument("--brain", default="http://127.0.0.1:8080")
+    parser.add_argument("--think", type=int, default=0)
     args = parser.parse_args()
+    planner = LocalPlanner(Brain(args.brain), think=args.think)
+    if not planner.brain.healthy():
+        raise SystemExit(f"llama-server is not answering on {args.brain}")
     moving = {"F1"}  # a walking person needs an actor in Gazebo; not built yet
-    chosen = [c for c in CASES if c.id in PROGRAMS and (c.id in args.cases if args.cases else c.id not in moving)]
+    chosen = [c for c in CASES if (c.id in args.cases if args.cases else c.id not in moving)]
     passed = 0
     for case in chosen:
         started = time.monotonic()
         try:
-            ok, why, robot = run_case(case, PROGRAMS[case.id])
+            ok, why, robot = run_case(case, planner)
         except Exception as exc:  # one room that fails to start must not stop the rest
             ok, why, robot = False, f"{type(exc).__name__}: {exc}"[:40], None
-        sim_ok = __import__("robot.eval.suite", fromlist=["run_case"]).run_case(case, PROGRAMS[case.id])[0]
+        sim_ok = suite_run_case(case, planner)[0]
         passed += ok
         t = robot.t if robot else 0.0
         print(f"[{'ok' if ok else 'XX'}] {case.id:<4} gazebo {why:<40} 2D world {'ok' if sim_ok else 'XX'}  "
               f"({t:.0f} s simulated, {time.monotonic() - started:.0f} s wall)", flush=True)
         if robot and not ok and robot.trace.poses:
-            from robot.eval.suite import end, turned
-
             x, y, yaw = end(robot)
             print(f"       ended at ({x:.2f}, {y:.2f}) facing {math.degrees(yaw):.0f} deg, turned "
                   f"{math.degrees(turned(robot)):.0f} deg in all", flush=True)

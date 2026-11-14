@@ -1,9 +1,9 @@
-"""The robot API on ROS 2: Nav2 moves the robot, TF says where it is, the lidar is the real /scan.
+"""Sprocket v2 Robot API on ROS 2: Nav2 navigation, TF pose, synthetic /scan, and /cmd_vel Twist control.
 
-Perception is not built yet (phase 3), so objects come from the scene the 2D world was made from: `RosRobot` keeps
-a `SimRobot` in step with the real pose and lets it answer find, detect, ask and unseen as if a perfect detector
-were running. Everything that moves or measures goes through ROS. The suite's checks read the same trace in both
-backends, so one program can be judged in the 2D world and in Gazebo by the same rules.
+Every skill from the 2D simulator (`go_to`, `pursue`, `peek`, `look_under`, `express`, `wake_turn`, `motion_sequence`,
+`render_view`, etc.) runs through ROS 2: Nav2 actions for map-level goals, BodyController 30-50 Hz pursuit &
+procedural aliveness on /cmd_vel, 3-CSI calibrated synthetic /scan for AMCL/clearance without hardware lidar, and the
+front MIPI-CSI camera for live RGB frames.
 """
 
 from __future__ import annotations
@@ -13,22 +13,44 @@ import threading
 import time
 from typing import Any
 
-from robot.agent.api import Object, PathBlocked, Point, Pose, Preempted, choose, wrap
+import numpy as np
+
+from robot.agent.api import Object, PathBlocked, Point, Pose, Preempted, choose, wrap, xy
+from robot.interfaces.voice import chime as synth_chime
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
 DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
 
 
+def _resize_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Resize an image array to `(height, width, 3)` uint8 using pure NumPy nearest-neighbor indexing."""
+    if width <= 0 or height <= 0:
+        return np.zeros((max(0, height), max(0, width), 3), dtype=np.uint8)
+    arr = np.asarray(rgb, dtype=np.uint8)
+    if arr.ndim == 2:
+        arr = np.repeat(arr[:, :, None], 3, axis=2)
+    h, w = arr.shape[:2]
+    if h == height and w == width and arr.shape[2] == 3:
+        return arr.copy()
+    ys = (np.arange(height) * h) // height
+    xs = (np.arange(width) * w) // width
+    return arr[np.ix_(ys, xs)][:, :, :3].copy()
+
+
 class RosRobot(SimRobot):
-    def __init__(self, scene: Scene, max_time: float = 600.0, nudge: Any = None) -> None:
+    def __init__(self, scene: Scene, max_time: float = 600.0, nudge: Any = None,
+                 synthetic_scan: bool = True) -> None:
         import rclpy
         from geometry_msgs.msg import Twist, TwistStamped
         from nav2_msgs.action import DriveOnHeading, FollowPath, NavigateToPose, Spin
         from rclpy.action import ActionClient
         from rclpy.executors import MultiThreadedExecutor
         from rclpy.parameter import Parameter
-        from sensor_msgs.msg import LaserScan
+        from rclpy.qos import qos_profile_sensor_data
+        from sensor_msgs.msg import Image, LaserScan
         from tf2_ros import Buffer, TransformListener
+
+        from robot.ros.perceive import TOPICS, SyntheticScanPublisher, _image
 
         super().__init__(scene, max_time=max_time)
         if not rclpy.ok():
@@ -41,12 +63,18 @@ class RosRobot(SimRobot):
             ("drive_on_heading", DriveOnHeading))}
         self.kinds = {"navigate_to_pose": NavigateToPose, "follow_path": FollowPath, "spin": Spin,
                       "drive_on_heading": DriveOnHeading}
-        stamped = any("TwistStamped" in t for n, ts in self.node.get_topic_names_and_types() if n.endswith("cmd_vel_nav")
-                      for t in ts)
+        stamped = any("TwistStamped" in t for n, ts in self.node.get_topic_names_and_types()
+                      if n in ("cmd_vel", "/cmd_vel") for t in ts)
         self._twist = TwistStamped if stamped else Twist
-        self.cmd = self.node.create_publisher(self._twist, "cmd_vel_nav", 10)  # smoothed, then collision-monitored
+        self.cmd = self.node.create_publisher(self._twist, "/cmd_vel", 10)
         self._scan: Any = None
-        self.node.create_subscription(LaserScan, "scan", lambda m: setattr(self, "_scan", m), 10)
+        self._front_rgb: np.ndarray | None = None
+        self.last_chime: bytes | None = None
+        self.on_chime: Any = None
+        self._scan_bridge = SyntheticScanPublisher(self.node) if synthetic_scan else None
+        self.node.create_subscription(LaserScan, "/scan", lambda m: setattr(self, "_scan", m), 10)
+        self.node.create_subscription(Image, TOPICS["front_camera"],
+                                      lambda m: setattr(self, "_front_rgb", _image(m)), qos_profile_sensor_data)
         self._executor = MultiThreadedExecutor()
         self._executor.add_node(self.node)
         threading.Thread(target=self._executor.spin, daemon=True).start()
@@ -260,6 +288,132 @@ class RosRobot(SimRobot):
             self._goal.cancel_goal_async()
         self._halt()
 
+    # ---- Sprocket v2 skills on ROS 2 --------------------------------------------------------------------------
+    def _people_with_vel(self) -> list[tuple[float, float, float, float]]:
+        vel_map = getattr(self, "_people_velocities", {})
+        out: list[tuple[float, float, float, float]] = []
+        for t, p in self._people():
+            vx, vy = vel_map.get(t.id, (0.0, 0.0))
+            if vx == 0.0 and vy == 0.0 and getattr(t, "route", None) and getattr(t, "speed", 0.0) > 0:
+                p_next = t.at(self.t + 0.5)
+                if p_next is not None:
+                    vx = (p_next[0] - p[0]) / 0.5
+                    vy = (p_next[1] - p[1]) / 0.5
+            out.append((p[0], p[1], vx, vy))
+        return out
+
+    def pursue(self, target: Any, distance: float = 1.0, seconds: float | None = None) -> None:
+        self._call("pursue", target=target, distance=distance, seconds=seconds)
+        is_user = isinstance(target, str) and target.lower().strip() in ("user", "the user", "me")
+        tgt = (self.user() if is_user else None) or self._target(target)
+        end = self.t + float(seconds) if seconds is not None else math.inf
+        try:
+            while self.t < end:
+                self._interrupts()
+                if is_user:
+                    u = self.user()
+                    if not u:
+                        break
+                    pt = u.position
+                elif isinstance(tgt, Object) and tgt.id in self.things:
+                    th = self.things[tgt.id]
+                    pt = self._where(th) or (th.x, th.y)
+                else:
+                    pt = xy(tgt)
+                d = math.hypot(pt[0] - self.x, pt[1] - self.y)
+                if d <= distance + 0.15:
+                    err = wrap(math.atan2(pt[1] - self.y, pt[0] - self.x) - self.yaw)
+                    if abs(err) > 0.15:
+                        self._step(0.0, max(-1.8, min(1.8, 2.0 * err)))
+                    else:
+                        break
+                else:
+                    route = self._plan(pt, distance) or [pt]
+                    v, w, _, _ = self.body.step_pursuit(
+                        (self.x, self.y, self.yaw),
+                        route,
+                        0,
+                        blend_r=0.28,
+                        v_cruise=CRUISE,
+                        occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
+                        people=self._people_with_vel(),
+                    )
+                    self._step(v, w)
+        finally:
+            self._halt()
+
+    def peek(self, target: Any) -> None:
+        self._call("peek", target=target)
+        target_pt = xy(self._target(target))
+        peek_pt = self.body.plan_peek(
+            (self.x, self.y, self.yaw), target_pt, lambda x, y: self._occ(x, y, self.inflated)
+        )
+        if peek_pt is not None:
+            self.go_to(peek_pt)
+            self.face(target_pt)
+
+    def look_under(self, anchor: Any) -> None:
+        self._call("look_under", anchor=anchor)
+        t = self._target(anchor)
+        anchor_radius = t.radius if isinstance(t, Object) else 0.5
+        anchor_xy = xy(t)
+        look_pt = self.body.plan_look_under(
+            (self.x, self.y, self.yaw), anchor_xy, anchor_radius, lambda x, y: self._occ(x, y, self.inflated)
+        )
+        if look_pt is not None:
+            self.go_to(look_pt)
+            self.face(anchor_xy)
+
+    def express(self, posture: str, chime_kind: str = "", seconds: float = 0.6) -> None:
+        self._call("express", posture=posture, chime_kind=chime_kind)
+        self.posture = posture
+        self.trace.postures.append((round(self.t, 2), posture))
+        if chime_kind:
+            self.trace.chimes.append((round(self.t, 2), chime_kind))
+            try:
+                wav = synth_chime(chime_kind)
+                self.last_chime = wav
+                if callable(self.on_chime):
+                    self.on_chime(wav)
+            except ValueError:
+                pass
+        steps = max(1, round(float(seconds) / DT))
+        try:
+            for s in range(steps):
+                v, w = self.body.aliveness_velocity(posture, s * DT, (self.x, self.y, self.yaw))
+                self._step(v, w)
+        finally:
+            self._halt()
+
+    def wake_turn(self, doa_rad: float) -> None:
+        self._call("wake_turn", doa_rad=doa_rad)
+        self._rotate(wrap(doa_rad), rate=2.5)
+        self.express("listening", chime_kind="wake", seconds=0.3)
+
+    def motion_sequence(self, steps: list[Any]) -> None:
+        self._call("motion_sequence", count=len(steps))
+        try:
+            for step in steps:
+                if isinstance(step, dict):
+                    v = float(step.get("v", 0.0))
+                    w = float(step.get("w", 0.0))
+                    sec = float(step.get("seconds", step.get("s", 0.5)))
+                elif isinstance(step, (list, tuple)) and len(step) >= 3:
+                    v, w, sec = float(step[0]), float(step[1]), float(step[2])
+                else:
+                    continue
+                for _ in range(max(1, round(sec / DT))):
+                    self._step(v, w)
+        finally:
+            self._halt()
+
+    def render_view(self, width: int = 320, height: int = 240) -> np.ndarray:
+        """Latest RGB frame from the front CSI camera, or a zero array before frames arrive."""
+        rgb = self._front_rgb
+        if rgb is None or rgb.size == 0:
+            return np.zeros((max(0, height), max(0, width), 3), dtype=np.uint8)
+        return _resize_rgb(rgb, width, height)
+
     # ---- state and sensing that come from ROS -------------------------------------------------------------------
     def pose(self) -> Pose:
         self._call()
@@ -267,7 +421,7 @@ class RosRobot(SimRobot):
         return Pose(round(self.x, 3), round(self.y, 3), round(math.degrees(self.yaw), 1))
 
     def clearance(self, direction: str = "ahead") -> float:
-        """From the real lidar: the nearest return within 15 degrees of the direction, less the robot's radius."""
+        """From synthetic or external /scan: nearest return within 15 degrees of `direction`, less robot radius."""
         self._call()
         offset = {"ahead": 0.0, "left": 90.0, "behind": 180.0, "right": -90.0}[
             choose(direction, ("ahead", "behind", "left", "right"), "direction")]
@@ -279,5 +433,6 @@ class RosRobot(SimRobot):
         return round(max(0.0, min(near) - RADIUS), 2) if near else 12.0
 
     def shutdown(self) -> None:
+        self._halt()
         self._executor.shutdown()
         self.node.destroy_node()

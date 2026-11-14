@@ -1,26 +1,22 @@
-"""Speech in and out: Whisper hears, Piper speaks (docs/architecture.md, speech; LFM3-Omni-2B is the challenger).
+"""Speech in and out, expressive non-verbal procedural chimes, and wake-word-locked DOA.
 
-    ears, mouth = Ears(), Mouth()
-    text = ears.hear(wav_bytes)          # 16-bit PCM WAV, any rate, mono or stereo
-    wav = mouth.say("I'm on my way.")    # 16-bit PCM WAV
-
-Whisper because its small models have NPU builds for the board's Qualcomm chip; Piper because it runs fast on an ARM
-CPU. Each loads its model on first use. On the robot, audio comes from the microphone array after voice activity
-detection and goes to the speaker; on the laptop it comes from the live page's talk button and goes back to the page
-(robot/interfaces/live.py). What is heard goes the same way as a typed instruction: "stop", "wait" and "come back" act
-at once, an answer goes to the program that asked, and anything else goes to the planner.
-
-Always listening (`microphone`), the robot cuts the stream into utterances at pauses (`Listener`) and acts only on
-what is meant for it (`addressed`): what follows its name ("Sprocket, go to the chair"), "stop" from anyone, and
-anything while it waits for an answer. Talk in the room is ignored.
+Components:
+- WAV I/O and resampling: `read_wav`, `to_16k`, `write_wav`.
+- Utterance segmentation and wake-word gating: `Listener`, `addressed`, `microphone`.
+- Fast voiceprint extraction: `extract_voiceprint`.
+- DOA ring buffer locking onto utterance onset: `DOARingBuffer`.
+- Expressive procedural chimes: `chime`.
+- TTS and STT interface integration: `attach`, `Ears`, `Mouth`.
 """
 
 from __future__ import annotations
 
 import io
 import threading
+import time
 import wave
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -39,7 +35,7 @@ def read_wav(data: bytes) -> tuple[np.ndarray, int]:
 
 
 def to_16k(samples: np.ndarray, rate: int) -> np.ndarray:
-    """Resample to the 16 kHz Whisper listens at (linear interpolation: enough for speech)."""
+    """Resample to the 16 kHz Whisper/voiceprint listens at (linear interpolation)."""
     if rate == 16000 or samples.size == 0:
         return samples
     n = int(samples.size * 16000 / rate)
@@ -57,25 +53,249 @@ def write_wav(samples: np.ndarray, rate: int) -> bytes:
     return buf.getvalue()
 
 
+# ---------------------------------------------------------------------------
+# Mel Filterbank & Voiceprint Extraction
+# ---------------------------------------------------------------------------
+
+_MEL_CACHE: dict[tuple[int, int, int], np.ndarray] = {}
+
+
+def _mel_filterbank(n_mels: int = 44, n_fft: int = 512, rate: int = 16000) -> np.ndarray:
+    """Construct triangular Mel filterbank matrix of shape (n_mels, n_fft // 2 + 1)."""
+    key = (n_mels, n_fft, rate)
+    if key in _MEL_CACHE:
+        return _MEL_CACHE[key]
+
+    def hz_to_mel(hz: float) -> float:
+        return float(2595.0 * np.log10(1.0 + hz / 700.0))
+
+    def mel_to_hz(mel: float) -> float:
+        return float(700.0 * (10.0 ** (mel / 2595.0) - 1.0))
+
+    mel_min = hz_to_mel(100.0)
+    mel_max = hz_to_mel(7500.0)
+    mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
+    hz_points = [mel_to_hz(m) for m in mel_points]
+    bin_points = np.clip(np.floor((n_fft + 1) * np.array(hz_points) / rate).astype(int), 0, n_fft // 2)
+
+    fbank = np.zeros((n_mels, n_fft // 2 + 1), dtype=np.float32)
+    for m in range(1, n_mels + 1):
+        f_prev = bin_points[m - 1]
+        f_curr = bin_points[m]
+        f_next = bin_points[m + 1]
+        if f_curr > f_prev:
+            fbank[m - 1, f_prev:f_curr] = (np.arange(f_prev, f_curr) - f_prev) / (f_curr - f_prev)
+        if f_next > f_curr:
+            fbank[m - 1, f_curr:f_next] = (f_next - np.arange(f_curr, f_next)) / (f_next - f_curr)
+
+    _MEL_CACHE[key] = fbank
+    return fbank
+
+
+def extract_voiceprint(samples: np.ndarray, rate: int = 16000, dim: int = 64) -> np.ndarray:
+    """Compute a normalized 64-D spectral log-mel and pitch-autocorrelation voiceprint vector."""
+    samples = np.asarray(samples, dtype=np.float32).ravel()
+    if samples.size == 0:
+        return np.zeros(dim, dtype=np.float32)
+    if rate != 16000:
+        samples = to_16k(samples, rate)
+        rate = 16000
+
+    peak = float(np.max(np.abs(samples))) if samples.size > 0 else 0.0
+    if peak < 1e-4 or samples.size < 320:
+        return np.zeros(dim, dtype=np.float32)
+
+    frame_len = 400  # 25 ms at 16 kHz
+    hop_len = 160    # 10 ms at 16 kHz
+    n_frames = (samples.size - frame_len) // hop_len + 1
+    if n_frames <= 0:
+        return np.zeros(dim, dtype=np.float32)
+
+    idx = np.arange(frame_len)[None, :] + np.arange(n_frames)[:, None] * hop_len
+    frames = samples[idx]
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    thresh = max(0.005, 0.10 * float(np.max(rms)))
+    voiced = frames[rms > thresh]
+    if voiced.shape[0] == 0:
+        return np.zeros(dim, dtype=np.float32)
+
+    n_mels = int(dim * 0.6875)  # 44 for dim=64
+    n_pitch = dim - n_mels      # 20 for dim=64
+    fbank = _mel_filterbank(n_mels=n_mels, n_fft=512, rate=rate)
+
+    win = np.hanning(frame_len).astype(np.float32)
+    win_frames = (voiced - np.mean(voiced, axis=1, keepdims=True)) * win
+    specs = np.abs(np.fft.rfft(win_frames, n=512)) ** 2
+    mel_energies = np.dot(specs, fbank.T)
+
+    max_e = np.max(mel_energies, axis=1, keepdims=True) + 1e-9
+    rel_mel = np.log10(np.maximum(mel_energies / max_e, 1e-3))
+    mean_mel = np.mean(rel_mel, axis=0)
+    mean_mel = mean_mel - float(np.mean(mean_mel))
+    norm_m = float(np.linalg.norm(mean_mel))
+    if norm_m > 1e-9:
+        mean_mel = mean_mel / norm_m
+
+    # Pitch autocorrelation over voiced frames for lags 70 Hz to 400 Hz (lags 35 to 235)
+    lag_min, lag_max = 35, 235
+    lags = np.linspace(lag_min, lag_max, n_pitch, dtype=int)
+    norm_denom = np.sum(win_frames ** 2, axis=1) + 1e-9
+    pitch_vals = np.zeros(n_pitch, dtype=np.float32)
+    for i, lag in enumerate(lags):
+        corr = np.sum(win_frames[:, :-lag] * win_frames[:, lag:], axis=1) / norm_denom
+        pitch_vals[i] = float(np.mean(corr))
+    norm_p = float(np.linalg.norm(pitch_vals))
+    if norm_p > 1e-9:
+        pitch_vals = pitch_vals / norm_p
+
+    feat = np.concatenate([mean_mel, pitch_vals]).astype(np.float32)
+    norm = float(np.linalg.norm(feat))
+    return (feat / norm).astype(np.float32) if norm > 1e-9 else np.zeros(dim, dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# DOA Ring Buffer
+# ---------------------------------------------------------------------------
+
+class DOARingBuffer:
+    """Sliding ring buffer tracking audio chunks and Direction of Arrival (DOA) angles over window_s."""
+
+    def __init__(self, window_s: float = 2.5) -> None:
+        self.window_s = window_s
+        self._buffer: list[tuple[float, np.ndarray, float]] = []
+
+    def push(self, samples: np.ndarray, doa_rad: float, now: float | None = None) -> None:
+        """Push an audio chunk with its instantaneous DOA angle into the sliding buffer."""
+        if now is None:
+            now = time.monotonic()
+        self._buffer.append((now, np.asarray(samples, dtype=np.float32).copy(), float(doa_rad)))
+        cutoff = now - self.window_s
+        self._buffer = [e for e in self._buffer if e[0] >= cutoff]
+
+    def doa_at(self, timestamp: float) -> float | None:
+        """Resolve the DOA angle closest to the target timestamp within the sliding window."""
+        if not self._buffer:
+            return None
+        best = min(self._buffer, key=lambda entry: abs(entry[0] - timestamp))
+        if abs(best[0] - timestamp) > self.window_s:
+            return None
+        return best[2]
+
+    def utterance_with_doa(
+        self,
+        listener: Listener,
+        samples: np.ndarray,
+        doa_rad: float,
+        now: float | None = None,
+    ) -> list[tuple[np.ndarray, float, np.ndarray]]:
+        """Push samples with DOA, feed listener, resolve onset angle, and extract voiceprint."""
+        if now is None:
+            now = time.monotonic()
+        self.push(samples, doa_rad, now=now)
+        utts = listener.feed(samples)
+        results: list[tuple[np.ndarray, float, np.ndarray]] = []
+        for utt in utts:
+            duration = len(utt) / listener.rate
+            onset_time = now - duration + 0.15
+            speaker_doa = self.doa_at(onset_time)
+            if speaker_doa is None:
+                speaker_doa = doa_rad
+            vprint = extract_voiceprint(utt, rate=listener.rate)
+            results.append((utt, float(speaker_doa), vprint))
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Procedural Audio Chimes
+# ---------------------------------------------------------------------------
+
+def _tone(freq: float, duration: float, rate: int, amp: float = 0.4, harmonic: float = 0.25) -> np.ndarray:
+    n = int(duration * rate)
+    t = np.arange(n) / rate
+    fade = int(0.008 * rate)
+    env = np.ones(n, dtype=np.float32)
+    if 2 * fade < n:
+        env[:fade] = np.linspace(0, 1, fade)
+        env[-fade:] = np.linspace(1, 0, fade)
+    decay = np.exp(-2.8 * t / duration)
+    sig = amp * (np.sin(2 * np.pi * freq * t) + harmonic * np.sin(4 * np.pi * freq * t)) * env * decay
+    return sig.astype(np.float32)
+
+
+def _glide(f0: float, f1: float, duration: float, rate: int, amp: float = 0.4) -> np.ndarray:
+    n = int(duration * rate)
+    t = np.arange(n) / rate
+    phase = 2 * np.pi * (f0 * t + 0.5 * (f1 - f0) * (t ** 2) / duration)
+    fade = int(0.008 * rate)
+    env = np.ones(n, dtype=np.float32)
+    if 2 * fade < n:
+        env[:fade] = np.linspace(0, 1, fade)
+        env[-fade:] = np.linspace(1, 0, fade)
+    decay = np.exp(-1.4 * t / duration)
+    sig = amp * (np.sin(phase) + 0.2 * np.sin(2 * phase)) * env * decay
+    return sig.astype(np.float32)
+
+
+def chime(kind: str, rate: int = 16000) -> bytes:
+    """Generate expressive, clean non-verbal audio chimes as 16-bit PCM WAV bytes."""
+    kind = kind.lower().strip()
+    pause = np.zeros(int(0.018 * rate), dtype=np.float32)
+
+    if kind == "wake":
+        # bright rising two-note chirp (523 Hz -> 784 Hz)
+        s = np.concatenate([_tone(523.25, 0.10, rate, amp=0.4), pause, _tone(783.99, 0.16, rate, amp=0.45)])
+    elif kind == "listen":
+        # soft attentive two-tone pulse (660 Hz -> 880 Hz)
+        s = np.concatenate([_tone(660.0, 0.08, rate, amp=0.3), pause, _tone(880.0, 0.12, rate, amp=0.35)])
+    elif kind == "curious":
+        # ascending inflected glide (440 Hz -> 680 Hz)
+        s = _glide(440.0, 680.0, 0.24, rate, amp=0.38)
+    elif kind == "happy":
+        # cheerful 3-note arpeggio trill (587 -> 784 -> 1046 Hz)
+        p_short = np.zeros(int(0.012 * rate), dtype=np.float32)
+        s = np.concatenate([
+            _tone(587.33, 0.08, rate, amp=0.38),
+            p_short,
+            _tone(783.99, 0.08, rate, amp=0.42),
+            p_short,
+            _tone(1046.50, 0.16, rate, amp=0.45),
+        ])
+    elif kind == "uh_oh":
+        # gentle descending two-tone (420 Hz -> 290 Hz)
+        s = np.concatenate([_tone(420.0, 0.13, rate, amp=0.35), pause, _tone(290.0, 0.20, rate, amp=0.32)])
+    elif kind == "yield":
+        # soft descending courtesy chirp (520 Hz -> 390 Hz)
+        s = _glide(520.0, 390.0, 0.18, rate, amp=0.28)
+    else:
+        raise ValueError(f"Unknown chime kind: '{kind}'. Expected wake/listen/curious/happy/uh_oh/yield.")
+
+    return write_wav(s, rate)
+
+
+# ---------------------------------------------------------------------------
+# Voice Segmentation & Interface Helpers
+# ---------------------------------------------------------------------------
+
 class Listener:
-    """Cuts a microphone's stream into utterances: speech starts when a 30 ms frame is clearly louder than the room's
-    noise floor (which it keeps learning from quiet frames), and ends after `pause` seconds of quiet."""
+    """Cuts a microphone stream into speech utterances at silence pauses."""
 
     def __init__(self, rate: int = 16000, pause: float = 0.6, shortest: float = 0.25, loudness: float = 3.0) -> None:
-        self.rate, self.frame = rate, int(0.03 * rate)
-        self.pause_frames, self.shortest = int(pause / 0.03), shortest
+        self.rate = rate
+        self.frame = int(0.03 * rate)
+        self.pause_frames = int(pause / 0.03)
+        self.shortest = shortest
         self.loudness = loudness
-        self.floor = 1e-3  # the room's noise level (RMS), learned
+        self.floor = 1e-3
         self._buffer = np.zeros(0, dtype=np.float32)
         self._speech: list[np.ndarray] = []
         self._quiet = 0
 
     def feed(self, samples: np.ndarray) -> list[np.ndarray]:
-        """Add samples; returns the utterances that ended in them."""
+        """Add samples; returns utterances that finished in them."""
         self._buffer = np.concatenate([self._buffer, samples.astype(np.float32)])
-        done = []
+        done: list[np.ndarray] = []
         while self._buffer.size >= self.frame:
-            frame, self._buffer = self._buffer[:self.frame], self._buffer[self.frame:]
+            frame, self._buffer = self._buffer[: self.frame], self._buffer[self.frame :]
             rms = float(np.sqrt(np.mean(frame ** 2)))
             loud = rms > self.loudness * self.floor
             if not loud and not self._speech:
@@ -84,7 +304,7 @@ class Listener:
                 self._speech.append(frame)
                 self._quiet = 0 if loud else self._quiet + 1
                 if self._quiet >= self.pause_frames:
-                    utterance = np.concatenate(self._speech[:len(self._speech) - self._quiet])
+                    utterance = np.concatenate(self._speech[: len(self._speech) - self._quiet])
                     self._speech, self._quiet = [], 0
                     if utterance.size >= self.shortest * self.rate:
                         done.append(utterance)
@@ -92,8 +312,7 @@ class Listener:
 
 
 def addressed(text: str, name: str = "sprocket", waiting: bool = False) -> str | None:
-    """What of an utterance is meant for the robot: the words after its name ("Sprocket, go to the chair"), an instant
-    command from anyone ("stop"), or anything at all while a program waits for an answer; None for talk in the room."""
+    """Check if utterance text was addressed to the robot; returns the instruction."""
     from robot.agent.instant import instant
 
     words = text.strip()
@@ -102,22 +321,26 @@ def addressed(text: str, name: str = "sprocket", waiting: bool = False) -> str |
     low = words.lower()
     for call in (name, f"hey {name}", f"ok {name}", f"okay {name}"):
         if low.startswith(call):
-            rest = words[len(call):].lstrip(" ,.!:")
+            rest = words[len(call) :].lstrip(" ,.!:")
             return rest or None
     return None
 
 
-def microphone(inbox: object, ears: Ears, waiting: object = lambda: False, device: object = None) -> None:
-    """The robot's ear, for ever: utterances from the microphone meant for the robot go to `inbox` as instructions
-    (`waiting()`: a program is waiting for an answer, so anything said is the answer). Needs `sounddevice`."""
+def microphone(inbox: Any, ears: Ears, waiting: Any = lambda: False, device: Any = None) -> None:
+    """Continuous microphone listener stream sending recognized instructions to inbox."""
     import queue
 
     import sounddevice
 
     chunks: queue.Queue[np.ndarray] = queue.Queue()
     listener = Listener()
-    with sounddevice.InputStream(samplerate=16000, channels=1, dtype="float32", device=device,
-                                 callback=lambda data, *_: chunks.put(data[:, 0].copy())):
+    with sounddevice.InputStream(
+        samplerate=16000,
+        channels=1,
+        dtype="float32",
+        device=device,
+        callback=lambda data, *_: chunks.put(data[:, 0].copy()),
+    ):
         while True:
             for utterance in listener.feed(chunks.get()):
                 meant = addressed(ears.hear(write_wav(utterance, 16000)), waiting=bool(waiting()))
@@ -125,8 +348,8 @@ def microphone(inbox: object, ears: Ears, waiting: object = lambda: False, devic
                     inbox.put(("instruct", meant[:300]))
 
 
-def attach(live: object) -> bool:
-    """Give the live page ears and a mouth when Whisper, Piper and the voice are installed; False when they are not."""
+def attach(live: Any) -> bool:
+    """Attach Ears and Mouth to the live interface when Whisper/Piper are available."""
     try:
         import faster_whisper  # noqa: F401
         import piper  # noqa: F401
@@ -140,25 +363,33 @@ def attach(live: object) -> bool:
 
 
 class Ears:
+    """Whisper STT transcription."""
+
     def __init__(self, model: str = "base.en", device: str = "cpu") -> None:
-        self.model_name, self.device = model, device
+        self.model_name = model
+        self.device = device
         self._model = None
         self._lock = threading.Lock()
 
     def hear(self, wav: bytes) -> str:
-        """What was said in a WAV recording; empty when it held no speech."""
+        """Transcribe speech in WAV bytes."""
         from faster_whisper import WhisperModel
 
         samples, rate = read_wav(wav)
         with self._lock:
             if self._model is None:
-                self._model = WhisperModel(self.model_name, device=self.device,
-                                           compute_type="int8" if self.device == "cpu" else "float16")
+                self._model = WhisperModel(
+                    self.model_name,
+                    device=self.device,
+                    compute_type="int8" if self.device == "cpu" else "float16",
+                )
             segments, _ = self._model.transcribe(to_16k(samples, rate), language="en", beam_size=1, vad_filter=True)
             return " ".join(s.text.strip() for s in segments).strip()
 
 
 class Mouth:
+    """Piper TTS synthesis."""
+
     def __init__(self, voice: Path = VOICE) -> None:
         self.voice_path = voice
         self._voice = None
@@ -166,7 +397,7 @@ class Mouth:
         self._cache: dict[str, bytes] = {}
 
     def say(self, text: str) -> bytes:
-        """The sentence spoken, as a WAV."""
+        """Synthesize spoken text as WAV bytes."""
         from piper import PiperVoice
 
         with self._lock:

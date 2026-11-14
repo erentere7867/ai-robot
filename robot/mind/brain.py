@@ -1,8 +1,4 @@
-"""The brain: LFM3-VL-2B behind llama-server.
-
-Every query is built from current state with no chat history, and a grammar restricts each answer to valid output.
-Planning (writing programs against robot.agent.api) is added in phase 5.
-"""
+"""The brain: LFM3-VL-2B closed-loop planner and d1-2B calibrated decision scorer behind llama-server."""
 
 from __future__ import annotations
 
@@ -28,13 +24,31 @@ NOT_A_THING = ("wall", "floor", "nothing")  # answers to "what object is this?" 
 
 
 def _with_image(url: str, text: str) -> list[dict[str, Any]]:
-    return [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}},
-                                         {"type": "text", "text": text}]}]
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "text", "text": text},
+            ],
+        }
+    ]
+
+
+def active_vision_action(prob: float) -> str:
+    """Returns 'confirm' if prob > 0.80, 'inspect' if 0.30 <= prob <= 0.80, else 'reject'."""
+    if prob > 0.80:
+        return "confirm"
+    if prob >= 0.30:
+        return "inspect"
+    return "reject"
 
 
 class Brain:
     def __init__(self, url: str = "http://127.0.0.1:8080", timeout_s: float = 180.0) -> None:
         self.http = httpx.Client(base_url=url, timeout=timeout_s, trust_env=False)
+
+    active_vision_action = staticmethod(active_vision_action)
 
     def healthy(self) -> bool:
         try:
@@ -44,45 +58,111 @@ class Brain:
 
     def complete(self, messages: list[dict[str, Any]], rules: str, max_tokens: int, think: int = 0) -> Reply:
         """One answer held to the grammar `rules`. With `think` > 0 the model first reasons in up to that many
-        characters, then answers under the grammar: a grammar alone would forbid the reasoning, because it applies
-        from the first token."""
+
+        characters, then answers under the grammar.
+        """
         if think:
-            head = f'root ::= [^<]{{1,{think}}} "</think>" [ \\n]* answer\n'  # the template already opened <think>
+            head = f'root ::= [^<]{{1,{think}}} "</think>" [ \\n]* answer\n'
             rules = head + rules.replace("root ::=", "answer ::=", 1)
             max_tokens += think // 3
-        r = self.http.post("/v1/chat/completions", json={
-            "messages": messages, "grammar": rules, "temperature": 0.0, "max_tokens": max_tokens,
-            "cache_prompt": True, "stream": False, "chat_template_kwargs": {"enable_thinking": bool(think)},
-            "reasoning_format": "none",
-        })
+        r = self.http.post(
+            "/v1/chat/completions",
+            json={
+                "messages": messages,
+                "grammar": rules,
+                "temperature": 0.0,
+                "max_tokens": max_tokens,
+                "cache_prompt": True,
+                "stream": False,
+                "chat_template_kwargs": {"enable_thinking": bool(think)},
+                "reasoning_format": "none",
+            },
+        )
         r.raise_for_status()
         data = r.json()
         t = data.get("timings") or {}
         text, thought = data["choices"][0]["message"]["content"] or "", ""
-        if "</think>" in text:  # with thinking off some templates still open and close an empty <think> block
+        if "</think>" in text:
             thought, text = text.split("</think>", 1)
             thought, text = thought.removeprefix("<think>"), text.lstrip()
-        return Reply(text, t.get("prompt_ms", 0.0), t.get("predicted_ms", 0.0), t.get("prompt_n", 0),
-                     t.get("predicted_n", 0), data, thought)
+        return Reply(
+            text,
+            t.get("prompt_ms", 0.0),
+            t.get("predicted_ms", 0.0),
+            t.get("prompt_n", 0),
+            t.get("predicted_n", 0),
+            thought=thought,
+            raw=data,
+        )
 
-    def yes_probability(self, messages: list[dict[str, Any]]) -> float:
-        """P(yes) / (P(yes) + P(no)) for the first word of the answer. A small model's bare yes/no can be one-sided
-        (the readback check said "no" to all 92 programs it saw), while the probability still ranks them, so callers
-        compare it with a threshold measured on labelled examples."""
-        r = self.http.post("/v1/chat/completions", json={
-            "messages": messages, "temperature": 0.0, "max_tokens": 1, "logprobs": True, "top_logprobs": 20,
-            "cache_prompt": True, "stream": False, "chat_template_kwargs": {"enable_thinking": False},
-        })
+    def decide(
+        self,
+        messages: list[dict[str, Any]],
+        choices: tuple[str, ...] = ("yes", "no"),
+    ) -> dict[str, float]:
+        """Runs single-token forward pass (d1-2B), extracts exponential logprobs matching choices,
+
+        and returns normalized probability dict summing to 1.0 (uniform if no matching tokens).
+        """
+        r = self.http.post(
+            "/v1/chat/completions",
+            json={
+                "messages": messages,
+                "temperature": 0.0,
+                "max_tokens": 1,
+                "logprobs": True,
+                "top_logprobs": 20,
+                "cache_prompt": True,
+                "stream": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        )
         r.raise_for_status()
         content = (r.json()["choices"][0].get("logprobs") or {}).get("content") or []
-        yes = no = 0.0
+        probs = {c: 0.0 for c in choices}
         for item in content[0]["top_logprobs"] if content else []:
-            word = item["token"].strip().lower()
-            if word in ("yes", "y"):
-                yes += math.exp(item["logprob"])
-            elif word in ("no", "n"):
-                no += math.exp(item["logprob"])
-        return yes / (yes + no) if yes + no else 0.5
+            tok = item["token"].strip().lower()
+            p = math.exp(item["logprob"])
+            for c in choices:
+                cl = c.lower()
+                if tok == cl or tok.startswith(cl) or cl.startswith(tok):
+                    probs[c] += p
+                    break
+        total = sum(probs.values())
+        if total > 0.0:
+            return {c: probs[c] / total for c in choices}
+        return {c: 1.0 / len(choices) for c in choices}
+
+    def yes_probability(self, messages: list[dict[str, Any]]) -> float:
+        """P(yes) / (P(yes) + P(no)) for the first word of the answer."""
+        res = self.decide(messages, choices=("yes", "no"))
+        return res["yes"]
+
+    def score_paths(
+        self,
+        image_url: str,
+        goal: str,
+        labels: tuple[str, ...] = ("A", "B", "C"),
+    ) -> dict[str, float]:
+        """Asks d1-2B which drawn floor path leads cleanly toward goal, returning calibrated probabilities."""
+        prompt = (
+            f"The image shows candidate paths labeled {', '.join(labels)} on the floor toward '{goal}'. "
+            f"Which path is best? Answer with one letter from: {', '.join(labels)}."
+        )
+        return self.decide(_with_image(image_url, prompt), choices=labels)
+
+    def score_frontiers(
+        self,
+        image_url: str,
+        target: str,
+        labels: tuple[str, ...] = ("A", "B", "C"),
+    ) -> dict[str, float]:
+        """Scores which visible doorway/frontier direction is most likely to contain target (VLFM)."""
+        prompt = (
+            f"The image shows candidate frontiers or doorways labeled {', '.join(labels)}. "
+            f"Which direction is most likely to lead to '{target}'? Answer with one letter from: {', '.join(labels)}."
+        )
+        return self.decide(_with_image(image_url, prompt), choices=labels)
 
     def check(self, image_url: str, question: str) -> tuple[bool, Reply]:
         """A yes or no question about one image."""
@@ -90,36 +170,42 @@ class Brain:
         return reply.text.strip() == "yes", reply
 
     def name(self, image_url: str, words: list[str]) -> str | None:
-        """What the object in the middle of a crop is, chosen from `words`; None when the model sees no object.
-
-        A choice beats a free answer: answering freely, the model called a red ball a "button" and a cardboard box a
-        "wall"; choosing from the robot's words it named 8 of 10 simulator crops right (both misses called a low
-        coffee table a desk). The house itself is offered too ("wall", "floor"): without those, the end of a wall
-        beside a doorway was named a cabinet, the nearest word on offer. They mean no object, like "nothing"."""
+        """What the object in the middle of a crop is, chosen from `words`; None when the model sees no object."""
         words = sorted(set(words) - set(NOT_A_THING)) + list(NOT_A_THING)
-        reply = self.complete(_with_image(image_url, "What is the object in the middle of this picture? Answer with "
-                                          "one word from: " + ", ".join(words) + "."),
-                              "root ::= " + " | ".join(f'"{w}"' for w in words), 8)
+        reply = self.complete(
+            _with_image(
+                image_url,
+                "What is the object in the middle of this picture? Answer with one word from: "
+                + ", ".join(words)
+                + ".",
+            ),
+            "root ::= " + " | ".join(f'"{w}"' for w in words),
+            8,
+        )
         answer = reply.text.strip()
         return None if answer in NOT_A_THING else answer
 
     def ground(self, image_url: str, marked_url: str, description: str, marks: int) -> tuple[int | None, Reply]:
-        """Which numbered box is this? None when it is not there.
-
-        Presence is checked first. Offered "none" as an answer, the model picked a box 49 times out of 50 for things that
-        were not in the picture, while it answered "is there a ..." correctly 50 out of 50 (M0).
-        """
+        """Which numbered box is this? None when it is not there."""
         seen, first = self.check(image_url, f"Is {description} visible in this picture?")
         if not seen:
             return None, first
-        reply = self.complete(_with_image(marked_url, f"Numbered boxes mark objects in the image. Which number is {description}? "
-                                                  "Answer with the number."),
-                          "root ::= " + " | ".join(f'"{i}"' for i in range(1, marks + 1)), 4)
+        reply = self.complete(
+            _with_image(
+                marked_url,
+                f"Numbered boxes mark objects in the image. Which number is {description}? Answer with the number.",
+            ),
+            "root ::= " + " | ".join(f'"{i}"' for i in range(1, marks + 1)),
+            4,
+        )
         reply.read_ms += first.read_ms
         reply.write_ms += first.write_ms
         return int(reply.text), reply
 
     def describe(self, image_url: str, question: str) -> Reply:
         """A short answer in words about one image."""
-        return self.complete(_with_image(image_url, f"{question} Answer in one short sentence."),
-                         r"root ::= [a-zA-Z0-9 ,.:;'!?-]{1,160}", 40)
+        return self.complete(
+            _with_image(image_url, f"{question} Answer in one short sentence."),
+            r"root ::= [a-zA-Z0-9 ,.:;'!?-]{1,160}",
+            40,
+        )

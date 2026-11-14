@@ -7,7 +7,7 @@ import numpy as np
 from robot.perception import colour
 from robot.perception.locate import locate
 from robot.perception.rig import RIG, to_map, to_robot
-from robot.perception.tracker import Detection, Tracker
+from robot.perception.tracker import Detection, Track, Tracker
 
 
 def test_a_pixel_and_its_depth_give_back_the_point():
@@ -41,7 +41,7 @@ def test_a_box_on_the_floor_is_located_from_its_bottom_edge():
 def test_depth_wins_on_the_front_camera():
     cam = RIG["front_camera"]
     depth = np.full((cam.height, cam.width), 3.0, dtype=np.float32)
-    place = locate(cam, (300, 200, 340, 300), depth=depth)
+    place = locate(cam, (620, 300, 660, 450), depth=depth)
     x, y, r = place.x, place.y, place.radius
     assert abs(math.hypot(x - cam.x, y - cam.y) - (3.0 + r)) < 0.1
 
@@ -150,9 +150,9 @@ def test_a_person_straight_behind_is_put_in_one_place_by_both_rear_cameras():
 def test_depth_reads_the_near_face_of_an_open_thing():
     cam = RIG["front_camera"]
     depth = np.full((cam.height, cam.width), 4.0, dtype=np.float32)  # the wall, seen through a table's frame
-    depth[200:215, 280:400] = 2.0  # the table top
-    depth[200:300, 280:290] = depth[200:300, 390:400] = 2.0  # its legs
-    place = locate(cam, (280, 200, 400, 300), depth=depth)
+    depth[300:325, 580:700] = 2.0  # the table top
+    depth[300:450, 580:595] = depth[300:450, 685:700] = 2.0  # its legs
+    place = locate(cam, (580, 300, 700, 450), depth=depth)
     x, y, r = place.x, place.y, place.radius
     assert abs(math.hypot(x - cam.x, y - cam.y) - (2.0 + r)) < 0.15
 
@@ -225,7 +225,7 @@ def test_a_box_that_holds_only_floor_is_no_thing():
     rows = np.arange(cam.height, dtype=np.float32)[:, None]
     down = np.maximum((rows - cam.height / 2) / cam.focal, 1e-3)
     depth = np.broadcast_to(cam.z / down, (cam.height, cam.width)).astype(np.float32).copy()  # the floor everywhere
-    assert locate(cam, (0, 300, 640, 480), depth=depth) is None
+    assert locate(cam, (0, 360, 1280, 720), depth=depth) is None
 
 
 def test_a_lidar_return_far_behind_the_floor_estimate_is_not_believed():
@@ -242,8 +242,8 @@ def test_a_lidar_return_far_behind_the_floor_estimate_is_not_believed():
 def test_depth_finds_a_thin_thing_that_fills_little_of_its_box():
     cam = RIG["front_camera"]
     depth = np.full((cam.height, cam.width), 4.0, dtype=np.float32)  # the wall behind
-    depth[150:300, 300:306] = depth[150:300, 394:400] = 2.0  # two thin chair legs: 6% of the box
-    place = locate(cam, (290, 150, 410, 300), depth=depth)
+    depth[250:450, 620:628] = depth[250:450, 652:660] = 2.0  # two thin chair legs
+    place = locate(cam, (610, 250, 670, 450), depth=depth)
     assert abs(math.hypot(place.x - cam.x, place.y - cam.y) - (2.0 + place.radius)) < 0.15
 
 
@@ -370,3 +370,207 @@ def test_a_crop_for_naming_shows_only_its_thing():
     assert not ((chair[..., 0] > 200) & (chair[..., 1] < 50)).any()  # no red left in the chair's picture
     ball = _only(picture, (120, 110, 150, 140), [(100, 50, 200, 150)])
     assert ((ball[..., 0] > 200) & (ball[..., 1] < 50)).any()  # the bigger chair box is not painted over the ball
+
+
+def test_camera_project_and_point_round_trip():
+    for cam in RIG.values():
+        forward = 2.0
+        bx = cam.x + forward * math.cos(cam.yaw)
+        by = cam.y + forward * math.sin(cam.yaw)
+        bz = cam.z
+        uv = cam.project(bx, by, bz)
+        assert uv is not None
+        u, v = uv
+        assert abs(u - cam.width / 2) < 1.0 and abs(v - cam.height / 2) < 1.0
+        pt = cam.point(u, v, forward)
+        assert math.dist(pt, (bx, by, bz)) < 1e-4
+
+        bx_behind = cam.x - 1.0 * math.cos(cam.yaw)
+        by_behind = cam.y - 1.0 * math.sin(cam.yaw)
+        assert cam.project(bx_behind, by_behind, bz) is None
+
+
+def test_classify_tof_grid_hazards():
+    from robot.perception.depth import classify_tof_grid
+
+    expected = np.full((8, 8), 0.50, dtype=np.float32)
+
+    # 1. Clear floor (abs(dz) < 0.004)
+    h_clear = classify_tof_grid(expected.copy(), expected)
+    assert h_clear.kind == "clear" and not h_clear.torque_boost
+
+    # 2. Traversable step up (1.5 cm rug, dz = +0.015) -> torque_boost True
+    grid_rug = expected.copy()
+    grid_rug[4, 4] = 0.485
+    h_rug = classify_tof_grid(grid_rug, expected)
+    assert h_rug.kind == "traversable" and h_rug.torque_boost
+    assert abs(h_rug.delta_z - 0.015) < 1e-3
+
+    # 3. Traversable step down (1.5 cm step-down, dz = -0.015) -> torque_boost False
+    grid_down = expected.copy()
+    grid_down[4, 4] = 0.515
+    h_down = classify_tof_grid(grid_down, expected)
+    assert h_down.kind == "traversable" and not h_down.torque_boost
+    assert abs(h_down.delta_z - (-0.015)) < 1e-3
+
+    # 4. Cliff drop (6 cm drop, dz = -0.06 < -0.04)
+    grid_cliff = expected.copy()
+    grid_cliff[6, 3] = 0.56
+    h_cliff = classify_tof_grid(grid_cliff, expected)
+    assert h_cliff.kind == "cliff" and h_cliff.delta_z <= -0.04
+
+    # 5. Obstacle (8 cm obstacle, dz = +0.08 > 0.04)
+    grid_obs = expected.copy()
+    grid_obs[2, 3] = 0.42
+    h_obs = classify_tof_grid(grid_obs, expected)
+    assert h_obs.kind == "obstacle" and h_obs.delta_z >= 0.04
+
+
+def test_calibrate_depth_floor_plane_recovery():
+    from robot.perception.depth import calibrate_depth
+
+    cam = RIG["front_camera"]
+    h, w = cam.height, cam.width
+    rows = np.arange(h, dtype=np.float32)[:, None]
+    down = np.maximum((rows - h / 2) / cam.focal, 1e-3)
+    true_floor = (cam.z / down).astype(np.float32)
+    true_depth = np.broadcast_to(true_floor, (h, w)).copy()
+
+    # Apply synthetic linear scale & shift: raw = 0.5 * true - 0.1
+    raw_depth = 0.5 * true_depth - 0.1
+
+    calibrated = calibrate_depth(raw_depth, cam, pitch_rad=0.0, roll_rad=0.0)
+    floor_region = slice(int(0.65 * h), int(0.95 * h))
+    diff = np.abs(calibrated[floor_region] - true_depth[floor_region])
+    assert float(np.median(diff)) < 0.05
+
+
+def test_calibrate_depth_tof_anchoring_when_floor_occluded():
+    from robot.perception.depth import calibrate_depth
+
+    cam = RIG["front_camera"]
+    h, w = cam.height, cam.width
+    raw_depth = np.full((h, w), 0.5, dtype=np.float32)  # raw says 0.5 everywhere
+    tof_grid = np.full((8, 8), 1.5, dtype=np.float32)  # ToF laser grid anchors metric distance 1.5m
+
+    calibrated = calibrate_depth(raw_depth, cam, tof_grid=tof_grid)
+    assert abs(float(np.median(calibrated)) - 1.5) < 0.1
+
+
+def test_synthetic_scan_catches_low_obstacle():
+    from robot.perception.depth import synthetic_scan
+
+    cam_f = RIG["front_camera"]
+    h, w = cam_f.height, cam_f.width
+    depth_f = np.full((h, w), 5.0, dtype=np.float32)
+
+    # Place a low 8 cm obstacle (z = 0.08 m) at distance 1.5 m forward
+    v_obs = int(round(cam_f.height / 2 + (0.14 / 1.5) * cam_f.focal))
+    u_obs = int(cam_f.width / 2)
+    depth_f[v_obs - 10:v_obs + 10, u_obs - 20:u_obs + 20] = 1.5
+
+    depths = {"front_camera": depth_f}
+    ranges, angle_min, step = synthetic_scan(depths, num_beams=360)
+
+    beam_fwd = int(round((-angle_min) / step))
+    min_near = float(np.min(ranges[beam_fwd - 5:beam_fwd + 6]))
+    assert abs(min_near - 1.5) < 0.15
+
+
+def test_estimate_pose_and_resolve_ray():
+    from robot.perception.pose import estimate_pose_from_keypoints, resolve_ray_target
+
+    cam = RIG["front_camera"]
+    robot_pose = (0.0, 0.0, 0.0)
+    depth_m = 2.0
+
+    kpts = np.zeros((17, 3), dtype=np.float32)
+    kpts[:, 2] = 1.0
+
+    focal = cam.focal
+    v_nose = cam.height / 2 - (1.38 / depth_m) * focal
+    kpts[0] = [cam.width / 2, v_nose, 1.0]
+
+    v_sh = cam.height / 2 - (1.18 / depth_m) * focal
+    u_l_sh = cam.width / 2 - (0.20 / depth_m) * focal
+    u_r_sh = cam.width / 2 + (0.20 / depth_m) * focal
+    kpts[5] = [u_l_sh, v_sh, 1.0]
+    kpts[6] = [u_r_sh, v_sh, 1.0]
+
+    v_hip = cam.height / 2 - (0.68 / depth_m) * focal
+    kpts[11] = [u_l_sh, v_hip, 1.0]
+    kpts[12] = [u_r_sh, v_hip, 1.0]
+
+    # 1. Standing posture
+    kpts[9] = [u_l_sh, v_hip, 1.0]
+    kpts[10] = [u_r_sh, v_hip, 1.0]
+    pose_stand = estimate_pose_from_keypoints(kpts, cam, depth_m, robot_pose)
+    assert pose_stand.posture == "standing"
+
+    # 2. Pointing posture
+    u_point = u_r_sh + (0.45 / depth_m) * focal
+    kpts[10] = [u_point, v_sh, 1.0]
+    pose_point = estimate_pose_from_keypoints(kpts, cam, depth_m, robot_pose)
+    assert pose_point.posture == "pointing"
+    assert pose_point.pointing_ray is not None
+
+    target_track = Track(2, "chair", 2.0, -1.0, 0.3, 0.0, 0.0)
+    other_track = Track(3, "table", 2.0, 2.0, 0.4, 0.0, 0.0)
+    found = resolve_ray_target(pose_point.pointing_ray, [target_track, other_track])
+    assert found is target_track
+
+    # 3. Floor pointing
+    down_ray = ((2.0, 0.0, 1.2), (0.707, 0.0, -0.707))
+    floor_hit = resolve_ray_target(down_ray, [])
+    assert floor_hit is not None
+    assert abs(floor_hit[0] - 3.2) < 0.1 and abs(floor_hit[1] - 0.0) < 0.1
+
+    # 4. Waving posture
+    kpts[10] = [u_r_sh, v_sh - (0.25 / depth_m) * focal, 1.0]
+    pose_wave = estimate_pose_from_keypoints(kpts, cam, depth_m, robot_pose)
+    assert pose_wave.posture == "waving"
+
+    # 5. Crouching posture
+    v_crouch = cam.height / 2 - (0.80 / depth_m) * focal
+    kpts[0, 1] = v_crouch
+    kpts[10] = [u_r_sh, v_hip, 1.0]
+    pose_crouch = estimate_pose_from_keypoints(kpts, cam, depth_m, robot_pose)
+    assert pose_crouch.posture == "crouching"
+
+
+def test_draw_set_of_mark_badges_and_paths():
+    from robot.perception.overlay import draw_set_of_mark
+
+    cam = RIG["front_camera"]
+    rgb = np.zeros((cam.height, cam.width, 3), dtype=np.uint8)
+
+    boxes_and_ids = [((100, 100, 250, 300), 1), ((500, 200, 700, 450), 2)]
+    candidate_paths = [("A", [(1.0, 0.0), (2.0, 0.2), (3.0, 0.4)]), ("B", [(1.0, 0.0), (2.0, -0.3)])]
+
+    annotated = draw_set_of_mark(rgb, boxes_and_ids, candidate_paths, cam)
+    assert annotated.shape == (cam.height, cam.width, 3)
+    assert (annotated > 0).any()
+    assert (annotated[100:120, 100:150] > 0).any()
+
+
+def test_track_predict_and_active_vision():
+    from robot.perception.tracker import needs_active_vision
+
+    tr = Tracker()
+    tr.update([Detection("person", 1.0, 0.0, 0.3)], 0.0)
+    tr.update([Detection("person", 1.1, 0.0, 0.3)], 0.1)
+    person = tr.objects()[0]
+    assert person.vx > 0.2
+    pred_x, pred_y = person.predict(1.0)
+    assert pred_x > person.x
+
+    sofa = Track(10, "sofa", 1.0, 0.0, 0.5, 0.0, 0.0)
+    assert needs_active_vision(None, target_anchor=sofa, robot_xy=(0.5, 0.0)) == "step_back_under"
+    assert needs_active_vision(None, target_anchor=sofa, robot_xy=(3.0, 0.0)) is None
+
+    assert needs_active_vision(None, decision_prob=0.5) == "peek"
+    unsized_track = Track(11, "chair", 2.0, 0.0, 0.3, 0.0, 0.0, sized=False)
+    assert needs_active_vision(unsized_track) == "step_closer"
+    clear_track = Track(12, "chair", 2.0, 0.0, 0.3, 0.0, 0.0, hits=5, sized=True, noise=0.1)
+    assert needs_active_vision(clear_track, decision_prob=0.95) is None
+

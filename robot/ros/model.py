@@ -1,8 +1,8 @@
 """Sprocket's simulated body: the robot description Gazebo and robot_state_publisher load (architecture section 4).
 
-A 30 cm round base on two wheels with front and rear casters; a 2D lidar on top seeing all the way round; a front
-RGB-D camera and two 155-degree rear cameras facing ±112 degrees, so the three cameras overlap all the way round; an IMU.
-Gazebo topic names match Nav2's TurtleBot 4 simulation (/cmd_vel, /odom, tf, scan, imu, rgbd_camera), so its bridge,
+A 30 cm round base on two wheels with front and rear casters; 3 wide-angle MIPI-CSI cameras at 120-degree separation
+providing 360-degree pure vision; front and rear multi-zone ToF sensors; an IMU.
+Gazebo topic names match Nav2's TurtleBot 4 simulation (/cmd_vel, /odom, tf, imu, rgbd_camera), so its bridge,
 Nav2 parameters and launch files drive this body unchanged; only the rear cameras need bridges of their own.
 
     python3 -m robot.ros.model > sprocket.urdf
@@ -14,12 +14,12 @@ import math
 
 BODY_R, BODY_H, BODY_Z = 0.15, 0.10, 0.04  # base cylinder: radius, height, bottom above the floor
 WHEEL_R, WHEEL_W, TRACK = 0.05, 0.03, 0.24
-DECK_Z, LIDAR_Z, CAMERA_Z, CAMERA_R = 0.20, 0.27, 0.19, 0.11
-REAR_YAW = math.radians(112)  # with 155-degree lenses the rear cameras overlap the front one and each other
+DECK_Z, CAMERA_Z, CAMERA_R = 0.20, 0.22, 0.11
+REAR_YAW = 2 * math.pi / 3  # 120 deg
 CAMERAS = {  # name: (yaw, horizontal field of view, width, height, rate, depth)
-    "front_camera": (0.0, 1.5, 640, 480, 10, True),  # RGB-D, like the D435i / Gemini 335 in the parts list
-    "rear_left_camera": (REAR_YAW, 2.7, 1280, 720, 5, False),  # wide lens: resolution keeps far things big enough
-    "rear_right_camera": (-REAR_YAW, 2.7, 1280, 720, 5, False),
+    "front_camera": (0.0, 2.44, 1280, 720, 10, True),
+    "rear_left_camera": (REAR_YAW, 2.44, 1280, 720, 10, True),
+    "rear_right_camera": (-REAR_YAW, 2.44, 1280, 720, 10, True),
 }
 ORANGE, DARK, GREY = "0.95 0.55 0.12 1", "0.08 0.08 0.08 1", "0.5 0.5 0.5 1"
 
@@ -61,9 +61,11 @@ def _camera(name: str, yaw: float, fov: float, width: int, height: int, rate: in
     camera = (f"<camera><horizontal_fov>{fov}</horizontal_fov><image><width>{width}</width><height>{height}</height>"
               f"</image><clip><near>0.1</near><far>20</far></clip><optical_frame_id>{optical}</optical_frame_id>"
               "</camera>")
-    if depth:  # the front RGB-D camera publishes rgbd_camera/image, depth_image and camera_info, as the TB4's does
-        sensor = (f'<sensor name="rgbd_camera" type="rgbd_camera"><always_on>1</always_on>{camera}'
-                  f"<update_rate>{rate}</update_rate><visualize>true</visualize><topic>rgbd_camera</topic></sensor>")
+    sensor_name = "rgbd_camera" if name == "front_camera" else name
+    topic = "rgbd_camera" if name == "front_camera" else name
+    if depth:
+        sensor = (f'<sensor name="{sensor_name}" type="rgbd_camera"><always_on>1</always_on>{camera}'
+                  f"<update_rate>{rate}</update_rate><visualize>true</visualize><topic>{topic}</topic></sensor>")
     else:
         sensor = (f'<sensor name="{name}" type="camera"><always_on>1</always_on>{camera}'
                   f"<update_rate>{rate}</update_rate><visualize>true</visualize><topic>{name}/image</topic>"
@@ -91,7 +93,6 @@ def _caster(name: str, x: float) -> str:
 def urdf() -> str:
     body = f'<cylinder radius="{BODY_R}" length="{BODY_H}"/>'
     deck = '<cylinder radius="0.07" length="0.07"/>'
-    lidar = '<cylinder radius="0.04" length="0.05"/>'
     parts = [
         _link("base_link", body, ORANGE, 3.0, _cylinder_inertial(3.0, BODY_R, BODY_H, BODY_Z + BODY_H / 2),
               z=BODY_Z + BODY_H / 2),
@@ -101,13 +102,10 @@ def urdf() -> str:
         _fixed("base_link", "deck", f"0 0 {DECK_Z}"),
         _wheel("left", TRACK / 2), _wheel("right", -TRACK / 2),
         _caster("front_caster", 0.11), _caster("rear_caster", -0.11),
-        _link("lidar_link", lidar, DARK, 0.17, _cylinder_inertial(0.17, 0.04, 0.05)),
-        _fixed("base_link", "lidar_link", f"0 0 {LIDAR_Z}"),
-        '<gazebo reference="lidar_link"><sensor name="lidar" type="gpu_lidar"><update_rate>10</update_rate>'
-        "<visualize>true</visualize><always_on>true</always_on><frame_id>lidar_link</frame_id><topic>scan</topic>"
-        "<lidar><scan><horizontal><samples>500</samples><resolution>1</resolution><min_angle>-3.14159</min_angle>"
-        "<max_angle>3.14159</max_angle></horizontal></scan><range><min>0.12</min><max>12.0</max>"
-        "<resolution>0.01</resolution></range></lidar></sensor></gazebo>",
+        _link("front_tof_link", '<box size="0.02 0.02 0.01"/>', DARK, 0.01, _inertial(0.01, 1e-6, 1e-6, 1e-6)),
+        _fixed("base_link", "front_tof_link", f"{BODY_R} 0 0.08"),
+        _link("rear_tof_link", '<box size="0.02 0.02 0.01"/>', DARK, 0.01, _inertial(0.01, 1e-6, 1e-6, 1e-6)),
+        _fixed("base_link", "rear_tof_link", f"{-BODY_R} 0 0.08"),
         f'<link name="imu_link">{_inertial(0.01, 1e-6, 1e-6, 1e-6)}</link>',
         _fixed("base_link", "imu_link", "0 0 0.1"),
         '<gazebo reference="imu_link"><sensor type="imu" name="imu"><always_on>true</always_on>'
@@ -138,9 +136,17 @@ def urdf() -> str:
     return '<?xml version="1.0"?>\n<robot name="sprocket">\n' + "\n".join(parts) + "\n</robot>\n"
 
 
-REAR_BRIDGES = [f"/{name}/{part}" for name in ("rear_left_camera", "rear_right_camera") for part in ("image",)]
-REAR_INFO = [f"/{name}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo"
-             for name in ("rear_left_camera", "rear_right_camera")]
+REAR_BRIDGES = [
+    f"/{name}/{part}"
+    for name, (*_, depth) in CAMERAS.items()
+    if name != "front_camera"
+    for part in (("image", "depth_image") if depth else ("image",))
+]
+REAR_INFO = [
+    f"/{name}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo"
+    for name in CAMERAS
+    if name != "front_camera"
+]
 # Where the robot really is, from the simulator: for measuring localisation, never used by the robot itself.
 GROUND_TRUTH = "/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry"
 
