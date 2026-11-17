@@ -29,7 +29,7 @@ def truth_scene(name: str):  # noqa: ANN201
 
 
 def start(scene_factory, gui: bool, brain_url: str | None, memory: str = "", slam: bool = False,  # noqa: ANN001, ANN201
-          map_file: Path | None = None):
+          map_file: Path | None = None, mono_depth: bool = False, decision_url: str | None = None):
     """Gazebo and Nav2 with Sprocket in the scene, and a RealRobot on them (remembering in the file `memory`; mapping
     as it goes with `slam`; localising in its own `map_file`)."""
     import rclpy
@@ -52,13 +52,14 @@ def start(scene_factory, gui: bool, brain_url: str | None, memory: str = "", sla
         time.sleep(30.0 if gui else 25.0)
         set_initial_pose(helper, SimRobot(truth))
         print("loading YOLOE-26...", flush=True)
-        detector = Detector(threads=3)  # the rest of the laptop's CPU runs Gazebo, Nav2 and the model
+        detector = Detector(threads=3, mono_depth=mono_depth)  # the rest of the laptop's CPU runs Gazebo, Nav2 and the model
         grid = None
         if map_file is not None:  # plan in the map the robot built, not the simulator's
             from robot.ros.explore import load_grid
 
             grid = load_grid(map_file, SimRobot(truth).occupied.shape, (truth.width, truth.height))
-        robot = RealRobot(scene_factory(), detector=detector, brain=Brain(brain_url) if brain_url else None,
+        brain = Brain(brain_url, decision_url=decision_url) if brain_url else None
+        robot = RealRobot(scene_factory(), detector=detector, brain=brain,
                           nudge=lambda: set_initial_pose(helper, SimRobot(truth)),
                           store=CirculatingMemory(memory) if memory else None, grid=grid)
         if grid is not None:  # the guided tour, done once at setup: "this is the kitchen", in the middle of each room
@@ -66,6 +67,9 @@ def start(scene_factory, gui: bool, brain_url: str | None, memory: str = "", sla
 
             robot.places.update({name: Pose((x0 + x1) / 2, (y0 + y1) / 2, 0.0)
                                  for name, (x0, y0, x1, y1) in truth.rooms.items()})
+        print("waiting for Nav2 navigate_to_pose action server...", flush=True)
+        if not robot.actions["navigate_to_pose"].wait_for_server(timeout_sec=60.0):
+            raise RuntimeError("the navigate_to_pose action server is not up after 60 s")
     except BaseException:  # a simulation that failed to come up must not keep running under the next one
         stop(None, sim)
         raise
@@ -200,12 +204,13 @@ def tour(robot, truth) -> None:  # noqa: ANN001
     robot.go_to("start")
 
 
-def annotated(robot, name: str, width: int = 0):  # noqa: ANN001, ANN201
+def annotated(robot, name: str, width: int = 800):  # noqa: ANN001, ANN201
     """Camera RGB frame with Set-of-Mark ID badges and *PIVOT* floor ribbons (overlay.draw_set_of_mark), or None."""
     from robot.ros.robot import _resize_rgb
 
     paths = robot._pivot_paths() if name == "front_camera" and hasattr(robot, "_pivot_paths") else ()
-    image = robot.perception.render_annotated_view(candidate_paths=paths, camera=name)
+    target_w = width if width > 0 else 800
+    image = robot.perception.render_annotated_view(candidate_paths=paths, camera=name, width=target_w)
     if image is None or image.size == 0:
         return None
     if width and image.shape[1] > width:
@@ -246,13 +251,25 @@ def page(holder, port: int):  # noqa: ANN001, ANN201
     Sprocket v2 Intent agent state, and an instruction box (commands arrive in Live.inbox)."""
     import threading
 
+    from robot.agent.api import Preempted
     from robot.interfaces.live import Live
     from robot.perception.camera import encode_png
     from robot.ros.perceive import TOPICS
+    from robot.sim.world import BudgetSpent
+
+    cam_cache: dict[str, bytes] = {}
+    cam_lock = threading.Lock()
 
     def camera(name: str) -> bytes | None:
-        image = annotated(holder.sim, name, 480) if holder.sim is not None else None
-        return encode_png(image) if image is not None else None
+        with cam_lock:
+            cached = cam_cache.get(name)
+        if cached is not None:
+            return cached
+        try:
+            image = annotated(holder.sim, name, 800) if holder.sim is not None else None
+            return encode_png(image) if image is not None else None
+        except (Exception, Preempted, BudgetSpent):  # noqa: BLE001
+            return None
 
     live = Live()
     live.serve(port)
@@ -264,6 +281,7 @@ def page(holder, port: int):  # noqa: ANN001, ANN201
         print("the page can hear (hold to talk) and speak (tick 'speak aloud')", flush=True)
 
     def refresh() -> None:
+        last_cam_update = 0.0
         while True:
             robot = holder.sim
             try:
@@ -271,7 +289,19 @@ def page(holder, port: int):  # noqa: ANN001, ANN201
                     robot._perceive_objects()
                     live.show_world(robot)
                     live.update(scan=scan_points(robot), posture=getattr(robot, "posture", "neutral"))
-            except (RuntimeError, AttributeError):  # changing while copied, or between cases; take the next frame
+                    now = time.monotonic()
+                    if now - last_cam_update >= 0.5:
+                        for cam_name in TOPICS:
+                            try:
+                                img = annotated(robot, cam_name, 800)
+                                if img is not None:
+                                    png = encode_png(img)
+                                    with cam_lock:
+                                        cam_cache[cam_name] = png
+                            except (Exception, Preempted, BudgetSpent):  # noqa: BLE001
+                                pass
+                        last_cam_update = now
+            except (Exception, Preempted, BudgetSpent):  # noqa: BLE001 - changing while copied, preempted during cancel, or between cases
                 pass
             time.sleep(0.3)
 
@@ -280,19 +310,20 @@ def page(holder, port: int):  # noqa: ANN001, ANN201
     return live
 
 
-def planner_for(brain_url: str, think: int = 0):  # noqa: ANN201
+def planner_for(brain_url: str, think: int = 0, decision_url: str | None = None):  # noqa: ANN201
     """The on-board LocalPlanner talking to the llama-server at `brain_url`."""
     from robot.agent.planner import LocalPlanner
     from robot.mind.brain import Brain
 
-    brain = Brain(brain_url)
+    brain = Brain(brain_url, decision_url=decision_url)
     planner = LocalPlanner(brain, think=think)
     if not brain.healthy():
         print(f"no model answering at {brain_url}: start llama-server there first", flush=True)
     return planner
 
 
-def interactive(robot, room: str, brain_url: str, port: int, think: int = 0) -> None:  # noqa: ANN001
+def interactive(robot, room: str, brain_url: str, port: int, think: int = 0,  # noqa: ANN001
+                decision_url: str | None = None) -> None:
     """Type an instruction on the live page and watch Gazebo + Live as the Intent agent runs."""
     from robot.agent.agent import Agent
     from robot.interfaces.demo import Holder, _wrap_planner, drive
@@ -311,7 +342,7 @@ def interactive(robot, room: str, brain_url: str, port: int, think: int = 0) -> 
         said=[],
         problems=[],
     )
-    planner = planner_for(brain_url, think=think)
+    planner = planner_for(brain_url, think=think, decision_url=decision_url)
     agent = Agent(
         _wrap_planner(planner, live),
         memory=getattr(robot, "store", None),
@@ -337,7 +368,8 @@ def _intent_summary(intents: list) -> list[dict[str, object]]:
 
 
 def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, port: int,
-              own_map: bool = False, think: int = 0) -> None:
+              own_map: bool = False, think: int = 0, mono_depth: bool = False,
+              decision_url: str | None = None) -> None:
     """Closed-loop suite cases on the full 3D ROS stack: look for `look` s, run `Agent(LocalPlanner(...))`
     against `CASES`, stream Sprocket v2 state to Live, and judge against the scene truth."""
     from robot.agent.agent import Agent
@@ -349,7 +381,7 @@ def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, por
     holder = Holder(None)
     live = page(holder, port)
     url = brain_url or "http://127.0.0.1:8081"
-    planner = planner_for(url, think=think)
+    planner = planner_for(url, think=think, decision_url=decision_url)
     wrapped = _wrap_planner(planner, live)
     passed = 0
     cases = [c for c in CASES if c.id in ids]
@@ -360,7 +392,8 @@ def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, por
         try:
             mapped = Path(f"~/sprocket-maps/{getattr(case.scene, '__name__', '')}.yaml").expanduser()
             robot, truth, sim = start(lambda c=case: furnish(c.scene()), gui, url,
-                                      map_file=mapped if own_map and mapped.exists() else None)
+                                      map_file=mapped if own_map and mapped.exists() else None,
+                                      mono_depth=mono_depth, decision_url=decision_url)
             holder.sim = robot
             live.update(
                 scene=case.id,
@@ -450,22 +483,29 @@ def main() -> None:
     parser.add_argument("--think", type=int, default=0, help="thinking token budget for LocalPlanner")
     parser.add_argument("--brain", default="", help="llama-server URL, e.g. http://127.0.0.1:8081: names new objects, "
                                                     "answers vision questions, and plans")
+    parser.add_argument("--decision-brain", default="",
+                        help="optional dedicated d1-2B llama-server URL, e.g. http://127.0.0.1:8082")
     parser.add_argument("--memory", default="", help="the memory file; --interactive uses ~/sprocket-memory/<room>.db")
     parser.add_argument("--forget", action="store_true", help="start with an empty memory")
     parser.add_argument("--explore", action="store_true", help="map the room from scratch (slam_toolbox, frontier "
                                                                "exploration) and save the map to ~/sprocket-maps")
     parser.add_argument("--own-map", action="store_true", help="localise in the map --explore saved, not the "
                                                                "simulator's")
+    parser.add_argument("--mono-depth", action="store_true",
+                        help="estimate monocular depth with yolo26n-depth.pt and calibrate with floor + ToF")
     args = parser.parse_args()
+    decision_url = args.decision_brain or None
     if args.cases:
-        run_cases(args.cases, args.gui, args.brain or None, args.watch, args.port, args.own_map, args.think)
+        run_cases(args.cases, args.gui, args.brain or None, args.watch, args.port, args.own_map, args.think,
+                  mono_depth=args.mono_depth, decision_url=decision_url)
         return
     memory = args.memory or (f"~/sprocket-memory/{args.room}.db" if args.interactive else "")
     if memory and args.forget:
         Path(memory).expanduser().unlink(missing_ok=True)
     own = Path(f"~/sprocket-maps/{args.room.replace(' ', '_')}.yaml").expanduser()
     robot, truth, sim = start(lambda: truth_scene(args.room), args.gui, args.brain or None, memory,
-                              slam=args.explore, map_file=own if args.own_map and own.exists() else None)
+                              slam=args.explore, map_file=own if args.own_map and own.exists() else None,
+                              mono_depth=args.mono_depth, decision_url=decision_url)
     try:
         if args.explore:
             from robot.ros.explore import Explorer, coverage
@@ -479,7 +519,8 @@ def main() -> None:
                   f"of the free floor; saved to {saved}", flush=True)
             report(robot, truth, (truth.start.x, truth.start.y))
         elif args.interactive:
-            interactive(robot, args.room, args.brain or "http://127.0.0.1:8081", args.port, args.think)
+            interactive(robot, args.room, args.brain or "http://127.0.0.1:8081", args.port, args.think,
+                        decision_url=decision_url)
         elif args.perception:
             import threading
 

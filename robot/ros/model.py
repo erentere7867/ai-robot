@@ -59,7 +59,7 @@ def _camera(name: str, yaw: float, fov: float, width: int, height: int, rate: in
              f'<link name="{optical}">{_inertial(0.001, 1e-7, 1e-7, 1e-7)}</link>',
              _fixed(link, optical, "0 0 0", f"{-math.pi / 2:.4f} 0 {-math.pi / 2:.4f}")]
     camera = (f"<camera><horizontal_fov>{fov}</horizontal_fov><image><width>{width}</width><height>{height}</height>"
-              f"</image><clip><near>0.1</near><far>20</far></clip><optical_frame_id>{optical}</optical_frame_id>"
+              f"<anti_aliasing>4</anti_aliasing></image><clip><near>0.1</near><far>20</far></clip><optical_frame_id>{optical}</optical_frame_id>"
               "</camera>")
     sensor_name = "rgbd_camera" if name == "front_camera" else name
     topic = "rgbd_camera" if name == "front_camera" else name
@@ -90,6 +90,25 @@ def _caster(name: str, x: float) -> str:
             + f'<gazebo reference="{name}"><mu1>0.0</mu1><mu2>0.0</mu2></gazebo>')
 
 
+def _tof_sensor(name: str, x: float, yaw: float, pitch: float = 0.28) -> str:
+    """8x8 VL53L5CX-like ToF array in Gazebo: angled down at `pitch` rad to sense floor, steps, and cliffs."""
+    link = f"{name}_link"
+    optical = f"{name}_optical_frame"
+    sensor = (
+        f'<sensor name="{name}" type="rgbd_camera"><always_on>1</always_on>'
+        f"<camera><horizontal_fov>0.7854</horizontal_fov><image><width>8</width><height>8</height></image>"
+        f"<clip><near>0.02</near><far>4.0</far></clip><optical_frame_id>{optical}</optical_frame_id></camera>"
+        f"<update_rate>15</update_rate><visualize>false</visualize><topic>{name}</topic></sensor>"
+    )
+    return "".join([
+        _link(link, '<box size="0.02 0.02 0.01"/>', DARK, 0.01, _inertial(0.01, 1e-6, 1e-6, 1e-6)),
+        _fixed("base_link", link, f"{x:.4f} 0 0.08", f"0 {pitch:.4f} {yaw:.4f}"),
+        f'<link name="{optical}">{_inertial(0.001, 1e-7, 1e-7, 1e-7)}</link>',
+        _fixed(link, optical, "0 0 0", "-1.5708 0 -1.5708"),
+        f'<gazebo reference="{link}">{sensor}</gazebo>',
+    ])
+
+
 def urdf() -> str:
     body = f'<cylinder radius="{BODY_R}" length="{BODY_H}"/>'
     deck = '<cylinder radius="0.07" length="0.07"/>'
@@ -102,10 +121,8 @@ def urdf() -> str:
         _fixed("base_link", "deck", f"0 0 {DECK_Z}"),
         _wheel("left", TRACK / 2), _wheel("right", -TRACK / 2),
         _caster("front_caster", 0.11), _caster("rear_caster", -0.11),
-        _link("front_tof_link", '<box size="0.02 0.02 0.01"/>', DARK, 0.01, _inertial(0.01, 1e-6, 1e-6, 1e-6)),
-        _fixed("base_link", "front_tof_link", f"{BODY_R} 0 0.08"),
-        _link("rear_tof_link", '<box size="0.02 0.02 0.01"/>', DARK, 0.01, _inertial(0.01, 1e-6, 1e-6, 1e-6)),
-        _fixed("base_link", "rear_tof_link", f"{-BODY_R} 0 0.08"),
+        _tof_sensor("front_tof", BODY_R, 0.0),
+        _tof_sensor("rear_tof", -BODY_R, math.pi),
         f'<link name="imu_link">{_inertial(0.01, 1e-6, 1e-6, 1e-6)}</link>',
         _fixed("base_link", "imu_link", "0 0 0.1"),
         '<gazebo reference="imu_link"><sensor type="imu" name="imu"><always_on>true</always_on>'
@@ -136,16 +153,27 @@ def urdf() -> str:
     return '<?xml version="1.0"?>\n<robot name="sprocket">\n' + "\n".join(parts) + "\n</robot>\n"
 
 
+TOF_BRIDGES = ["/front_tof/depth_image", "/rear_tof/depth_image"]
+TOF_INFO = [
+    f"/{name}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo"
+    for name in ("front_tof", "rear_tof")
+]
 REAR_BRIDGES = [
-    f"/{name}/{part}"
-    for name, (*_, depth) in CAMERAS.items()
-    if name != "front_camera"
-    for part in (("image", "depth_image") if depth else ("image",))
+    *[
+        f"/{name}/{part}"
+        for name, (*_, depth) in CAMERAS.items()
+        if name != "front_camera"
+        for part in (("image", "depth_image") if depth else ("image",))
+    ],
+    *TOF_BRIDGES,
 ]
 REAR_INFO = [
-    f"/{name}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo"
-    for name in CAMERAS
-    if name != "front_camera"
+    *[
+        f"/{name}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo"
+        for name in CAMERAS
+        if name != "front_camera"
+    ],
+    *TOF_INFO,
 ]
 # Where the robot really is, from the simulator: for measuring localisation, never used by the robot itself.
 GROUND_TRUTH = "/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry"

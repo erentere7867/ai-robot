@@ -103,7 +103,7 @@ def lidar_near(scan: tuple[np.ndarray, float, float] | None, lo: float, hi: floa
 
 def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarray | None = None,
            scan: tuple[np.ndarray, float, float] | None = None, foot: tuple[float, float] | None = None,
-           person: bool = False) -> Place | None:
+           person: bool = False, mask: np.ndarray | None = None) -> Place | None:
     """Where the object in pixel box (x1, y1, x2, y2) stands, in the robot frame; None when out of reach or when the
     box holds only floor. `foot`: the pixel where its outline meets the floor (the lowest point of the detector's
     mask), else the box's bottom middle. `person`: their middle lies BODY beyond their nearest point, not a radius."""
@@ -113,7 +113,8 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
     axis = (math.cos(cam.yaw), math.sin(cam.yaw))
     if depth is not None and cam.depth:
         r0, r1 = int(y1), max(int(y2), int(y1) + 1)
-        patch = depth[r0:r1, int(x1):max(int(x2), int(x1) + 1)]
+        c0, c1 = int(x1), max(int(x2), int(x1) + 1)
+        patch = depth[r0:r1, c0:c1]
         good = np.isfinite(patch) & (patch > 0.1) & (patch < 8.0)
         if good.any():
             down = (np.arange(r0, r0 + patch.shape[0], dtype=np.float32)[:, None] - cam.height / 2) / cam.focal
@@ -121,41 +122,72 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
             if np.percentile(heights[good], 90) < 0.04:
                 return None  # all floor
             valid_mask = good & (heights > 0.03)
-            d = near_face(patch[valid_mask])  # along the lens axis, as depth cameras measure
-            if d is not None:
-                seen = d / math.cos(middle - cam.yaw)
+            if mask is not None:
+                if mask.shape == patch.shape:
+                    m_patch = mask.astype(bool)
+                elif mask.shape == depth.shape:
+                    m_patch = mask[r0:r1, c0:c1].astype(bool)
+                else:
+                    m_patch = None
+                if m_patch is not None:
+                    masked = valid_mask & m_patch
+                    if np.count_nonzero(masked) >= 12:
+                        valid_mask = masked
+            else:
+                box_w = c1 - c0
+                inset_w = int(0.10 * box_w)
+                if inset_w > 0:
+                    inset_mask = valid_mask.copy()
+                    if x1 > 4:
+                        inset_mask[:, :inset_w] = False
+                    if x2 < cam.width - 4:
+                        inset_mask[:, -inset_w:] = False
+                    if np.count_nonzero(inset_mask) >= 16:
+                        valid_mask = inset_mask
+
+            u_cols = np.arange(c0, c1, dtype=np.float32)[None, :]
+            sec_theta = np.sqrt(1.0 + ((u_cols - cam.width / 2.0) / cam.focal) ** 2)
+            r_patch = patch * sec_theta
+            seen = near_face(r_patch[valid_mask])  # true radial range to the front surface
+            if seen is not None:
+                r_pts = r_patch[valid_mask]
+                d_pts = patch[valid_mask]
+                near_pts = (r_pts >= seen - 0.15) & (r_pts <= seen + 0.50)
+                v_rel, u_rel = np.where(valid_mask)
+                u_abs = c0 + u_rel
+                if np.count_nonzero(near_pts) >= 6:
+                    u_med = float(np.median(u_abs[near_pts]))
+                else:
+                    u_med = (x1 + x2) / 2.0
+                bearing_eff = cam.bearing(u_med)
+                rel = bearing_eff - cam.yaw
                 radius = _radius(seen, span)
-                forward = d + (BODY if person else radius)  # its middle, further along the axis on the middle ray
-                x, y, _ = cam.to_base(forward, forward * math.tan(middle - cam.yaw), 0.0)
+                reach = seen + (BODY if person else radius)
+                x, y, _ = cam.to_base(reach * math.cos(rel), reach * math.sin(rel), 0.0)
 
                 # 3D extents (width, depth_extent) and orientation_yaw from depth cluster
                 width, depth_extent, ori_yaw = 2 * radius, (BODY * 2 if person else 2 * radius), cam.yaw
-                v_rel, u_rel = np.where(valid_mask)
-                if len(v_rel) >= 10:
-                    u_abs = int(x1) + u_rel
-                    d_pts = patch[valid_mask]
-                    near_pts = (d_pts >= d - 0.15) & (d_pts <= d + 0.6)
-                    if np.count_nonzero(near_pts) >= 6:
-                        u_f = u_abs[near_pts]
-                        d_f = d_pts[near_pts]
-                        x_opt = (u_f.astype(np.float32) - cam.width / 2) / cam.focal
-                        xc = d_f
-                        yc = -x_opt * d_f
-                        cos_y, sin_y = math.cos(cam.yaw), math.sin(cam.yaw)
-                        xb_pts = cam.x + xc * cos_y - yc * sin_y
-                        yb_pts = cam.y + xc * sin_y + yc * cos_y
-                        coords = np.stack([xb_pts, yb_pts], axis=1)
-                        cov = np.cov(coords, rowvar=False)
-                        if cov.shape == (2, 2) and np.isfinite(cov).all():
-                            eigvals, eigvecs = np.linalg.eigh(cov)
-                            main_vec = eigvecs[:, 1]
-                            ori_yaw = float(math.atan2(main_vec[1], main_vec[0]))
-                            proj1 = coords @ main_vec
-                            proj2 = coords @ np.array([-main_vec[1], main_vec[0]])
-                            span1 = float(np.percentile(proj1, 95) - np.percentile(proj1, 5))
-                            span2 = float(np.percentile(proj2, 95) - np.percentile(proj2, 5))
-                            width = max(0.04, span1)
-                            depth_extent = max(0.04, span2)
+                if len(v_rel) >= 10 and np.count_nonzero(near_pts) >= 6:
+                    u_f = u_abs[near_pts]
+                    d_f = d_pts[near_pts]
+                    x_opt = (u_f.astype(np.float32) - cam.width / 2) / cam.focal
+                    xc = d_f
+                    yc = -x_opt * d_f
+                    cos_y, sin_y = math.cos(cam.yaw), math.sin(cam.yaw)
+                    xb_pts = cam.x + xc * cos_y - yc * sin_y
+                    yb_pts = cam.y + xc * sin_y + yc * cos_y
+                    coords = np.stack([xb_pts, yb_pts], axis=1)
+                    cov = np.cov(coords, rowvar=False)
+                    if cov.shape == (2, 2) and np.isfinite(cov).all():
+                        eigvals, eigvecs = np.linalg.eigh(cov)
+                        main_vec = eigvecs[:, 1]
+                        ori_yaw = float(math.atan2(main_vec[1], main_vec[0]))
+                        proj1 = coords @ main_vec
+                        proj2 = coords @ np.array([-main_vec[1], main_vec[0]])
+                        span1 = float(np.percentile(proj1, 95) - np.percentile(proj1, 5))
+                        span2 = float(np.percentile(proj2, 95) - np.percentile(proj2, 5))
+                        width = max(0.04, span1)
+                        depth_extent = max(0.04, span2)
 
                 return _place(x, y, radius, "depth", seen, width, depth_extent, ori_yaw)
     # where it meets the floor, unless the box runs off the bottom of the picture: then the picture's edge is not the

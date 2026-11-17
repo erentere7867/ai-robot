@@ -420,8 +420,9 @@ def _make_scenario_example(
         scratchpad = TaskScratchpad(
             goal=instruction,
             subgoal=f"inspected {obj.label} {obj.id}",
-            visited_rooms={room},
+            visited_rooms=[room],
             inspected_ids={obj.id},
+            completed_steps=[f'Step 1: go_to target={obj.label}#{obj.id} params={{"distance": 0.5}} (completed)'],
             steps=2,
         )
         intent = Intent(
@@ -469,12 +470,18 @@ def build_examples(
             continue
 
         snapshot = sim.snapshot()
-        context = describe(snapshot, scratchpad=scratchpad)
+        context = describe(snapshot, scratchpad=None)
         sp_text = scratchpad.subgoal or scratchpad.goal if scratchpad is not None else ""
         user_content = f"Scene State:\n{context}\n"
-        if sp_text:
+        if sp_text and (scratchpad is None or scratchpad.blockers):
             user_content += f"Working Memory Scratchpad:\n{sp_text}\n"
-        user_content += f"\nInstruction: {instruction}\nNext Intent:"
+        completed = scratchpad.completed_steps if scratchpad is not None else ()
+        completed_block = "\n".join(f"- {step}" for step in completed) if completed else "(none)"
+        user_content += (
+            f"\nInstruction: {instruction}\n"
+            f"Completed Steps in Current Task:\n{completed_block}\n"
+            f"Next Intent:"
+        )
 
         assistant_content = format_intent(intent)
         if verify:

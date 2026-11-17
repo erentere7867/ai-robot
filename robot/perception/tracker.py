@@ -37,6 +37,7 @@ LIKE = 0.7  # how alike two looks must be (histogram intersection, 0 to 1) to kn
 UNLIKE = 0.15  # below this, two looks are two people however close they stand (0.4 split one person across cameras)
 MOVED = 0.001  # square metres per second a thing's place may drift unseen (someone may move it; misses handle more)
 WALKS = 0.25  # the same for a person, who may walk at about half a metre a second
+_FURNITURE_ALIKE = frozenset({"desk", "table", "box", "chair", "sofa", "tv"})
 
 
 def canonical(label: str) -> str:
@@ -173,6 +174,8 @@ class Tracker:
                         best.vy = (1.0 - beta) * best.vy + beta * meas_vy
                 spread = best.var + (WALKS if best.person else MOVED) * dt
                 a = spread / (spread + d.sigma ** 2)
+                if d.cut and best.sized and not best.cut and best.hits >= 2:
+                    a = min(a, 0.15)
                 best.var = (1 - a) * spread
                 best.x += a * (d.x - best.x)
                 best.y += a * (d.y - best.y)
@@ -252,13 +255,18 @@ class Tracker:
             for o in [o for o in self.tracks.values() if o.id > t.id and o.person == t.person]:
                 gap = math.dist((t.x, t.y), (o.x, o.y))
                 scatter = min(0.6, 2.5 * math.sqrt(t.var + o.var + max(t.noise, o.noise) ** 2))  # merging is surer to hurt
-                if t.person:  # closer than 0.3 m is one person, however the cameras saw their clothes
+                if t.person:  # closer than 0.35 m is one person, however the cameras saw their clothes
                     alike = t.look is None or o.look is None or float(np.minimum(t.look, o.look).sum()) >= LIKE
-                    if not (gap < 0.3 or (gap < 0.5 and alike)):
+                    edge_cut = getattr(t, "cut", False) or getattr(o, "cut", False)
+                    if not (gap < 0.35 or (gap < 0.75 and (alike or edge_cut))):
                         continue
                 elif o.label == t.label:
                     if gap >= max(t.radius, o.radius, 0.15, scatter):
                         continue
+                elif (t.label in _FURNITURE_ALIKE and o.label in _FURNITURE_ALIKE
+                      and _alike(t.radius, o.radius) and not (t.sure and o.sure and t.label != o.label)
+                      and gap < max(t.radius + o.radius, scatter)):
+                    pass
                 elif not (_alike(t.radius, o.radius) and gap < scatter):
                     continue
                 w = o.var / (t.var + o.var)  # the more certain place counts more

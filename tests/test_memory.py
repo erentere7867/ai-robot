@@ -67,18 +67,26 @@ def test_task_scratchpad_state_and_spot_checking():
     pad.inspected_ids.add(42)
     pad.blockers.append("closed door")
     pad.steps += 3
+    for i in range(15):
+        pad.record_step(f"  step {i}  ")
+    pad.record_step("   ")
 
+    assert len(pad.completed_steps) == 12
+    assert pad.completed_steps[0] == "step 3"
+    assert pad.completed_steps[-1] == "step 14"
     assert pad.is_spot_checked((2.1, 1.1), radius=0.6)
     assert not pad.is_spot_checked((5.0, 5.0), radius=0.6)
     assert "kitchen" in pad.visited_rooms
     assert "find mug" in pad.summary()
     assert "closed door" in pad.summary()
+    assert "Completed: [" in pad.summary()
 
     pad.reset(goal="inspect table")
     assert pad.goal == "inspect table"
     assert len(pad.visited_rooms) == 0
     assert len(pad.checked_spots) == 0
     assert len(pad.blockers) == 0
+    assert len(pad.completed_steps) == 0
     assert pad.steps == 0
 
 

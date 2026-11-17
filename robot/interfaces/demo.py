@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import argparse
 import random
+import re
 import threading
 import time
 from typing import Any
 
-from robot.agent.agent import Agent
+from robot.agent.agent import Agent, _accepts_kwarg
 from robot.agent.api import Preempted
+from robot.agent.context import synthesize_perception
 from robot.agent.instant import instant
 from robot.agent.planner import LocalPlanner
 from robot.interfaces.live import Live
@@ -74,6 +76,11 @@ class _ObservingPlanner:
     def reset(self) -> None:
         self._intents.clear()
 
+    def pop_last_intent(self) -> None:
+        if self._intents:
+            self._intents.pop()
+            self._live.update(intents=list(self._intents))
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
@@ -84,15 +91,25 @@ class _ObservingPlanner:
         image_url: str | None = None,
         scratchpad: str = "",
         earlier: tuple[str, ...] | list[str] = (),
+        completed_steps: tuple[str, ...] | list[str] = (),
+        **kwargs: Any,
     ) -> Any:
-        self._live.update(status="planning", scratchpad=str(scratchpad))
-        intent = self._inner.plan_step(
-            context,
-            instruction,
-            image_url=image_url,
-            scratchpad=scratchpad,
-            earlier=earlier,
+        synth = _build_cognitive_synthesis(
+            focus=(instruction or "").strip(),
+            awareness=_extract_awareness_from_context(context),
+            dialogue_turns=len(earlier),
+            blockers=_extract_blockers_from_scratchpad(str(scratchpad)),
         )
+        self._live.update(status="planning", scratchpad=synth or str(scratchpad))
+        inner_kwargs: dict[str, Any] = {
+            "image_url": image_url,
+            "scratchpad": scratchpad,
+            "earlier": earlier,
+            **kwargs,
+        }
+        if _accepts_kwarg(self._inner.plan_step, "completed_steps"):
+            inner_kwargs["completed_steps"] = completed_steps
+        intent = self._inner.plan_step(context, instruction, **inner_kwargs)
         self._intents.append({
             "say": getattr(intent, "say", ""),
             "chime": getattr(intent, "chime", ""),
@@ -119,20 +136,69 @@ def _wrap_planner(planner: Any, live: Live) -> Any:
     return _ObservingPlanner(planner, live)
 
 
+def _build_cognitive_synthesis(
+    focus: str,
+    awareness: str,
+    dialogue_turns: int = 0,
+    blockers: list[str] | tuple[str, ...] = (),
+) -> str:
+    """Format a living-mind summary combining current focus, perception, dialogue, and blockers."""
+    parts: list[str] = []
+    if focus:
+        parts.append(f"focus: {focus}")
+    if awareness:
+        parts.append(f"aware of: {awareness}")
+    if dialogue_turns > 0:
+        unit = "turn" if dialogue_turns == 1 else "turns"
+        parts.append(f"dialogue memory: {dialogue_turns} recent {unit}")
+    clean_blockers = [
+        b.strip() for b in blockers if b and b.strip().lower() not in {"none", "[none]"}
+    ]
+    if clean_blockers:
+        parts.append(f"blockers: {'; '.join(clean_blockers[-3:])}")
+    return " | ".join(parts)
+
+
+def _extract_awareness_from_context(context: str) -> str:
+    m = re.search(r"(?m)^Surroundings:\s*(.+)$", context or "")
+    if m:
+        val = m.group(1).strip()
+        if val and val != "(nothing detected yet)":
+            return val
+    return ""
+
+
+def _extract_blockers_from_scratchpad(scratchpad: str) -> list[str]:
+    m = re.search(r"blockers:\s*\[?([^|\]]+)\]?", scratchpad or "", re.I)
+    if m:
+        val = m.group(1).strip()
+        if val and val.lower() not in {"none", "[none]"}:
+            return [val]
+    return []
+
+
 def _format_scratchpad(agent: Any, sim: Any = None) -> str:
-    sp = getattr(getattr(agent, "short_term", None), "scratchpad", None)
-    if sp is not None:
-        parts = []
-        if getattr(sp, "goal", ""):
-            parts.append(f"goal: {sp.goal}")
-        if getattr(sp, "visited_rooms", None):
-            parts.append(f"visited: {', '.join(sorted(sp.visited_rooms))}")
-        if getattr(sp, "inspected_ids", None):
-            parts.append(f"inspected: {sorted(sp.inspected_ids)}")
-        if getattr(sp, "blockers", None):
-            parts.append(f"blockers: {'; '.join(sp.blockers[-3:])}")
-        if parts:
-            return " | ".join(parts)
+    st = getattr(agent, "short_term", None)
+    sp = getattr(st, "scratchpad", None)
+    focus = str(getattr(sp, "goal", "") or "").strip() if sp is not None else ""
+    blockers = list(getattr(sp, "blockers", ()) or ()) if sp is not None else []
+    dialogue_turns = len(getattr(st, "dialogue", ()) or ()) if st is not None else 0
+
+    awareness = ""
+    if sim is not None and hasattr(sim, "snapshot"):
+        try:
+            snap = sim.snapshot()
+            objs = list(snap.get("objects") or ())
+            if objs:
+                awareness = synthesize_perception(objs, snap.get("user"))
+        except Exception:  # noqa: BLE001 - live UI summary is best-effort
+            awareness = ""
+    if not awareness and sp is not None and getattr(sp, "visited_rooms", None):
+        awareness = f"rooms {', '.join(sorted(sp.visited_rooms))}"
+
+    synth = _build_cognitive_synthesis(focus, awareness, dialogue_turns, blockers)
+    if synth:
+        return synth
     return str(getattr(sim, "scratchpad_summary", "") or "")
 
 
@@ -152,9 +218,9 @@ def _apply_record_to_live(live: Live, record: Any, agent: Any = None, sim: Any =
         changes["action"] = getattr(last, "action", "")
         changes["posture"] = getattr(last, "posture", "neutral")
         changes["chime"] = getattr(last, "chime", "")
-    live.update(**changes)
     if sim is not None:
         live.show_world(sim)
+    live.update(**changes)
 
 
 def run_case(
@@ -299,6 +365,7 @@ def drive(
             worker.join(5.0)
 
     def do(text: str) -> None:
+        print(f"instruct  {text}", flush=True)
         cmd = instant(text)
         is_come_back = cmd == "come back"
         if holder.sim is not None and hasattr(holder.sim, "begin"):
@@ -321,6 +388,10 @@ def drive(
             record = agent.do(text, holder.sim)
         except Preempted:
             live.update(status="stopped")
+            return
+        except Exception as exc:  # noqa: BLE001 - worker must never die silently while leaving status running
+            print(f"error     {text}: {exc}", flush=True)
+            live.update(status="failed", problems=[str(exc)])
             return
         _apply_record_to_live(live, record, agent=agent, sim=holder.sim)
         history = live.state.history + [{"instruction": text, "outcome": record.outcome}]

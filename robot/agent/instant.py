@@ -9,7 +9,16 @@ from robot.agent.api import Intent
 COMMANDS = {
     "stop": ("stop", "stop it", "stop now", "halt", "freeze", "stop moving", "enough", "that's enough"),
     "wait": ("wait", "hold on", "hang on", "pause", "wait a second", "wait a moment", "one moment"),
-    "come back": ("come back", "come back here", "get back here", "return"),
+    "come back": (
+        "come back",
+        "come back here",
+        "get back here",
+        "return",
+        "come here",
+        "come to me",
+        "come over here",
+        "over here",
+    ),
 }
 FILLER = {"please", "ok", "okay", "hey", "sprocket", "robot", "now", "right", "just", "oh", "uh", "um", "no"}
 

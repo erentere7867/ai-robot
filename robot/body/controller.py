@@ -176,6 +176,7 @@ class BodyController:
         v_cruise: float = 0.4,
         occupied_fn: Callable[[float, float], bool] = lambda x, y: False,
         people: list[tuple[float, float, float, float]] | tuple = (),
+        visual_probs: dict[str, float] | None = None,
     ) -> tuple[float, float, int, bool]:
         """Non-stop waypoint spline pursuit: advances idx when within blend_r of intermediate waypoints
 
@@ -201,6 +202,8 @@ class BodyController:
         candidates = self.rollout_trajectories(
             pose, waypoints[idx], occupied_fn, people, v_max=speed, horizon_s=1.2, dt=0.1
         )
+        if visual_probs:
+            candidates = self.apply_visual_scores(candidates, visual_probs)
         best = candidates[0]
 
         if best.clearance > 0.15 or not occupied_fn(best.points[0][0], best.points[0][1]):

@@ -218,6 +218,7 @@ class TaskScratchpad:
     inspected_ids: set[int] = field(default_factory=set)
     checked_spots: list[tuple[float, float]] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
+    completed_steps: list[str] = field(default_factory=list)
     steps: int = 0
 
     def reset(self, goal: str = "") -> None:
@@ -227,7 +228,16 @@ class TaskScratchpad:
         self.inspected_ids.clear()
         self.checked_spots.clear()
         self.blockers.clear()
+        self.completed_steps.clear()
         self.steps = 0
+
+    def record_step(self, summary: str) -> None:
+        cleaned = " ".join(str(summary).split())
+        if not cleaned:
+            return
+        self.completed_steps.append(cleaned)
+        if len(self.completed_steps) > 12:
+            self.completed_steps = self.completed_steps[-12:]
 
     def mark_visited(self, room: str, xy: tuple[float, float]) -> None:
         if room and room not in self.visited_rooms:
@@ -244,11 +254,14 @@ class TaskScratchpad:
     def summary(self) -> str:
         visited = ", ".join(self.visited_rooms) if self.visited_rooms else "none"
         blockers = ", ".join(self.blockers) if self.blockers else "none"
-        return (
+        text = (
             f"Goal: '{self.goal or 'none'}' | Subgoal: '{self.subgoal or 'none'}' | Steps: {self.steps} | "
             f"Rooms: [{visited}] | Inspected: {len(self.inspected_ids)} | "
             f"Checked spots: {len(self.checked_spots)} | Blockers: [{blockers}]"
         )
+        if self.completed_steps:
+            text += f" | Completed: [{'; '.join(self.completed_steps)}]"
+        return text
 
 
 @dataclass

@@ -51,7 +51,7 @@ def main() -> None:
     try:
         rclpy.init()
         node = rclpy.create_node("sensors_check")
-        SyntheticScanPublisher(node)
+        _scan_bridge = SyntheticScanPublisher(node, publish_tof=True)
         counts = dict.fromkeys(TOPICS, 0)
         sizes: dict[str, str] = {}
         for topic, kind in TOPICS.items():

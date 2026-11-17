@@ -137,13 +137,57 @@ def calibrate_depth(raw_depth: np.ndarray, cam: Camera, pitch_rad: float = 0.0, 
                             tof_y.append(dist_tof)
 
     a, b = 1.0, 0.0
-    if len(tof_x) >= 4:
+    floor_calibrated = False
+    if len(anchor_x) >= 6:
+        ax = np.array(anchor_x, dtype=np.float32)
+        ay = np.array(anchor_y, dtype=np.float32)
+        span_x = float(np.max(ax) - np.min(ax))
+        unocc_mask = ax >= ay - 0.12
+        metric_inliers = int(np.count_nonzero(np.abs(ax - ay) < 0.08))
+        unocc_diff = float(np.median(np.abs(ax[unocc_mask] - ay[unocc_mask]))) if np.count_nonzero(unocc_mask) >= 8 else 999.0
+        # Keep true metric depth unchanged when floor samples already agree with camera geometry.
+        if span_x > 0.08 and (metric_inliers >= 8 or unocc_diff < 0.08):
+            floor_calibrated = True
+        elif span_x > 0.08:
+            rng = np.random.default_rng(42)
+            n_samples = len(ax)
+            best_inliers: np.ndarray | None = None
+            best_count = 0
+
+            for _ in range(50):
+                idx = rng.choice(n_samples, size=2, replace=False)
+                x1, x2 = ax[idx[0]], ax[idx[1]]
+                y1, y2 = ay[idx[0]], ay[idx[1]]
+                if abs(x2 - x1) < 0.05:
+                    continue
+                cand_a = (y2 - y1) / (x2 - x1)
+                cand_b = y1 - cand_a * x1
+                if not (0.05 <= cand_a <= 15.0 and abs(cand_b) <= 8.0):
+                    continue
+                residuals = np.abs(cand_a * ax + cand_b - ay)
+                inliers = residuals < 0.08
+                count = int(np.count_nonzero(inliers))
+                if count > best_count:
+                    best_count = count
+                    best_inliers = inliers
+
+            if best_inliers is not None and best_count >= 4:
+                poly = np.polyfit(ax[best_inliers], ay[best_inliers], deg=1)
+                a, b = float(poly[0]), float(poly[1])
+                floor_calibrated = True
+            elif len(tof_x) < 4:
+                poly = np.polyfit(ax, ay, deg=1)
+                if 0.1 <= poly[0] <= 10.0:
+                    a, b = float(poly[0]), float(poly[1])
+                    floor_calibrated = True
+
+    if not floor_calibrated and len(tof_x) >= 4:
         tx = np.array(tof_x, dtype=np.float32)
         ty = np.array(tof_y, dtype=np.float32)
         span_x = float(np.max(tx) - np.min(tx))
         if span_x > 0.05:
             rng = np.random.default_rng(42)
-            best_inliers: np.ndarray | None = None
+            best_inliers = None
             best_count = 0
             for _ in range(50):
                 idx = rng.choice(len(tx), size=2, replace=False)
@@ -174,54 +218,6 @@ def calibrate_depth(raw_depth: np.ndarray, cam: Camera, pitch_rad: float = 0.0, 
             if mean_x > 0.01:
                 a = max(0.1, min(10.0, mean_y / mean_x))
                 b = 0.0
-
-        # Refine with consistent floor inliers if present
-        if len(anchor_x) > 0:
-            fx = np.array(anchor_x, dtype=np.float32)
-            fy = np.array(anchor_y, dtype=np.float32)
-            floor_diff = np.abs(a * fx + b - fy)
-            floor_ok = floor_diff < 0.10
-            if np.count_nonzero(floor_ok) >= 10:
-                all_x = np.concatenate([tx, fx[floor_ok]])
-                all_y = np.concatenate([ty, fy[floor_ok]])
-                if np.max(all_x) - np.min(all_x) > 0.05:
-                    poly = np.polyfit(all_x, all_y, deg=1)
-                    if 0.1 <= poly[0] <= 10.0:
-                        a, b = float(poly[0]), float(poly[1])
-
-    elif len(anchor_x) >= 6:
-        ax = np.array(anchor_x, dtype=np.float32)
-        ay = np.array(anchor_y, dtype=np.float32)
-
-        rng = np.random.default_rng(42)
-        n_samples = len(ax)
-        best_inliers = None
-        best_count = 0
-
-        for _ in range(50):
-            idx = rng.choice(n_samples, size=2, replace=False)
-            x1, x2 = ax[idx[0]], ax[idx[1]]
-            y1, y2 = ay[idx[0]], ay[idx[1]]
-            if abs(x2 - x1) < 0.05:
-                continue
-            cand_a = (y2 - y1) / (x2 - x1)
-            cand_b = y1 - cand_a * x1
-            if not (0.05 <= cand_a <= 15.0 and abs(cand_b) <= 8.0):
-                continue
-            residuals = np.abs(cand_a * ax + cand_b - ay)
-            inliers = residuals < 0.08
-            count = int(np.count_nonzero(inliers))
-            if count > best_count:
-                best_count = count
-                best_inliers = inliers
-
-        if best_inliers is not None and best_count >= 4:
-            poly = np.polyfit(ax[best_inliers], ay[best_inliers], deg=1)
-            a, b = float(poly[0]), float(poly[1])
-        else:
-            poly = np.polyfit(ax, ay, deg=1)
-            if 0.1 <= poly[0] <= 10.0:
-                a, b = float(poly[0]), float(poly[1])
 
     calibrated = np.clip(a * raw + b, 0.05, 12.0).astype(np.float32)
     return calibrated

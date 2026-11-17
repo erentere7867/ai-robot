@@ -45,8 +45,12 @@ def active_vision_action(prob: float) -> str:
 
 
 class Brain:
-    def __init__(self, url: str = "http://127.0.0.1:8080", timeout_s: float = 180.0) -> None:
+    def __init__(self, url: str = "http://127.0.0.1:8080", timeout_s: float = 180.0,
+                 decision_url: str | None = None) -> None:
         self.http = httpx.Client(base_url=url, timeout=timeout_s, trust_env=False)
+        self.decision_http = (
+            httpx.Client(base_url=decision_url, timeout=timeout_s, trust_env=False) if decision_url else self.http
+        )
 
     active_vision_action = staticmethod(active_vision_action)
 
@@ -56,7 +60,15 @@ class Brain:
         except httpx.HTTPError:
             return False
 
-    def complete(self, messages: list[dict[str, Any]], rules: str, max_tokens: int, think: int = 0) -> Reply:
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        rules: str,
+        max_tokens: int,
+        think: int = 0,
+        temperature: float = 0.0,
+        presence_penalty: float = 0.0,
+    ) -> Reply:
         """One answer held to the grammar `rules`. With `think` > 0 the model first reasons in up to that many
 
         characters, then answers under the grammar.
@@ -65,19 +77,19 @@ class Brain:
             head = f'root ::= [^<]{{1,{think}}} "</think>" [ \\n]* answer\n'
             rules = head + rules.replace("root ::=", "answer ::=", 1)
             max_tokens += think // 3
-        r = self.http.post(
-            "/v1/chat/completions",
-            json={
-                "messages": messages,
-                "grammar": rules,
-                "temperature": 0.0,
-                "max_tokens": max_tokens,
-                "cache_prompt": True,
-                "stream": False,
-                "chat_template_kwargs": {"enable_thinking": bool(think)},
-                "reasoning_format": "none",
-            },
-        )
+        payload: dict[str, Any] = {
+            "messages": messages,
+            "grammar": rules,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "cache_prompt": True,
+            "stream": False,
+            "chat_template_kwargs": {"enable_thinking": bool(think)},
+            "reasoning_format": "none",
+        }
+        if presence_penalty != 0.0:
+            payload["presence_penalty"] = presence_penalty
+        r = self.http.post("/v1/chat/completions", json=payload)
         r.raise_for_status()
         data = r.json()
         t = data.get("timings") or {}
@@ -104,7 +116,7 @@ class Brain:
 
         and returns normalized probability dict summing to 1.0 (uniform if no matching tokens).
         """
-        r = self.http.post(
+        r = self.decision_http.post(
             "/v1/chat/completions",
             json={
                 "messages": messages,
@@ -122,10 +134,12 @@ class Brain:
         probs = {c: 0.0 for c in choices}
         for item in content[0]["top_logprobs"] if content else []:
             tok = item["token"].strip().lower()
+            if not tok:
+                continue
             p = math.exp(item["logprob"])
             for c in choices:
                 cl = c.lower()
-                if tok == cl or tok.startswith(cl) or cl.startswith(tok):
+                if tok == cl or tok.startswith(cl) or (len(tok) >= 2 and cl.startswith(tok)):
                     probs[c] += p
                     break
         total = sum(probs.values())

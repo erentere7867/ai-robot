@@ -26,8 +26,17 @@ from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing
 
 # Other names for what perception calls a thing. "desk" answers to "table" only when no table is known (a word match
 # scores below a whole name): from low down a coffee table is often seen as a desk.
-NAMES = {"sofa": ("couch", "seat", "something to sit on"), "chair": ("seat", "something to sit on"),
-         "cup": ("mug",), "backpack": ("bag",), "ball": ("toy",), "bin": ("trash can",), "desk": ("work table",)}
+NAMES = {
+    "desk": ("table", "work table", "coffee table", "furniture"),
+    "table": ("desk", "coffee table", "furniture"),
+    "sofa": ("couch", "seat", "something to sit on"),
+    "chair": ("seat", "something to sit on"),
+    "person": ("human",),
+    "cup": ("mug",),
+    "backpack": ("bag",),
+    "ball": ("toy",),
+    "bin": ("trash can",),
+}
 SMALL = {"cup", "bottle", "ball", "shoe", "phone", "keys", "remote", "book", "toy"}  # small objects, not obstacles
 SEEN_NOW = 1.5  # seconds: a track seen this recently is "in view now"
 
@@ -118,6 +127,20 @@ class RealRobot(RosRobot):
                     self.store.observe_clear_space(tr.x, tr.y, radius=max(0.6, tr.radius + 0.3))
                     self._cleared_tracks.add(tr.id)
                 continue  # looked at clearly and not there: marked clear in CirculatingMemory
+            if hasattr(self, "scene") and hasattr(self.scene, "width") and hasattr(self.scene, "height"):
+                has_enclosed_walls = (
+                    getattr(self, "walls", None) is not None
+                    and getattr(self.walls, "ndim", 0) == 2
+                    and self.walls.shape[0] > 1 and self.walls.shape[1] > 1
+                    and bool(self.walls[0, :].all() and self.walls[-1, :].all() and self.walls[:, 0].all() and self.walls[:, -1].all())
+                )
+                is_indoor = not getattr(self.scene, "outdoor", False) and (
+                    bool(getattr(self.scene, "rooms", None))
+                    or bool(getattr(self.scene, "walls", None))
+                    or has_enclosed_walls
+                )
+                if is_indoor and (abs(tr.x) > self.scene.width / 2 - 0.12 or abs(tr.y) > self.scene.height / 2 - 0.12):
+                    continue
             self._cleared_tracks.discard(tr.id)
             thing = Thing(tr.label, round(tr.x, 3), round(tr.y, 3), round(tr.radius, 3), tr.color,
                           names=NAMES.get(tr.label, ()), solid=not tr.person and tr.label not in SMALL,
@@ -155,7 +178,7 @@ class RealRobot(RosRobot):
         self.things, self.memory, self._detected = things, memory, detected
         self._people_velocities = people_vel
         self.human_pose = human_pose
-        if self._rooms and now - self._named_at > 5.0:  # rooms take names from the tour and the furniture seen
+        if getattr(self, "_rooms", None) and now - getattr(self, "_named_at", 0.0) > 5.0:  # rooms take names from the tour and the furniture seen
             from robot.ros.rooms import name
 
             self._named_at = now

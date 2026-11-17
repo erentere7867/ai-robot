@@ -5,6 +5,10 @@ active vision, and escalation.
 
 from __future__ import annotations
 
+import inspect
+import json
+import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,7 +23,7 @@ from robot.agent.api import (
     Timeout,
 )
 from robot.agent.context import describe
-from robot.agent.instant import instant
+from robot.agent.instant import COME_BACK_INTENT, instant
 from robot.agent.planner import LocalPlanner
 from robot.mind.memory import ShortTermMemory, TaskScratchpad
 from robot.perception.camera import data_url
@@ -41,6 +45,81 @@ PLAINLY = (
 )
 
 _OBJECT_TARGET_ACTIONS = frozenset({"go_to", "pursue", "orbit", "peek", "look_under", "face", "step_closer"})
+_DONE_ACTIONS = frozenset({"done", "none", "say", "answer", "greet", "chat", "respond", "reply", "speak", ""})
+_IDEMPOTENT_ACTIONS = frozenset({"go_to", "face", "pursue", "orbit", "peek", "look_under", "remember"})
+_SINGLE_STEP_PHYSICAL_ACTIONS = frozenset({"go_to", "move", "turn", "spin", "orbit", "face"})
+_MULTI_STEP_RE = re.compile(
+    r"\b(?:then|after|and|each|every|square|figure|patrol|between|back\s+to|tell|ask|"
+    r"report|check|count|how\s+many|what|where|which|look|find|search|visit|if|otherwise|"
+    r"until|while|facing|whole)\b",
+    re.IGNORECASE,
+)
+_NULL_TARGET_STRINGS = frozenset({"", "none", "null", "n/a", "na", "nothing", "self"})
+_USER_ALIASES = frozenset({"user", "me", "you", "the user", "person(user)", "human", "speaker"})
+_DIRECTION_WORDS = frozenset({"forward", "backward", "back", "ahead", "straight", "left", "right"})
+_TARGET_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "table": ("table", "desk"),
+    "coffee table": ("coffee table", "table", "desk"),
+    "counter": ("counter", "desk", "table"),
+    "couch": ("couch", "sofa", "chair"),
+    "seat": ("seat", "chair", "sofa"),
+}
+
+
+def _is_local_planner(planner: Any) -> bool:
+    """Return True if `planner` or its `_inner` wrapper chain is a LocalPlanner."""
+    seen: set[int] = set()
+    cur = planner
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, LocalPlanner):
+            return True
+        seen.add(id(cur))
+        cur = getattr(cur, "_inner", None)
+    return False
+
+
+def _is_simple_single_step(instruction: str) -> bool:
+    """Return True when the instruction does not contain multi-step, conditional, or query indicators."""
+    return bool(instruction.strip()) and _MULTI_STEP_RE.search(instruction) is None
+
+
+def _said_fields(robot: Any, fallback: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
+    """Build Live speech fields synced with `robot.trace.said` when available."""
+    trace = getattr(robot, "trace", None)
+    if trace is not None and hasattr(trace, "said"):
+        return {
+            "said": [text for _, text in trace.said][-6:],
+            "said_total": len(trace.said),
+        }
+    return {"said": list(fallback[-6:])}
+
+
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    return name in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+
+
+def _num_param(params: dict[str, Any], keys: tuple[str, ...], default: float) -> float:
+    for k in keys:
+        val = params.get(k)
+        if val is not None:
+            return float(val)
+    return default
+
+
+def _canonical_step_sig(
+    action: str, target_key: str, params: dict[str, Any]
+) -> tuple[str, str, tuple[tuple[str, str], ...]]:
+    return (
+        action,
+        target_key,
+        tuple(sorted((str(k), repr(v)) for k, v in params.items())),
+    )
 
 
 def plainly(problems: list[str]) -> str:
@@ -103,9 +182,17 @@ class Agent:
             else ShortTermMemory()
         )
 
-    def _remember(self, instruction: str, what: str) -> None:
-        self.earlier = [*self.earlier, f'"{instruction}": {what[:240]}'][-EARLIER:]
-        self.short_term.add_turn(instruction, what)
+    def _remember(self, instruction: str, what: str, said: str = "") -> None:
+        reply = " ".join(said.split())[:100]
+        detail = what
+        if reply:
+            m = re.match(r"^(.*?)\s+(\((?:done|failed|preempted|refused)\))$", what)
+            if m:
+                detail = f'{m.group(1)[:140]}; said "{reply}" {m.group(2)}'
+            else:
+                detail = f'{what[:140]}; said "{reply}"'
+        self.earlier = [*self.earlier, f'"{instruction}": {detail[:240]}'][-EARLIER:]
+        self.short_term.add_turn(instruction, detail)
 
     def _push_live(self, **fields: Any) -> None:
         if self.live is not None and hasattr(self.live, "update"):
@@ -114,9 +201,21 @@ class Agent:
             except Exception:
                 pass
 
-    def _finish(self, record: TaskRecord, outcome: str, summary: str, **live_fields: Any) -> TaskRecord:
+    def _finish(
+        self,
+        record: TaskRecord,
+        outcome: str,
+        summary: str,
+        *,
+        task_said: str | None = None,
+        **live_fields: Any,
+    ) -> TaskRecord:
         record.outcome = outcome
-        self._remember(record.instruction, f"{summary} ({outcome})")
+        spoken = task_said
+        if spoken is None:
+            said_items = [str(s).strip() for s in (live_fields.get("said") or ()) if str(s).strip()]
+            spoken = said_items[-1] if said_items else ""
+        self._remember(record.instruction, f"{summary} ({outcome})", said=spoken)
         status = "stopped" if outcome == "preempted" else outcome
         self._push_live(
             status=status,
@@ -140,14 +239,16 @@ class Agent:
             return f"addressed {target}"
         return "done"
 
-    def _handle_instant(self, cmd: str, robot: Any, record: TaskRecord) -> TaskRecord:
+    def _handle_instant(self, cmd: str, robot: Any, record: TaskRecord, speak: bool = True) -> TaskRecord:
         if cmd == "stop":
             robot.stop()
             if hasattr(robot, "express"):
                 robot.express("neutral", chime_kind="uh_oh", seconds=0.2)
             return self._finish(
                 record, "preempted", "stopped",
+                task_said="",
                 action="stop", subgoal="stop", posture="neutral", chime="uh_oh",
+                **_said_fields(robot),
             )
         if cmd == "wait":
             robot.stop()
@@ -155,22 +256,48 @@ class Agent:
                 robot.express("listening", chime_kind="listen", seconds=0.2)
             return self._finish(
                 record, "done", "waited",
+                task_said="",
                 action="wait", subgoal="wait", posture="listening", chime="listen",
+                **_said_fields(robot),
             )
         # cmd == "come back"
-        user = robot.user() if hasattr(robot, "user") else None
+        user = None
+        if hasattr(robot, "user"):
+            try:
+                user = robot.user()
+            except Exception:
+                user = None
+        spoken_now = ""
+        if speak and COME_BACK_INTENT.say and hasattr(robot, "say"):
+            try:
+                robot.say(COME_BACK_INTENT.say)
+                spoken_now = COME_BACK_INTENT.say
+            except Exception:
+                pass
         if hasattr(robot, "express"):
             robot.express("listening", chime_kind="listen", seconds=0.3)
-        if user is not None:
-            if hasattr(robot, "pursue"):
-                robot.pursue(user, distance=1.0)
+        fallback_said = [spoken_now] if spoken_now else ([COME_BACK_INTENT.say] if speak else [])
+        try:
+            if user is not None:
+                if hasattr(robot, "pursue"):
+                    robot.pursue(user, distance=1.0)
+                elif hasattr(robot, "go_to"):
+                    robot.go_to(user, distance=1.0)
             elif hasattr(robot, "go_to"):
-                robot.go_to(user, distance=1.0)
-        elif hasattr(robot, "go_to"):
-            robot.go_to("start")
+                robot.go_to("start")
+        except (PathBlocked, NotFound, TargetLost, Timeout) as exc:
+            record.problems.append(f"{type(exc).__name__}: {exc}")
+            return self._finish(
+                record, "failed", f"could not come back: {exc}",
+                task_said=spoken_now,
+                action="pursue", subgoal="come back", posture="uh_oh", chime="uh_oh",
+                **_said_fields(robot, fallback_said),
+            )
         return self._finish(
             record, "done", "came back to user",
+            task_said=spoken_now,
             action="pursue", subgoal="come back", posture="listening", chime="listen",
+            **_said_fields(robot, fallback_said),
         )
 
     def _observe(
@@ -192,7 +319,7 @@ class Agent:
             if room and room not in scratchpad.visited_rooms:
                 scratchpad.visited_rooms.append(room)
 
-        context_text = describe(snapshot, memory=self.memory, scratchpad=scratchpad)
+        context_text = describe(snapshot, memory=self.memory, scratchpad=None)
 
         frame = None
         if hasattr(robot, "render_view"):
@@ -242,13 +369,14 @@ class Agent:
         scratchpad: TaskScratchpad,
     ) -> tuple[Intent, int]:
         if hasattr(self.planner, "plan_step"):
-            intent = self.planner.plan_step(
-                context_text,
-                instruction,
-                image_url=image_url,
-                scratchpad=scratchpad.summary(),
-                earlier=self.earlier[-EARLIER:],
-            )
+            kwargs: dict[str, Any] = {
+                "image_url": image_url,
+                "scratchpad": scratchpad.summary(),
+                "earlier": self.earlier[-EARLIER:],
+            }
+            if _accepts_kwarg(self.planner.plan_step, "completed_steps"):
+                kwargs["completed_steps"] = tuple(scratchpad.completed_steps)
+            intent = self.planner.plan_step(context_text, instruction, **kwargs)
             if not hasattr(intent, "action"):
                 raise TypeError(f"planner.plan_step returned {type(intent).__name__}, expected Intent")
             return intent, 0
@@ -268,25 +396,192 @@ class Agent:
 
         return Intent(action="done"), 0
 
-    def _execute_intent(self, robot: Any, intent: Intent) -> str:
-        action = intent.action.lower().strip()
-        target = intent.target
-        params = intent.params or {}
+    def _resolve_target(self, robot: Any, target: Any) -> tuple[Any, str, Any]:
+        """Resolve an Intent target into (exec_target, canonical_key, matched_object_or_None)."""
+        if target is None or isinstance(target, bool):
+            return None, "none", None
+        if isinstance(target, int):
+            if hasattr(robot, "obj"):
+                resolved = robot.obj(target)
+                return resolved, f"id:{getattr(resolved, 'id', target)}", resolved
+            return target, f"id:{target}", None
+        if not isinstance(target, str):
+            obj_id = getattr(target, "id", None)
+            key = f"id:{obj_id}" if obj_id is not None else repr(target)
+            return target, key, target if hasattr(target, "position") else None
 
+        s = target.strip().strip("\"'")
+        low = s.lower()
+        if low not in _USER_ALIASES:
+            s = re.sub(r"\s*\([^)]*\)", "", s).strip()
+            low = s.lower()
+        if not s or low in _NULL_TARGET_STRINGS:
+            return None, "none", None
+        if low in _USER_ALIASES:
+            if hasattr(robot, "user"):
+                u = robot.user()
+                if u is None:
+                    raise NotFound("no user in view")
+                return u, "user", u
+            return "user", "user", None
+
+        # Parse ID prefixes/formats such as "#7", "id=4", "10  table", or "table #7"
+        m_lead = re.match(r"^(?:id\s*[=:]?\s*|#\s*)?(-?\d+)(?:\s+(.*))?$", s, re.IGNORECASE)
+        if m_lead:
+            obj_id = int(m_lead.group(1))
+            rem = (m_lead.group(2) or "").strip(" ()")
+            if hasattr(robot, "obj"):
+                try:
+                    resolved = robot.obj(obj_id)
+                    return resolved, f"id:{getattr(resolved, 'id', obj_id)}", resolved
+                except NotFound:
+                    if not rem:
+                        raise
+                    s = rem
+                    low = s.lower()
+            else:
+                return obj_id, f"id:{obj_id}", None
+        else:
+            m_hash_trail = re.match(r"^(.+?)\s+#(-?\d+)$", s)
+            if m_hash_trail:
+                obj_id = int(m_hash_trail.group(2))
+                rem = m_hash_trail.group(1).strip()
+                if hasattr(robot, "obj"):
+                    try:
+                        resolved = robot.obj(obj_id)
+                        return resolved, f"id:{getattr(resolved, 'id', obj_id)}", resolved
+                    except NotFound:
+                        s = rem or s
+                        low = s.lower()
+                else:
+                    return obj_id, f"id:{obj_id}", None
+
+        # Snapshot grounding: match object IDs for dedup/distance checks + synonym fallback
+        if hasattr(robot, "snapshot"):
+            try:
+                snap = robot.snapshot() or {}
+            except Exception:
+                snap = {}
+            objects = snap.get("objects", []) or []
+            rooms_low = {str(r).lower() for r in snap.get("rooms", ())}
+            if low not in rooms_low:
+                # Trailing bare numeric suffix like "table 10" when not a room name
+                m_num_trail = re.match(r"^(.+?)\s+(\d+)$", s)
+                if m_num_trail and hasattr(robot, "obj"):
+                    try:
+                        resolved = robot.obj(int(m_num_trail.group(2)))
+                        return resolved, f"id:{getattr(resolved, 'id', m_num_trail.group(2))}", resolved
+                    except NotFound:
+                        pass
+                tokens = set(low.split())
+                exact = [
+                    o
+                    for o in objects
+                    if low in str(getattr(o, "label", "")).lower()
+                    or (
+                        tokens
+                        and tokens
+                        <= ({str(getattr(o, "label", "")).lower(), str(getattr(o, "color", "")).lower()} - {""})
+                    )
+                ]
+                if exact:
+                    nearest = min(exact, key=lambda o: float(getattr(o, "distance", 0.0)))
+                    key = f"id:{nearest.id}" if hasattr(nearest, "id") else f"name:{low}"
+                    return nearest, key, nearest
+                syns = _TARGET_SYNONYMS.get(low)
+                if syns:
+                    for syn in syns:
+                        matched = [o for o in objects if syn in str(getattr(o, "label", "")).lower()]
+                        if matched:
+                            nearest = min(matched, key=lambda o: float(getattr(o, "distance", 0.0)))
+                            key = f"id:{nearest.id}" if hasattr(nearest, "id") else f"name:{syn}"
+                            return nearest, key, nearest
+
+        return s, f"name:{low}", None
+
+    def _prepare_intent(
+        self, robot: Any, intent: Intent
+    ) -> tuple[str, Any, str, Any, dict[str, Any]]:
+        action = intent.action.lower().strip().replace("-", "_")
+        params = dict(intent.params or {})
+        raw_target = intent.target
+
+        if action == "move" and raw_target is not None:
+            t_low = str(raw_target).strip().lower()
+            if t_low not in _NULL_TARGET_STRINGS and t_low not in _DIRECTION_WORDS:
+                action = "go_to"
+
+        redirected = False
         if (
-            action in _OBJECT_TARGET_ACTIONS
-            and not isinstance(target, bool)
-            and isinstance(target, int)
-            and hasattr(robot, "obj")
+            action == "search_frontier"
+            and raw_target is not None
+            and str(raw_target).strip().lower() not in (_NULL_TARGET_STRINGS | {"frontier", "room", "here", "everywhere"})
         ):
-            target = robot.obj(target)
+            try:
+                cand_target, cand_key, cand_obj = self._resolve_target(robot, raw_target)
+                if cand_obj is not None:
+                    action = "go_to"
+                    exec_target, target_key, target_obj = cand_target, cand_key, cand_obj
+                    params.setdefault("distance", 0.5)
+                    redirected = True
+            except NotFound:
+                pass
+
+        if not redirected:
+            if action in _OBJECT_TARGET_ACTIONS:
+                if action == "pursue" and (
+                    raw_target is None or str(raw_target).strip().lower() in _NULL_TARGET_STRINGS
+                ):
+                    raw_target = "user"
+                exec_target, target_key, target_obj = self._resolve_target(robot, raw_target)
+            else:
+                exec_target = raw_target
+                target_key = "none" if raw_target is None else str(raw_target).strip().lower()
+                target_obj = None
+
+        if action == "go_to" and "distance" in params and params["distance"] is not None:
+            try:
+                d_val = float(params["distance"])
+                if target_key != "user" and d_val >= 1.0:
+                    params["distance"] = 0.5
+                elif target_key == "user" and d_val > 1.0:
+                    params["distance"] = 1.0
+            except (TypeError, ValueError):
+                pass
+
+        return action, exec_target, target_key, target_obj, params
+
+    def _format_step_summary(
+        self,
+        action: str,
+        target_key: str,
+        target_obj: Any,
+        params: dict[str, Any],
+        step_num: int | None = None,
+    ) -> str:
+        if step_num is None:
+            pad = getattr(self.short_term, "scratchpad", None)
+            step_num = len(pad.completed_steps) + 1 if pad is not None else 1
+        t_desc = target_key
+        if target_obj is not None and hasattr(target_obj, "id") and hasattr(target_obj, "label"):
+            t_desc = f"{target_obj.label}#{target_obj.id}"
+        elif t_desc.startswith("name:"):
+            t_desc = t_desc[5:]
+        params_json = json.dumps(params, sort_keys=True, default=str)
+        return f"Step {step_num}: {action} target={t_desc} params={params_json} (completed)"
+
+    def _execute_prepared(
+        self, robot: Any, action: str, target: Any, params: dict[str, Any], raw_target: Any = None
+    ) -> str:
+        if action in ("go_to", "orbit", "peek", "look_under", "face") and target is None:
+            raise NotFound(f"{action} requires a target")
 
         if action == "go_to":
-            dist = float(params.get("distance", 0.0))
+            dist = _num_param(params, ("distance",), 0.0)
             robot.go_to(target, distance=dist)
             return f"drove to {target}"
         if action == "pursue":
-            dist = float(params.get("distance", 1.0))
+            dist = _num_param(params, ("distance",), 1.0)
             sec = params.get("seconds")
             if hasattr(robot, "pursue"):
                 robot.pursue(target, distance=dist, seconds=sec)
@@ -296,9 +591,10 @@ class Agent:
                 robot.go_to(target, distance=dist)
             return f"pursued {target}"
         if action == "orbit":
-            laps = float(params.get("laps", 1.0))
-            direction = params.get("direction", "left")
-            dist = float(params.get("distance", 0.5))
+            laps = _num_param(params, ("laps", "turns", "count"), 1.0)
+            raw_dir = str(params.get("direction") or "left").lower().strip()
+            direction = "right" if raw_dir in ("clockwise", "cw", "right") else "left"
+            dist = _num_param(params, ("distance", "radius"), 0.5)
             robot.orbit(target, laps=laps, direction=direction, distance=dist)
             return f"orbited {target}"
         if action == "peek":
@@ -310,17 +606,22 @@ class Agent:
                 robot.look_under(target)
             return f"looked under {target}"
         if action == "move":
-            metres = float(params.get("metres", 1.0))
-            direction = params.get("direction", "forward")
+            metres = _num_param(params, ("metres", "meters", "distance"), 1.0)
+            default_dir = (
+                "backward"
+                if raw_target is not None and str(raw_target).strip().lower() in ("backward", "back")
+                else "forward"
+            )
+            direction = str(params.get("direction") or default_dir).lower().strip() or "forward"
             robot.move(metres, direction=direction)
             return f"moved {metres}m {direction}"
         if action == "turn":
-            degrees = float(params.get("degrees", 90.0))
-            direction = params.get("direction", "left")
+            degrees = _num_param(params, ("degrees", "angle"), 90.0)
+            direction = str(params.get("direction") or "left").lower().strip() or "left"
             robot.turn(degrees, direction=direction)
             return f"turned {degrees}° {direction}"
         if action == "spin":
-            turns = float(params.get("turns", 1.0))
+            turns = _num_param(params, ("turns", "laps", "count"), 1.0)
             robot.spin(turns=turns)
             return f"spun {turns} turns"
         if action == "face":
@@ -347,11 +648,15 @@ class Agent:
             return f"explored frontier for {target}"
         if action == "step_closer":
             if target is not None:
-                robot.go_to(target, distance=0.5)
+                robot.go_to(target, distance=float(params.get("distance", 0.5)))
             else:
                 robot.move(0.5, "forward")
             return f"stepped closer to {target}"
         return f"performed {action}"
+
+    def _execute_intent(self, robot: Any, intent: Intent) -> str:
+        action, exec_target, _, _, params = self._prepare_intent(robot, intent)
+        return self._execute_prepared(robot, action, exec_target, params, raw_target=intent.target)
 
     def _escalated_summary(self, robot: Any, again: TaskRecord) -> str:
         last_intent = again.intents[-1] if again.intents else None
@@ -362,23 +667,51 @@ class Agent:
             return f"refused: {reason}"
         return "stopped"
 
+    def _is_repeated_step(
+        self,
+        robot: Any,
+        action: str,
+        target_obj: Any,
+        params: dict[str, Any],
+        step_sig: tuple[str, str, tuple[tuple[str, str], ...]],
+        succeeded_sigs: list[tuple[str, str, tuple[tuple[str, str], ...]]],
+    ) -> bool:
+        if action in _IDEMPOTENT_ACTIONS and step_sig in succeeded_sigs:
+            return True
+        if action == "go_to" and target_obj is not None and succeeded_sigs and hasattr(target_obj, "position"):
+            pose = robot.pose() if hasattr(robot, "pose") else None
+            if pose is None and hasattr(robot, "snapshot"):
+                try:
+                    pose = (robot.snapshot() or {}).get("pose")
+                except Exception:
+                    pose = None
+            if pose is not None:
+                px, py, _ = _pose_tuple(pose)
+                radius = float(getattr(target_obj, "radius", 0.3))
+                reach = max(0.0, float(params.get("distance", 0.0)))
+                if math.dist((px, py), target_obj.position) <= radius + reach + 0.25:
+                    return True
+        return False
+
     def do(self, instruction: str, robot: Any, speak: bool = True) -> TaskRecord:
         record = TaskRecord(instruction)
 
         # 1. Instant reflex commands act immediately without a model
         cmd = instant(instruction)
         if cmd is not None:
-            return self._handle_instant(cmd, robot, record)
+            return self._handle_instant(cmd, robot, record, speak=speak)
 
         if hasattr(robot, "begin"):
             robot.begin()
 
         scratchpad = TaskScratchpad(goal=instruction)
         self.short_term.scratchpad = scratchpad
-        self._push_live(status="planning", instruction=instruction, problems=[])
+        self._push_live(status="planning", instruction=instruction, problems=[], **_said_fields(robot))
 
         step_failures = 0
         said_log: list[str] = []
+        last_spoken = ""
+        succeeded_sigs: list[tuple[str, str, tuple[tuple[str, str], ...]]] = []
 
         # 2. Closed-Loop Sense-Think-Act Loop
         for step_idx in range(MAX_STEPS):
@@ -403,11 +736,58 @@ class Agent:
             if intent.subgoal:
                 scratchpad.subgoal = intent.subgoal
 
-            # Speak and express posture
-            if intent.say and speak and hasattr(robot, "say"):
+            action = intent.action.lower().strip().replace("-", "_")
+            say_text = intent.say.strip() if intent.say else ""
+            say_norm = " ".join(say_text.split())
+
+            # Prepare action and guard against repetition loops BEFORE speaking redundant announcements
+            prepared: tuple[str, Any, str, Any, dict[str, Any]] | None = None
+            target_obj: Any = None
+            step_sig: tuple[str, str, tuple[tuple[str, str], ...]] | None = None
+            if action not in _DONE_ACTIONS and action != "refuse":
                 try:
-                    robot.say(intent.say)
-                    said_log.append(intent.say)
+                    prepared = self._prepare_intent(robot, intent)
+                    exec_action, exec_target, target_key, target_obj, exec_params = prepared
+                    step_sig = _canonical_step_sig(exec_action, target_key, exec_params)
+                    if step_idx > 0 and self._is_repeated_step(
+                        robot, exec_action, target_obj, exec_params, step_sig, succeeded_sigs
+                    ):
+                        if record.intents:
+                            record.intents.pop()
+                        pop_fn = getattr(self.planner, "pop_last_intent", None)
+                        if callable(pop_fn):
+                            pop_fn()
+                        last_kept = record.intents[-1] if record.intents else intent
+                        summary = self._summarize_action(robot, exec_target)
+                        return self._finish(
+                            record, "done", summary,
+                            task_said=said_log[-1] if said_log else "",
+                            subgoal=last_kept.subgoal or scratchpad.subgoal,
+                            action="done",
+                            posture=last_kept.posture,
+                            chime=last_kept.chime,
+                            **_said_fields(robot, said_log),
+                        )
+                except (PathBlocked, NotFound, TargetLost, Timeout) as exc:
+                    record.problems.append(f"{type(exc).__name__}: {exc}")
+                    step_failures += 1
+                    scratchpad.blockers.append(str(exc))
+                    if step_failures >= 2:
+                        break
+                    continue
+                except Exception as exc:
+                    record.problems.append(f"{type(exc).__name__}: {exc}")
+                    step_failures += 1
+                    if step_failures >= 2:
+                        break
+                    continue
+
+            # Speak (deduplicated) and express posture
+            if say_norm and say_norm != last_spoken and speak and hasattr(robot, "say"):
+                try:
+                    robot.say(say_text)
+                    said_log.append(say_text)
+                    last_spoken = say_norm
                 except Exception:
                     pass
             if hasattr(robot, "express") and (intent.posture != "neutral" or intent.chime):
@@ -416,7 +796,6 @@ class Agent:
                 except Exception:
                     pass
 
-            action = intent.action.lower().strip()
             live_step: dict[str, Any] = {
                 "status": "running",
                 "instruction": instruction,
@@ -424,39 +803,54 @@ class Agent:
                 "action": intent.action,
                 "posture": intent.posture,
                 "chime": intent.chime,
-                "said": list(said_log[-6:]),
                 "plan": intent.subgoal or intent.action,
                 "say_first": intent.say,
                 "problems": list(record.problems),
+                **_said_fields(robot, said_log),
             }
             if som_url is not None:
                 live_step["set_of_mark"] = som_url
             self._push_live(**live_step)
 
-            if action == "done":
-                summary = self._summarize_action(robot, intent.target)
+            if action in _DONE_ACTIONS:
+                summary = (
+                    self._summarize_action(robot, intent.target)
+                    if succeeded_sigs
+                    else (f"replied: {say_text[:80]}" if say_text else "done")
+                )
                 return self._finish(
                     record, "done", summary,
+                    task_said=said_log[-1] if said_log else "",
                     subgoal=intent.subgoal or scratchpad.subgoal,
                     action="done",
                     posture=intent.posture,
                     chime=intent.chime,
-                    said=list(said_log[-6:]),
+                    **_said_fields(robot, said_log),
                 )
 
             if action == "refuse":
                 return self._finish(
                     record, "refused", f"refused: {intent.say or 'cannot do it'}",
+                    task_said=said_log[-1] if said_log else "",
                     subgoal=intent.subgoal or scratchpad.subgoal,
                     action="refuse",
                     posture=intent.posture,
                     chime=intent.chime,
-                    said=list(said_log[-6:]),
+                    **_said_fields(robot, said_log),
                 )
 
-            # Execute action
+            # Execute prepared action
+            assert prepared is not None and step_sig is not None
+            exec_action, exec_target, target_key, target_obj, exec_params = prepared
             try:
-                self._execute_intent(robot, intent)
+                self._execute_prepared(
+                    robot, exec_action, exec_target, exec_params, raw_target=intent.target
+                )
+                succeeded_sigs.append(step_sig)
+                step_num = len(scratchpad.completed_steps) + 1
+                scratchpad.record_step(
+                    self._format_step_summary(exec_action, target_key, target_obj, exec_params, step_num=step_num)
+                )
                 step_failures = 0
             except (PathBlocked, NotFound, TargetLost, Timeout) as exc:
                 record.problems.append(f"{type(exc).__name__}: {exc}")
@@ -468,7 +862,9 @@ class Agent:
             except Preempted:
                 return self._finish(
                     record, "preempted", "stopped",
-                    action="stop", said=list(said_log[-6:]),
+                    task_said=said_log[-1] if said_log else "",
+                    action="stop",
+                    **_said_fields(robot, said_log),
                 )
             except SafetyStop as exc:
                 record.problems.append(f"SafetyStop: {exc}")
@@ -481,7 +877,9 @@ class Agent:
                 continue
 
             # Update scratchpad
-            if intent.target is not None:
+            if target_obj is not None and hasattr(target_obj, "id"):
+                scratchpad.inspected_ids.add(target_obj.id)
+            elif intent.target is not None:
                 if not isinstance(intent.target, bool) and isinstance(intent.target, int):
                     scratchpad.inspected_ids.add(intent.target)
                 elif hasattr(intent.target, "id"):
@@ -493,6 +891,23 @@ class Agent:
                     self.memory.observe_clear_space(pose.x, pose.y, radius=1.0)
                 except Exception:
                     pass
+
+            if (
+                step_idx == 0
+                and _is_local_planner(self.planner)
+                and exec_action in _SINGLE_STEP_PHYSICAL_ACTIONS
+                and _is_simple_single_step(instruction)
+            ):
+                summary = self._summarize_action(robot, exec_target)
+                return self._finish(
+                    record, "done", summary,
+                    task_said=said_log[-1] if said_log else "",
+                    subgoal=intent.subgoal or scratchpad.subgoal,
+                    action="done",
+                    posture=intent.posture,
+                    chime=intent.chime,
+                    **_said_fields(robot, said_log),
+                )
         else:
             if not record.problems:
                 record.problems.append("could not finish within step limit")
@@ -508,7 +923,8 @@ class Agent:
                 summary = self._escalated_summary(robot, again)
                 return self._finish(
                     record, again.outcome, summary,
-                    said=list(said_log[-6:]),
+                    task_said=said_log[-1] if said_log else "",
+                    **_said_fields(robot, said_log),
                 )
 
         problem_text = plainly(record.problems)
@@ -521,5 +937,6 @@ class Agent:
                 pass
         return self._finish(
             record, "failed", f"could not do it: {problem_text}",
-            said=list(said_log[-6:]),
+            task_said=said_log[-1] if said_log else "",
+            **_said_fields(robot, said_log),
         )

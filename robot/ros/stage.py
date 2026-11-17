@@ -18,6 +18,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -44,10 +45,14 @@ def _steps(lo: float, hi: float, every: float) -> list[float]:
 
 def _model(name: str, x: float, y: float, yaw: float, geometry: str, z: float, color: str) -> str:
     r, g, b = RGB.get(color, RGB[""])
-    material = f"<material><ambient>{r} {g} {b} 1</ambient><diffuse>{r} {g} {b} 1</diffuse></material>"
+    material = (
+        f"<material><ambient>{r * 0.9:.3f} {g * 0.9:.3f} {b * 0.9:.3f} 1</ambient>"
+        f"<diffuse>{r:.3f} {g:.3f} {b:.3f} 1</diffuse><specular>0.15 0.15 0.15 1</specular>"
+        f"<pbr><metal><roughness>0.65</roughness><metalness>0.05</metalness></metal></pbr></material>"
+    )
     return (f'<model name="{name}"><static>true</static><pose>{x:.3f} {y:.3f} {z:.3f} 0 0 {yaw:.4f}</pose>'
             f'<link name="l"><collision name="c"><geometry>{geometry}</geometry></collision>'
-            f'<visual name="v"><geometry>{geometry}</geometry>{material}</visual></link></model>')
+            f'<visual name="v"><cast_shadows>true</cast_shadows><geometry>{geometry}</geometry>{material}</visual></link></model>')
 
 
 def _box(name: str, x: float, y: float, yaw: float, size: tuple[float, float, float], color: str = "white") -> str:
@@ -81,6 +86,30 @@ def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
              ((w / 2, h / 2), (-w / 2, h / 2)), ((-w / 2, h / 2), (-w / 2, -h / 2)), *scene.walls]
     models = [_box(f"wall{k}", (a[0] + b[0]) / 2, (a[1] + b[1]) / 2, math.atan2(b[1] - a[1], b[0] - a[0]),
                    (math.dist(a, b) + 0.1, 0.1, WALL_H), "wall") for k, (a, b) in enumerate(walls)]
+
+    # Perimeter visual-only baseboards (height 0.08 m, depth 0.015 m, white/alder wood, no collision)
+    outer_perimeter = [((-w / 2, -h / 2), (w / 2, -h / 2)), ((w / 2, -h / 2), (w / 2, h / 2)),
+                       ((w / 2, h / 2), (-w / 2, h / 2)), ((-w / 2, h / 2), (-w / 2, -h / 2))]
+    for k, (a, b) in enumerate(outer_perimeter):
+        mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+        yaw = math.atan2(b[1] - a[1], b[0] - a[0])
+        dist = math.dist(a, b)
+        models.append(
+            f'<model name="baseboard{k}"><static>true</static><pose>{mx:.3f} {my:.3f} 0.040 0 0 {yaw:.4f}</pose>'
+            f'<link name="l"><visual name="v"><cast_shadows>true</cast_shadows>'
+            f'<geometry><box><size>{dist:.3f} 0.015 0.080</size></box></geometry>'
+            f'<material><ambient>0.85 0.85 0.82 1</ambient><diffuse>0.92 0.92 0.90 1</diffuse><specular>0.1 0.1 0.1 1</specular>'
+            f'<pbr><metal><roughness>0.7</roughness><metalness>0.0</metalness></metal></pbr></material></visual></link></model>'
+        )
+
+    # Soft visual rug in the living room center (geometry: box 2.2 1.6 0.002, visual only, no collision)
+    models.append(
+        '<model name="rug"><static>true</static><pose>0.0 0.0 0.001 0 0 0</pose>'
+        '<link name="l"><visual name="v"><cast_shadows>false</cast_shadows>'
+        '<geometry><box><size>2.2 1.6 0.002</size></box></geometry>'
+        '<material><ambient>0.28 0.35 0.42 1</ambient><diffuse>0.32 0.40 0.48 1</diffuse><specular>0.05 0.05 0.05 1</specular>'
+        '<pbr><metal><roughness>0.95</roughness><metalness>0.0</metalness></metal></pbr></material></visual></link></model>'
+    )
     lights = "".join(  # ceiling lights every 2.5 m, as in a home
         f'<light type="point" name="ceiling{i}_{j}"><pose>{x:.2f} {y:.2f} 2.3 0 0 0</pose>'
         '<diffuse>0.32 0.31 0.29 1</diffuse><specular>0.1 0.1 0.1 1</specular><cast_shadows>false</cast_shadows>'
@@ -102,14 +131,15 @@ def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
     <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
-    <scene><ambient>0.32 0.32 0.32 1</ambient><background>0.78 0.82 0.86 1</background><shadows>false</shadows></scene>
-    <light type="directional" name="sun"><pose>0 0 10 0 0 0</pose><diffuse>0.45 0.45 0.43 1</diffuse>
-      <specular>0.2 0.2 0.2 1</specular><direction>-0.4 0.2 -0.9</direction><cast_shadows>false</cast_shadows></light>
+    <scene><ambient>0.4 0.4 0.4 1</ambient><background>0.78 0.82 0.86 1</background><shadows>true</shadows></scene>
+    <light type="directional" name="sun"><pose>0 0 10 0 0 0</pose><diffuse>0.8 0.8 0.78 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular><direction>-0.5 0.3 -0.8</direction><cast_shadows>true</cast_shadows></light>
     {lights}
     <model name="ground"><static>true</static><link name="l">
       <collision name="c"><geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry></collision>
-      <visual name="v"><geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry>
-        <material><ambient>0.55 0.45 0.33 1</ambient><diffuse>0.62 0.5 0.36 1</diffuse></material></visual>
+      <visual name="v"><cast_shadows>false</cast_shadows><geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry>
+        <material><ambient>0.55 0.45 0.33 1</ambient><diffuse>0.65 0.52 0.38 1</diffuse><specular>0.1 0.1 0.1 1</specular>
+          <pbr><metal><roughness>0.8</roughness><metalness>0.0</metalness></metal></pbr></material></visual>
     </link></model>
     {"".join(models)}
   </world>
@@ -130,7 +160,7 @@ def export(world: SimRobot, out: Path) -> tuple[Path, Path]:
 # publishes its own clock and TF, and a second Nav2 container answers to the same node names (one case's Nav2 took
 # 170 s to load and never activated while the last run's container was still shutting down).
 LEFTOVERS = ("gz-sim-main", "gz-sim-gui", "gz sim", "component_container", "robot_state_publisher", "parameter_bridge",
-             "image_bridge", "ros2 launch", "rviz2", "ekf_node")
+             "image_bridge", "ros2 launch", "rviz2", "ekf_node", "robot.ros.perceive")
 
 
 def clear() -> None:
@@ -162,6 +192,24 @@ class Launched:
         clear()  # Gazebo's GUI and server, and Nav2's container, do not always leave with their launch
 
 
+def _bridge_config(out: Path) -> Path:
+    """Copy Nav2's TB4 ros_gz_bridge config without its lidar /scan entry (Sprocket synthesizes /scan)."""
+    import yaml
+
+    path = out / "tb4_bridge.yaml"
+    base = Path("/opt/ros/lyrical/share/nav2_minimal_tb4_sim/configs/tb4_bridge.yaml")
+    if not base.exists():
+        path.write_text("[]\n")
+        return path
+    entries = yaml.safe_load(base.read_text()) or []
+    filtered = [
+        e for e in entries
+        if not (isinstance(e, dict) and (e.get("ros_topic_name") == "scan" or e.get("gz_topic_name") == "/scan"))
+    ]
+    path.write_text(yaml.safe_dump(filtered, sort_keys=False))
+    return path
+
+
 def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
            map_file: Path | None = None) -> Launched:
     """Nav2's simulation launch with Sprocket's body (robot/ros/model.py) in the scene; with gui, the Gazebo 3D window
@@ -170,7 +218,7 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
     only knows the front one, and robot_localization's EKF fuses the wheels with the gyro into the odometry
     (robot/ros/model.py). The robot localises in `map_file` (a map it built: robot/ros/explore.py), else in the
     simulator's own map of the scene; with `slam` it has no map and builds one as it goes."""
-    from robot.ros.model import EKF, GROUND_TRUTH, REAR_BRIDGES, REAR_INFO, urdf
+    from robot.ros.model import EKF, GROUND_TRUTH, REAR_BRIDGES, REAR_INFO, TOF_BRIDGES, TOF_INFO, urdf
 
     clear()
     sdf, yaml = export(world, out)
@@ -178,11 +226,15 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
     body.write_text(urdf())
     ekf = out / "ekf.yaml"
     ekf.write_text(EKF)
+    bridge_cfg = _bridge_config(out)
     s = world.scene.start
     args = [f"world:={sdf}", f"map:={map_file or yaml}", f"x_pose:={s.x}", f"y_pose:={s.y}",
             f"yaw:={math.radians(s.yaw)}", f"robot_sdf:={body}", "robot_name:=sprocket", f"headless:={not gui}",
             "use_rviz:=False", "use_keepout_zones:=False", "use_speed_zones:=False", f"slam:={slam}",
             f"params_file:={_nav2_params(out)}"]
+    tb4_launch = Path("/opt/ros/lyrical/share/nav2_bringup/launch/tb4_simulation_launch.py")
+    if tb4_launch.exists() and "bridge_config" in tb4_launch.read_text():
+        args.append(f"bridge_config:={bridge_cfg}")
     env = {**os.environ, "QT_QPA_PLATFORM": "xcb"}  # Qt windows draw through X11 under WSLg
     if os.path.exists("/dev/dxg"):  # WSL: Mesa falls back to drawing on the CPU (llvmpipe) unless told to use the
         env.update(GALLIUM_DRIVER="d3d12", MESA_D3D12_DEFAULT_ADAPTER_NAME="NVIDIA")  # GPU through Direct3D 12
@@ -190,10 +242,13 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
     log = open(out / "launch.log", "w")  # noqa: SIM115 - closed with the process group
     procs = [subprocess.Popen(["ros2", "launch", "nav2_bringup", "tb4_simulation_launch.py", *args],
                               stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)]
+    image_bridges = list(dict.fromkeys([*REAR_BRIDGES, *TOF_BRIDGES]))
+    info_bridges = list(dict.fromkeys([*REAR_INFO, *TOF_INFO, GROUND_TRUTH]))
     sim_time = ["--ros-args", "-p", "use_sim_time:=true"]
-    for command in (["ros2", "run", "ros_gz_image", "image_bridge", *REAR_BRIDGES, *sim_time],
-                    ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *REAR_INFO, GROUND_TRUTH, *sim_time],
-                    ["ros2", "run", "robot_localization", "ekf_node", "--ros-args", "--params-file", str(ekf)]):
+    for command in (["ros2", "run", "ros_gz_image", "image_bridge", *image_bridges, *sim_time],
+                    ["ros2", "run", "ros_gz_bridge", "parameter_bridge", *info_bridges, *sim_time],
+                    ["ros2", "run", "robot_localization", "ekf_node", "--ros-args", "--params-file", str(ekf)],
+                    [sys.executable, "-m", "robot.ros.perceive", "--bridge-only"]):
         procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True))
     return Launched(procs)
 
@@ -203,7 +258,7 @@ def launch(world: SimRobot, out: Path, *, gui: bool = False, slam: bool = False,
 # moment was placed as far off. Sprocket's calibrated 3-CSI depth rig publishes a synthetic 360-degree /scan (360
 # beams) without hardware lidar, and its odometry is fused with the gyro.
 AMCL = {"max_beams": 150, "update_min_d": 0.1, "update_min_a": 0.1, "alpha1": 0.1, "alpha2": 0.1, "alpha3": 0.1,
-        "alpha4": 0.1, "z_hit": 0.9, "z_rand": 0.1, "sigma_hit": 0.1, "transform_tolerance": 0.3}
+        "alpha4": 0.1, "z_hit": 0.9, "z_rand": 0.1, "sigma_hit": 0.1, "transform_tolerance": 1.0}
 
 
 def _nav2_params(out: Path) -> Path:
@@ -211,8 +266,29 @@ def _nav2_params(out: Path) -> Path:
     import yaml
 
     base = Path("/opt/ros/lyrical/share/nav2_bringup/params/nav2_params.yaml")
-    params = yaml.safe_load(base.read_text())
-    params["amcl"]["ros__parameters"].update(AMCL)
+    params = yaml.safe_load(base.read_text()) if base.exists() else {}
+
+    params.setdefault("amcl", {}).setdefault("ros__parameters", {}).update(AMCL)
+
+    cs = params.setdefault("controller_server", {}).setdefault("ros__parameters", {})
+    cs["transform_tolerance"] = 1.0
+    fp = cs.setdefault("FollowPath", {})
+    fp["transform_tolerance"] = 1.0
+    fp["batch_size"] = 800
+
+    lc = params.setdefault("local_costmap", {}).setdefault("local_costmap", {}).setdefault("ros__parameters", {})
+    lc["transform_tolerance"] = 1.0
+
+    gc = params.setdefault("global_costmap", {}).setdefault("global_costmap", {}).setdefault("ros__parameters", {})
+    gc["transform_tolerance"] = 1.0
+
+    bs = params.setdefault("behavior_server", {}).setdefault("ros__parameters", {})
+    bs["transform_tolerance"] = 1.0
+
+    cm = params.setdefault("collision_monitor", {}).setdefault("ros__parameters", {})
+    cm["transform_tolerance"] = 1.0
+    cm["source_timeout"] = 5.0
+
     path = out / "nav2_params.yaml"
     path.write_text(yaml.safe_dump(params, sort_keys=False))
     return path

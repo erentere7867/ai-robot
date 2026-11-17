@@ -17,13 +17,14 @@ import numpy as np
 
 from robot.agent.api import Object, PathBlocked, Point, Pose, Preempted, choose, wrap, xy
 from robot.interfaces.voice import chime as synth_chime
+from robot.perception.camera import data_url
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
 DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
 
 
 def _resize_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
-    """Resize an image array to `(height, width, 3)` uint8 using pure NumPy nearest-neighbor indexing."""
+    """Resize an image array to `(height, width, 3)` uint8 using vectorized bilinear interpolation."""
     if width <= 0 or height <= 0:
         return np.zeros((max(0, height), max(0, width), 3), dtype=np.uint8)
     arr = np.asarray(rgb, dtype=np.uint8)
@@ -32,9 +33,19 @@ def _resize_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
     h, w = arr.shape[:2]
     if h == height and w == width and arr.shape[2] == 3:
         return arr.copy()
-    ys = (np.arange(height) * h) // height
-    xs = (np.arange(width) * w) // width
-    return arr[np.ix_(ys, xs)][:, :, :3].copy()
+    arr_f = arr[:, :, :3].astype(np.float32)
+    y_coords = np.clip((np.arange(height, dtype=np.float32) + 0.5) * (h / height) - 0.5, 0.0, h - 1.0)
+    x_coords = np.clip((np.arange(width, dtype=np.float32) + 0.5) * (w / width) - 0.5, 0.0, w - 1.0)
+    y0 = np.floor(y_coords).astype(np.int32)
+    y1 = np.clip(y0 + 1, 0, h - 1)
+    x0 = np.floor(x_coords).astype(np.int32)
+    x1 = np.clip(x0 + 1, 0, w - 1)
+    fy = (y_coords - y0)[:, None, None]
+    fx = (x_coords - x0)[None, :, None]
+    top = (1.0 - fx) * arr_f[y0[:, None], x0[None, :]] + fx * arr_f[y0[:, None], x1[None, :]]
+    bottom = (1.0 - fx) * arr_f[y1[:, None], x0[None, :]] + fx * arr_f[y1[:, None], x1[None, :]]
+    res = (1.0 - fy) * top + fy * bottom
+    return np.clip(res + 0.5, 0, 255).astype(np.uint8)
 
 
 class RosRobot(SimRobot):
@@ -56,9 +67,12 @@ class RosRobot(SimRobot):
         if not rclpy.ok():
             rclpy.init()
         self.node = rclpy.create_node("sprocket_api", parameter_overrides=[Parameter("use_sim_time", value=True)])
+        self._action_node = rclpy.create_node(
+            "sprocket_actions", parameter_overrides=[Parameter("use_sim_time", value=True)]
+        )
         self.tf = Buffer()
         self._tf_listener = TransformListener(self.tf, self.node)
-        self.actions = {name: ActionClient(self.node, kind, name) for name, kind in (
+        self.actions = {name: ActionClient(self._action_node, kind, name) for name, kind in (
             ("navigate_to_pose", NavigateToPose), ("follow_path", FollowPath), ("spin", Spin),
             ("drive_on_heading", DriveOnHeading))}
         self.kinds = {"navigate_to_pose": NavigateToPose, "follow_path": FollowPath, "spin": Spin,
@@ -71,13 +85,16 @@ class RosRobot(SimRobot):
         self._front_rgb: np.ndarray | None = None
         self.last_chime: bytes | None = None
         self.on_chime: Any = None
-        self._scan_bridge = SyntheticScanPublisher(self.node) if synthetic_scan else None
+        self._scan_bridge = SyntheticScanPublisher(self.node, publish=False) if synthetic_scan else None
         self.node.create_subscription(LaserScan, "/scan", lambda m: setattr(self, "_scan", m), 10)
         self.node.create_subscription(Image, TOPICS["front_camera"],
                                       lambda m: setattr(self, "_front_rgb", _image(m)), qos_profile_sensor_data)
         self._executor = MultiThreadedExecutor()
         self._executor.add_node(self.node)
         threading.Thread(target=self._executor.spin, daemon=True).start()
+        self._action_executor = MultiThreadedExecutor()
+        self._action_executor.add_node(self._action_node)
+        threading.Thread(target=self._action_executor.spin, daemon=True).start()
         self._goal: Any = None
         self.t0 = None
         deadline, next_nudge = time.monotonic() + 120.0, time.monotonic() + 10.0
@@ -98,6 +115,15 @@ class RosRobot(SimRobot):
     def _now(self) -> float:
         return self.node.get_clock().now().nanoseconds / 1e9
 
+    def begin(self) -> None:
+        if getattr(self, "t0", None) is not None:
+            try:
+                self.t = self._now() - self.t0
+            except Exception:
+                pass
+        super().begin()
+        self.trace.poses = self.trace.poses[-500:]
+
     def _read_pose(self) -> bool:
         from rclpy.time import Time
 
@@ -114,6 +140,8 @@ class RosRobot(SimRobot):
         self._read_pose()
         self.t = self._now() - self.t0
         self.trace.poses.append((round(self.t, 3), self.x, self.y, self.yaw))
+        if len(self.trace.poses) > 3000:
+            self.trace.poses = self.trace.poses[-1500:]
         self._perceive()
         self._interrupts()
 
@@ -127,6 +155,15 @@ class RosRobot(SimRobot):
         self._interrupts()
         if self._behaviour is not None and not v and not w:  # a background skill drives while the program waits
             v, w = self._behaviour()
+        if self._scan_bridge is not None and v:
+            hazard = self._scan_bridge.hazards.get("front" if v > 0 else "rear")
+            if hazard is not None:
+                pitch = self._scan_bridge.tilts[-1][2] if self._scan_bridge.tilts else 0.0
+                if v < 0 and getattr(hazard, "kind", "") == "cliff":
+                    v, w = 0.0, 0.0
+                else:
+                    _, v, w, _ = self.body.check_proprioception(
+                        v, w, self.v_now, self.w_now, dt, pitch_rad=pitch, hazard=hazard)
         if v or w or self.v_now or self.w_now:
             self._publish(v, w)
         self.v_now, self.w_now = v, w
@@ -152,8 +189,13 @@ class RosRobot(SimRobot):
     def _act(self, name: str, **fields: Any) -> None:
         """Send one action goal and wait for it, keeping the trace and the stop checks running meanwhile."""
         client = self.actions[name]
-        if not client.wait_for_server(timeout_sec=30.0):
-            raise RuntimeError(f"the {name} action server is not up")
+        if not client.wait_for_server(timeout_sec=10.0):
+            from rclpy.action import ActionClient
+
+            self.actions[name] = ActionClient(self._action_node, self.kinds[name], name)
+            client = self.actions[name]
+            if not client.wait_for_server(timeout_sec=20.0):
+                raise RuntimeError(f"the {name} action server is not up")
         goal = self.kinds[name].Goal()
         for key, value in fields.items():
             setattr(goal, key, value)
@@ -183,7 +225,6 @@ class RosRobot(SimRobot):
 
         msg = PoseStamped()
         msg.header.frame_id = "map"
-        msg.header.stamp = self.node.get_clock().now().to_msg()
         msg.pose.position.x, msg.pose.position.y = float(x), float(y)
         msg.pose.orientation.z, msg.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
         return msg
@@ -202,9 +243,9 @@ class RosRobot(SimRobot):
             left = angle - done
             if abs(left) < math.radians(3):
                 return
-            first = len(self.trace.poses) - 1
+            t_start = self.t
             self._act("spin", target_yaw=float(left), time_allowance=self._allow(10 + abs(left) * 4))
-            yaws = [p[3] for p in self.trace.poses[first:]]
+            yaws = [p[3] for p in self.trace.poses if p[0] >= t_start]
             done += sum(wrap(b - a) for a, b in zip(yaws, yaws[1:], strict=False))
 
     def _goal_point(self, target: Point | Pose | Object, distance: float) -> tuple[Point, float] | None:
@@ -218,15 +259,105 @@ class RosRobot(SimRobot):
         end = path[-1] if isinstance(target, Object) or self._occ(*goal, self.inflated) else goal
         if isinstance(target, Pose):
             return end, math.radians(target.yaw)
+        if isinstance(target, Object) and distance > 0 and math.dist(end, goal) > 0.05:
+            return end, math.atan2(goal[1] - end[1], goal[0] - end[0])
         before = path[-2] if len(path) > 1 else (self.x, self.y)
         return end, math.atan2(end[1] - before[1], end[0] - before[0])
 
     # ---- motion: the 2D world's skills call these, so every skill drives through Nav2 ---------------------------
+    def _face_goal(self, goal: Point) -> None:
+        target_yaw = math.atan2(goal[1] - self.y, goal[0] - self.x)
+        err = wrap(target_yaw - self.yaw)
+        if abs(err) > 0.22:
+            try:
+                self._rotate(err)
+            except Exception:
+                pass
+
+    def _drive_a_star_cmd_vel(self, target: Point | Pose | Object, distance: float, desired_reach: float) -> None:
+        goal, reach = self._reach(target, distance)
+        path = self._plan(goal, reach)
+        if path is None:
+            raise PathBlocked(f"no free path to ({goal[0]:.1f}, {goal[1]:.1f})")
+        waypoints = [(float(p[0]), float(p[1])) for p in path]
+        idx = 0
+        best, since = math.inf, self.t
+        try:
+            while math.dist(goal, (self.x, self.y)) > desired_reach and idx < len(waypoints):
+                self._interrupts()
+                v, w, next_idx, arrived = self.body.step_pursuit(
+                    (self.x, self.y, self.yaw),
+                    waypoints,
+                    idx,
+                    blend_r=0.28,
+                    v_cruise=CRUISE,
+                    occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
+                    people=self._people_with_vel(),
+                )
+                idx = next_idx
+                self._step(v, w)
+                if arrived or math.dist(goal, (self.x, self.y)) <= desired_reach:
+                    break
+                rem = math.dist(goal, (self.x, self.y))
+                if rem < best - 0.05:
+                    best, since = rem, self.t
+                elif self.t - since > 10.0:
+                    break
+        finally:
+            self._halt()
+        self._face_goal(goal)
+
     def _go(self, target: Point | Pose | Object, distance: float) -> None:
+        goal = xy(target)
+        desired_reach = (target.radius if isinstance(target, Object) else 0.0) + max(distance, 0.35)
+
+        def face_goal() -> None:
+            self._face_goal(goal)
+
         where = self._goal_point(target, distance)
         if where is not None:
             (gx, gy), yaw = where
-            self._act("navigate_to_pose", pose=self._pose_msg(gx, gy, yaw))
+            nav_failed = False
+            try:
+                self._act("navigate_to_pose", pose=self._pose_msg(gx, gy, yaw))
+            except (PathBlocked, RuntimeError):
+                self._sync()
+                actual_dist = math.dist(goal, (self.x, self.y))
+                if actual_dist <= desired_reach + 0.35:
+                    face_goal()
+                    return
+                if isinstance(target, Object) and distance < 0.75:
+                    retry_where = self._goal_point(target, distance=max(distance, 0.45) + 0.25)
+                    if retry_where is not None:
+                        (gx2, gy2), yaw2 = retry_where
+                        try:
+                            self._act("navigate_to_pose", pose=self._pose_msg(gx2, gy2, yaw2))
+                        except (PathBlocked, RuntimeError):
+                            self._sync()
+                            actual_dist = math.dist(goal, (self.x, self.y))
+                            if actual_dist <= desired_reach + 0.35:
+                                face_goal()
+                                return
+                            nav_failed = True
+                    else:
+                        self._sync()
+                        actual_dist = math.dist(goal, (self.x, self.y))
+                        if actual_dist <= desired_reach + 0.35:
+                            face_goal()
+                            return
+                        nav_failed = True
+                else:
+                    nav_failed = True
+
+            if nav_failed:
+                self._sync()
+                actual_dist = math.dist(goal, (self.x, self.y))
+                if actual_dist > desired_reach + 0.35:
+                    self._drive_a_star_cmd_vel(target, distance, desired_reach)
+                    if isinstance(target, Pose):
+                        self._rotate(wrap(math.radians(target.yaw) - self.yaw))
+                    return
+
         if isinstance(target, Pose):
             self._rotate(wrap(math.radians(target.yaw) - self.yaw))
 
@@ -307,6 +438,8 @@ class RosRobot(SimRobot):
         is_user = isinstance(target, str) and target.lower().strip() in ("user", "the user", "me")
         tgt = (self.user() if is_user else None) or self._target(target)
         end = self.t + float(seconds) if seconds is not None else math.inf
+        last_scored = -1e9
+        visual_probs: dict[str, float] | None = None
         try:
             while self.t < end:
                 self._interrupts()
@@ -329,6 +462,15 @@ class RosRobot(SimRobot):
                         break
                 else:
                     route = self._plan(pt, distance) or [pt]
+                    brain = getattr(self, "brain", None)
+                    if brain is not None and hasattr(brain, "score_paths") and self.t - last_scored >= 0.8:
+                        frame = self.render_view(width=320, height=240)
+                        if frame is not None and frame.size > 0:
+                            try:
+                                visual_probs = brain.score_paths(data_url(frame), str(target))
+                            except Exception:  # noqa: BLE001 - fall back to geometric rollout if brain is busy
+                                pass
+                        last_scored = self.t
                     v, w, _, _ = self.body.step_pursuit(
                         (self.x, self.y, self.yaw),
                         route,
@@ -337,6 +479,7 @@ class RosRobot(SimRobot):
                         v_cruise=CRUISE,
                         occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
                         people=self._people_with_vel(),
+                        visual_probs=visual_probs,
                     )
                     self._step(v, w)
         finally:
@@ -434,5 +577,11 @@ class RosRobot(SimRobot):
 
     def shutdown(self) -> None:
         self._halt()
-        self._executor.shutdown()
-        self.node.destroy_node()
+        if hasattr(self, "_action_executor"):
+            self._action_executor.shutdown()
+        if hasattr(self, "_action_node"):
+            self._action_node.destroy_node()
+        if hasattr(self, "_executor"):
+            self._executor.shutdown()
+        if hasattr(self, "node"):
+            self.node.destroy_node()

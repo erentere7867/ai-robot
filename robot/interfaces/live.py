@@ -43,6 +43,7 @@ class State:
     walls: list[tuple[tuple[float, float], tuple[float, float]]] = field(default_factory=list)
     size: tuple[float, float] = (8.0, 6.0)
     rooms: list[str] = field(default_factory=list)
+    room_bounds: dict[str, tuple[float, float, float, float]] = field(default_factory=dict)
     scene: str = ""
     scenes: list[str] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -118,11 +119,21 @@ class Live:
                     "color": t.color,
                     "known": t.id in known,
                     "person": t.person,
+                    "user": bool(getattr(t, "user", False)),
                     "id": t.id,
                 })
         sampled = sim.trace.poses[-1500::5]
         trail = [(round(x, 2), round(y, 2)) for _, x, y, _ in sampled]
         poses = [(round(x, 2), round(y, 2), round(yaw, 3)) for _, x, y, yaw in sampled[-120:]]
+        room_bounds = (
+            {
+                str(name): tuple(round(float(v), 3) for v in rect)
+                for name, rect in scene.rooms.items()
+                if isinstance(rect, (tuple, list)) and len(rect) == 4
+            }
+            if isinstance(scene.rooms, dict)
+            else {}
+        )
         changes: dict[str, Any] = {
             "pose": (round(sim.x, 3), round(sim.y, 3), round(sim.yaw, 4)),
             "poses": poses,
@@ -133,6 +144,7 @@ class Live:
             "said": [text for _, text in sim.trace.said][-6:],
             "said_total": len(sim.trace.said),
             "rooms": list(scene.rooms),
+            "room_bounds": room_bounds,
         }
         if hasattr(sim, "posture"):
             changes["posture"] = sim.posture
@@ -161,20 +173,48 @@ class Live:
     def serve(self, port: int = 8765, host: str = "127.0.0.1") -> ThreadingHTTPServer:
         live = self
 
+        class _LiveHTTPServer(ThreadingHTTPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+            request_queue_size = 64
+
         class Handler(BaseHTTPRequestHandler):
-            def _send(self, body: bytes, kind: str) -> None:
-                self.send_response(200)
-                self.send_header("Content-Type", kind)
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(body)
+            timeout = 5.0
+
+            def _send(self, body: bytes, kind: str, status: int = 200) -> None:
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", kind)
+                    if status != 204:
+                        self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    if body and status != 204:
+                        self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                    return
+
+            def _read_body(self, limit: int) -> bytes:
+                try:
+                    length = min(max(0, int(self.headers.get("Content-Length") or 0)), limit)
+                    return self.rfile.read(length) if length else b""
+                except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError, ValueError):
+                    return b""
 
             def do_GET(self) -> None:  # noqa: N802 - http.server method name
-                if self.path.startswith("/camera/") and live.camera is not None:
-                    png = live.camera(self.path.split("/")[2].split(".")[0])
+                if self.path.startswith("/camera/"):
+                    png = None
+                    if live.camera is not None:
+                        try:
+                            cam_name = self.path.split("/")[2].split("?")[0].split(".")[0]
+                            png = live.camera(cam_name)
+                        except Exception:  # noqa: BLE001 - a camera callback error must not serve HTML
+                            png = None
                     if png:
                         self._send(png, "image/png")
-                        return
+                    else:
+                        self._send(b"", "image/png", status=204)
+                    return
                 if self.path.startswith("/speech?") and live.mouth is not None:
                     text = parse_qs(urlparse(self.path).query).get("text", [""])[0][:300]
                     if text:
@@ -187,24 +227,25 @@ class Live:
 
             def do_POST(self) -> None:  # noqa: N802
                 if self.path.startswith("/voice") and live.ears is not None:
-                    audio = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 8_000_000))
-                    threading.Thread(target=live.hear, args=(audio,), daemon=True).start()
-                    self._send(b"{}", "application/json")
+                    audio = self._read_body(8_000_000)
+                    if audio:
+                        threading.Thread(target=live.hear, args=(audio,), daemon=True).start()
+                    self._send(b'{"ok":true}', "application/json")
                     return
-                length = min(int(self.headers.get("Content-Length") or 0), 4096)
+                raw = self._read_body(4096)
                 try:
-                    body = json.loads(self.rfile.read(length) or b"{}")
+                    body = json.loads(raw or b"{}")
                 except json.JSONDecodeError:
                     body = {}
-                kind = self.path.strip("/")
+                kind = self.path.split("?")[0].strip("/")
                 if kind in ("instruct", "stop", "scene"):
                     live.inbox.put((kind, str(body.get("text", ""))[:300]))
-                self._send(b"{}", "application/json")
+                self._send(b'{"ok":true}', "application/json")
 
             def log_message(self, *args: Any) -> None:  # quiet
                 pass
 
-        server = ThreadingHTTPServer((host, port), Handler)
+        server = _LiveHTTPServer((host, port), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
 
@@ -242,6 +283,9 @@ color:var(--ink)}input{flex:1;min-width:200px}button{cursor:pointer;background:v
 button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .cams figure{margin:0}.cams img{width:100%;border-radius:8px;background:var(--bg)}.cams figcaption{font-size:13px;color:var(--muted)}
 .hint{font-size:13px;color:var(--muted);margin-top:6px}
+.reply{display:flex;align-items:center;gap:10px;margin-top:10px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;font-size:15px;color:var(--ink)}
+.reply-tag{display:inline-block;padding:2px 8px;border-radius:4px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;letter-spacing:.05em}
+#reply-text{font-weight:500;line-height:1.4}
 </style></head><body><main>
 <section class="wide">
 <h1 id="instruction">Tell the robot what to do</h1>
@@ -256,21 +300,23 @@ button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-colum
 <button type="submit">Send</button>
 <button type="button" class="stop" id="stop">Stop</button>
 <button type="button" id="talk" hidden title="Hold and speak">Hold to talk</button>
-<label id="speaklabel" class="muted" hidden><input type="checkbox" id="speak" style="min-width:0;flex:0"> speak aloud</label>
+<label id="speaklabel" class="muted" hidden><input type="checkbox" id="speak" checked onchange="toggleVoice()" style="min-width:0;flex:0"> speak aloud</label>
+<label class="muted"><input type="checkbox" id="showscan" checked style="min-width:0;flex:0"> show 3-CSI depth contours</label>
 <select id="scene" title="Room"></select>
 </form>
+<div class="reply" id="reply" hidden><span class="reply-tag">SPROCKET</span><span id="reply-text"></span></div>
 <div class="hint" id="hint">The robot is the blue dot with a heading indicator; you are the blue person.
-Faded objects are remembered but not currently seen.</div>
+Pink dots show 360° 3-CSI depth contours (no LiDAR). Faded objects are remembered.</div>
 <div class="hint" id="heard"></div>
 </section>
 
 <section>
-<h2>Closed-Loop Mind</h2>
+<h2>Living Mind</h2>
 <div class="mind-kv">
 <span>Action: <strong id="action">—</strong></span>
 <span>Subgoal: <span id="subgoal" class="muted">—</span></span>
 </div>
-<h3>Scratchpad</h3>
+<h3>Cognitive Synthesis (Perception · Memory · Intent)</h3>
 <pre id="scratchpad" class="muted">(empty)</pre>
 <h3>Intents</h3>
 <ol id="intents" class="intents"></ol>
@@ -305,8 +351,8 @@ Faded objects are remembered but not currently seen.</div>
 </main><script>
 const $=id=>document.getElementById(id);
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
-const post=(p,text)=>fetch(p,{method:'POST',body:JSON.stringify({text})});
-$('form').onsubmit=e=>{e.preventDefault();const t=$('cmd').value.trim();if(t){post('/instruct',t);$('cmd').value=''}};
+const post=(p,text)=>fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}).catch(()=>{});
+$('form').onsubmit=e=>{e.preventDefault();const t=$('cmd').value.trim();if(t){$('instruction').textContent=t;$('status').textContent='planning';$('status').className='status planning';post('/instruct',t);$('cmd').value=''}};
 $('stop').onclick=()=>post('/stop','');
 $('scene').onchange=()=>post('/scene',$('scene').value);
 
@@ -322,23 +368,94 @@ return `<b>${act}</b>${tgt}${sg}${suffix}`;
 }
 
 function draw(s){
-const c=$('map'),g=c.getContext('2d'),[W,H]=s.size||[8,6],k=Math.min(c.width/W,c.height/H)*.92;
-const css=getComputedStyle(document.documentElement),ink=css.getPropertyValue('--ink'),mut=css.getPropertyValue('--muted'),
-acc=css.getPropertyValue('--accent');
-const X=x=>c.width/2+x*k,Y=y=>c.height/2-y*k;
-g.clearRect(0,0,c.width,c.height);
-g.strokeStyle=ink;g.lineWidth=3;
-for(const[a,b]of(s.walls||[])){g.beginPath();g.moveTo(X(a[0]),Y(a[1]));g.lineTo(X(b[0]),Y(b[1]));g.stroke()}
-for(const t of(s.objects||[])){
-g.beginPath();g.arc(X(t.x),Y(t.y),Math.max(3,t.r*k),0,7);
-g.fillStyle=t.person?acc:(t.color||mut);
-g.globalAlpha=t.known?.85:.25;g.fill();g.globalAlpha=1;
-g.strokeStyle=mut;g.lineWidth=1;g.stroke();
-g.fillStyle=ink;g.font='13px system-ui';
-g.fillText((t.person?'you':t.label)+(t.person?'':' '+t.id),X(t.x)+t.r*k+3,Y(t.y)+4);
+const c=$('map'),g=c.getContext('2d'),[W,H]=s.size||[8,6];
+const rEntries=(s.room_bounds&&Object.keys(s.room_bounds).length)?Object.entries(s.room_bounds):(s.rooms&&!Array.isArray(s.rooms)?Object.entries(s.rooms):[]);
+let hasB=false,minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+const addPt=(px,py)=>{
+if(!Number.isFinite(px)||!Number.isFinite(py))return;
+hasB=true;
+if(px<minX)minX=px;if(px>maxX)maxX=px;
+if(py<minY)minY=py;if(py>maxY)maxY=py;
+};
+const activeRoom=(s.scene&&s.room_bounds&&Array.isArray(s.room_bounds[s.scene]))?s.room_bounds[s.scene]:null;
+if(activeRoom&&activeRoom.length>=4){
+addPt(activeRoom[0],activeRoom[1]);addPt(activeRoom[2],activeRoom[3]);
+}else{
+for(const[,rect]of rEntries){
+if(Array.isArray(rect)&&rect.length>=4){addPt(rect[0],rect[1]);addPt(rect[2],rect[3])}
 }
-g.fillStyle='#e0457b';
-for(const[sx,sy]of(s.scan||[])){g.fillRect(X(sx)-1.5,Y(sy)-1.5,3,3)}
+}
+for(const[a,b]of(s.walls||[])){
+if(Array.isArray(a))addPt(a[0],a[1]);
+if(Array.isArray(b))addPt(b[0],b[1]);
+}
+for(const pt of(s.scan||[])){if(Array.isArray(pt))addPt(pt[0],pt[1])}
+for(const t of(s.objects||[])){
+const r=Number(t.r)||0;
+addPt(t.x-r,t.y-r);addPt(t.x+r,t.y+r);
+}
+for(const pt of(s.trail||[])){if(Array.isArray(pt))addPt(pt[0],pt[1])}
+for(const pt of(s.poses||[])){if(Array.isArray(pt))addPt(pt[0],pt[1])}
+if(Array.isArray(s.pose)&&s.pose.length>=2){addPt(s.pose[0]-0.25,s.pose[1]-0.25);addPt(s.pose[0]+0.25,s.pose[1]+0.25)}
+if(!hasB){minX=-W/2;maxX=W/2;minY=-H/2;maxY=H/2}
+else{const pad=0.4;minX-=pad;maxX+=pad;minY-=pad;maxY+=pad}
+const spanX=Math.max(1,maxX-minX),spanY=Math.max(1,maxY-minY),k=Math.min(c.width/spanX,c.height/spanY)*.92,cx=(minX+maxX)/2,cy=(minY+maxY)/2;
+const css=getComputedStyle(document.documentElement),ink=css.getPropertyValue('--ink'),mut=css.getPropertyValue('--muted'),
+acc=css.getPropertyValue('--accent'),line=css.getPropertyValue('--line')||'#e4e2dc',panel=css.getPropertyValue('--panel')||'#fff';
+const X=x=>c.width/2+(x-cx)*k,Y=y=>c.height/2-(y-cy)*k;
+g.clearRect(0,0,c.width,c.height);
+g.save();
+g.strokeStyle=line;g.lineWidth=1;g.globalAlpha=.75;
+for(let gx=Math.ceil(minX);gx<=Math.floor(maxX);gx++){g.beginPath();g.moveTo(X(gx),Y(maxY));g.lineTo(X(gx),Y(minY));g.stroke()}
+for(let gy=Math.ceil(minY);gy<=Math.floor(maxY);gy++){g.beginPath();g.moveTo(X(minX),Y(gy));g.lineTo(X(maxX),Y(gy));g.stroke()}
+g.restore();
+if(rEntries.length){
+g.save();
+for(const[rname,rect]of rEntries){
+if(!Array.isArray(rect)||rect.length<4)continue;
+const[x0,y0,x1,y1]=rect,rx=X(Math.min(x0,x1)),ry=Y(Math.max(y0,y1)),rw=Math.abs(x1-x0)*k,rh=Math.abs(y1-y0)*k;
+g.strokeStyle=mut;g.lineWidth=1;g.setLineDash([4,4]);g.globalAlpha=.35;g.strokeRect(rx,ry,rw,rh);
+g.setLineDash([]);g.fillStyle=mut;g.globalAlpha=.55;g.font='600 11px system-ui';
+g.fillText(String(rname),rx+8,ry+15);
+}
+g.restore();
+}else if(Array.isArray(s.rooms)&&s.rooms.length){
+g.save();g.fillStyle=mut;g.globalAlpha=.55;g.font='600 11px system-ui';
+g.fillText(s.rooms.join(' / '),X(minX)+8,Y(maxY)+15);g.restore();
+}
+g.strokeStyle=ink;g.lineWidth=3;g.lineCap='round';
+for(const[a,b]of(s.walls||[])){g.beginPath();g.moveTo(X(a[0]),Y(a[1]));g.lineTo(X(b[0]),Y(b[1]));g.stroke()}
+const placed=[];
+const placeLabel=(txt,cx,cy,rr,bold,col)=>{
+g.font=bold?'600 13px system-ui':'12px system-ui';
+const tw=g.measureText(txt).width,th=14;
+const cands=[[cx+rr+5,cy+4],[cx-tw/2,cy-rr-6],[cx-tw/2,cy+rr+th],[cx-rr-tw-5,cy+4]];
+for(let dy=16;dy<=48;dy+=16){cands.push([cx+rr+5,cy+4+dy],[cx+rr+5,cy+4-dy])}
+let chosen=cands[0],found=false;
+for(const[bx,by]of cands){
+const lx=Math.max(4,Math.min(c.width-tw-4,bx)),ly=Math.max(th+2,Math.min(c.height-4,by));
+const box=[lx-2,ly-th,lx+tw+2,ly+3];
+if(!placed.some(p=>!(box[2]<p[0]||box[0]>p[2]||box[3]<p[1]||box[1]>p[3]))){chosen=[lx,ly];placed.push(box);found=true;break}
+}
+const lx=Math.max(4,Math.min(c.width-tw-4,chosen[0])),ly=Math.max(th+2,Math.min(c.height-4,chosen[1]));
+if(!found){placed.push([lx-2,ly-th,lx+tw+2,ly+3])}
+g.lineWidth=3;g.strokeStyle=panel;g.strokeText(txt,lx,ly);
+g.fillStyle=col;g.fillText(txt,lx,ly);
+};
+for(const t of(s.objects||[])){
+const cx=X(t.x),cy=Y(t.y),rr=Math.max(4,(t.r||.25)*k),isUser=Boolean(t.user);
+if(isUser){g.beginPath();g.arc(cx,cy,rr+4,0,7);g.strokeStyle=acc;g.lineWidth=2;g.globalAlpha=.85;g.stroke()}
+g.beginPath();g.arc(cx,cy,rr,0,7);
+g.fillStyle=isUser?acc:(t.color||mut);
+g.globalAlpha=isUser?.9:(t.known?.42:.16);g.fill();
+g.globalAlpha=isUser?1:(t.known?.95:.45);
+g.strokeStyle=(isUser||t.known)?ink:mut;g.lineWidth=isUser?2:(t.known?1.8:1);g.stroke();
+g.globalAlpha=1;
+const lbl=isUser?'you':(t.label+(t.id!==undefined?' '+t.id:''));
+placeLabel(lbl,cx,cy,rr,isUser,(isUser||t.known)?ink:mut);
+}
+if(!$('showscan')||$('showscan').checked){g.fillStyle='#e0457b';
+for(const[sx,sy]of(s.scan||[])){g.fillRect(X(sx)-1.5,Y(sy)-1.5,3,3)}}
 g.fillStyle=acc;g.globalAlpha=.35;
 for(const p of(s.poses||[])){g.beginPath();g.arc(X(p[0]),Y(p[1]),2.5,0,7);g.fill()}
 g.globalAlpha=1;
@@ -355,9 +472,7 @@ g.strokeStyle=ink;g.lineWidth=3;g.stroke();
 }
 
 let scenesKey='';
-async function tick(){
-try{
-const s=await(await fetch('/state',{cache:'no-store'})).json();
+function render(s){
 $('instruction').textContent=s.instruction||'Tell the robot what to do';
 $('status').textContent=s.status||'idle';
 $('status').className='status '+(s.status||'idle');
@@ -372,6 +487,13 @@ const intents=s.intents||[];
 $('intents').innerHTML=intents.map((it,idx)=>`<li class="${idx===intents.length-1?'now':''}">${formatIntent(it)}</li>`).join('')||'<li class="muted">none yet</li>';
 if(s.view){$('viewsec').hidden=false;$('view').src=s.view}else{$('viewsec').hidden=true}
 $('said').innerHTML=(s.said||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">nothing yet</li>';
+const saidArr=s.said||[];
+if(saidArr.length>0){
+let lastSaid=saidArr[saidArr.length-1]||'';
+lastSaid=lastSaid.replace(/^["'“]/,'').replace(/["'”]$/,'').trim();
+if(lastSaid){$('reply').hidden=false;$('reply-text').textContent=lastSaid}
+else{$('reply').hidden=true}
+}else{$('reply').hidden=true}
 $('problems').innerHTML=(s.problems||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">none</li>';
 $('history').innerHTML=(s.history||[]).slice().reverse().map(h=>`<li><b>${esc(h.outcome)}</b> ${esc(h.instruction)}</li>`).join('')||'<li class="muted">nothing yet</li>';
 const key=(s.scenes||[]).join('|')+'#'+(s.scene||'');
@@ -380,17 +502,36 @@ scenesKey=key;
 $('scene').innerHTML=(s.scenes||[]).map(n=>`<option${n===s.scene?' selected':''}>${esc(n)}</option>`).join('');
 }
 draw(s);
-}catch(e){}
+voice(s);
+cams(s);
 }
 
-let camtick=0;
+let camsKey='',lastCamAt=0;
 function cams(s){
-if(!s.cameras||!s.cameras.length)return;
+const list=s.cameras||[];
+if(!list.length){$('camsec').hidden=true;return}
 $('camsec').hidden=false;
-if(camtick++%3)return;
-$('cams').innerHTML=s.cameras.map(n=>`<figure><img src="/camera/${n}.png?t=${Date.now()}" alt="${n}"><figcaption>${n.replace(/_/g,' ')}</figcaption></figure>`).join('');
+const key=list.join('|');
+if(key!==camsKey){
+camsKey=key;
+$('cams').innerHTML=list.map(n=>`<figure><img data-cam="${esc(n)}" alt="${esc(n)}"><figcaption>${esc(n.replace(/_/g,' '))}</figcaption></figure>`).join('');
+$('cams').querySelectorAll('img[data-cam]').forEach(img=>{
+img.onload=()=>{img.dataset.loading='';img.dataset.loadingAt='0'};
+img.onerror=()=>{img.dataset.loading='';img.dataset.loadingAt='0'};
+});
+lastCamAt=0;
 }
-setInterval(async()=>{try{cams(await(await fetch('/state',{cache:'no-store'})).json())}catch(e){}},1000);
+const now=Date.now();
+if(now-lastCamAt<1500)return;
+lastCamAt=now;
+$('cams').querySelectorAll('img[data-cam]').forEach(img=>{
+const started=Number(img.dataset.loadingAt||0);
+if(img.dataset.loading&&now-started<=4000)return;
+img.dataset.loading='1';
+img.dataset.loadingAt=String(now);
+img.src=`/camera/${encodeURIComponent(img.dataset.cam)}.png?t=${now}`;
+});
+}
 
 let rec=null,spoken=-1;
 async function talk(){
@@ -420,9 +561,13 @@ const{stream,ctx,node,chunks}=rec;rec=null;node.disconnect();
 stream.getTracks().forEach(t=>t.stop());
 const body=wav(chunks,ctx.sampleRate);ctx.close();
 $('talk').textContent='Hold to talk';$('heard').textContent='Hearing…';
-fetch('/voice',{method:'POST',body});
+fetch('/voice',{method:'POST',body}).catch(()=>{});
 }
 $('talk').onpointerdown=talk;$('talk').onpointerup=release;$('talk').onpointerleave=release;
+function toggleVoice(){
+if(!window.speechSynthesis)return;
+if(!$('speak').checked)window.speechSynthesis.cancel();
+}
 function voice(s){
 if(!s.voice)return;
 $('talk').hidden=false;$('speaklabel').hidden=false;
@@ -430,10 +575,27 @@ if(s.heard)$('heard').textContent='Heard: “'+s.heard+'”';
 if(spoken<0||s.said_total<spoken){spoken=s.said_total;return}
 const fresh=(s.said||[]).slice(Math.max(0,(s.said||[]).length-(s.said_total-spoken)));
 spoken=s.said_total;
-if($('speak').checked)fresh.reduce((p,text)=>p.then(()=>new Promise(done=>{
+if($('speak').checked){
+if(window.speechSynthesis){
+fresh.forEach(t=>{const u=new SpeechSynthesisUtterance(t);window.speechSynthesis.speak(u)});
+}else{
+fresh.reduce((p,text)=>p.then(()=>new Promise(done=>{
 const a=new Audio('/speech?text='+encodeURIComponent(text));a.onended=done;a.onerror=done;a.play().catch(done);
 })),Promise.resolve());
 }
-setInterval(async()=>{try{voice(await(await fetch('/state',{cache:'no-store'})).json())}catch(e){}},700);
-setInterval(tick,400);tick();
+}
+}
+async function pollLoop(){
+const ctrl=new AbortController();
+const timer=setTimeout(()=>ctrl.abort(),2500);
+try{
+const r=await fetch('/state',{cache:'no-store',signal:ctrl.signal});
+if(r.ok){render(await r.json())}
+}catch(e){}
+finally{
+clearTimeout(timer);
+setTimeout(pollLoop,350);
+}
+}
+pollLoop();
 </script></body></html>"""

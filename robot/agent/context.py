@@ -7,12 +7,62 @@ from typing import Any
 from robot.agent.api import Object
 
 MAX_OBJECTS = 12
+_LABEL_ALIASES = {
+    "desk": "desk(table)",
+    "sofa": "sofa(couch)",
+}
+
+_AHEAD_SIDES = frozenset({"ahead", "front", "front-left", "front-right"})
+_SIDE_SIDES = frozenset({"left", "right"})
+_BEHIND_SIDES = frozenset(
+    {"behind", "behind-left", "behind-right", "rear", "rear-left", "rear-right", "back"}
+)
+
+
+def _ego_region(side: str, bearing: float) -> str:
+    low = (side or "").strip().lower()
+    if low in _AHEAD_SIDES:
+        return "ahead"
+    if low in _SIDE_SIDES:
+        return "sides"
+    if low in _BEHIND_SIDES:
+        return "behind"
+    ab = abs(float(bearing or 0.0))
+    if ab <= 67.5:
+        return "ahead"
+    if ab >= 112.5:
+        return "behind"
+    return "sides"
+
+
+def synthesize_perception(objects: list[Object], user: int | None = None) -> str:
+    """Summarize all currently known objects into sorted ego-centric 360° regions."""
+    if not objects:
+        return "(nothing detected yet)"
+
+    groups: dict[str, list[str]] = {"ahead": [], "sides": [], "behind": []}
+    for o in sorted(objects, key=lambda obj: float(getattr(obj, "distance", 0.0))):
+        if user is not None and o.id == user:
+            name = "you (person)"
+        else:
+            base = _LABEL_ALIASES.get(o.label, o.label).replace("_", " ")
+            color = (getattr(o, "color", "") or "").strip()
+            if color and color.lower() != "unknown" and not base.lower().startswith(f"{color.lower()} "):
+                name = f"{color} {base}"
+            else:
+                name = base
+        dist = float(getattr(o, "distance", 0.0))
+        region = _ego_region(getattr(o, "side", ""), float(getattr(o, "bearing", 0.0)))
+        groups[region].append(f"{name} ({dist:.1f} m)")
+
+    parts = [f"{region}: {', '.join(items)}" for region, items in groups.items() if items]
+    return "; ".join(parts) if parts else "(nothing detected yet)"
 
 
 def scene_table(objects: list[Object], user: int | None = None) -> str:
     rows = ["id  label          color   dist    bearing  side          moving  seen"]
     for o in sorted(objects, key=lambda obj: obj.distance)[:MAX_OBJECTS]:
-        label = "person(user)" if o.id == user else o.label
+        label = "person(user)" if o.id == user else _LABEL_ALIASES.get(o.label, o.label)
         seen = "now" if o.last_seen < 1.0 else f"{o.last_seen:.0f} s ago"
         moving = "yes" if getattr(o, "moving", False) or getattr(o, "speed", 0.0) > 0.05 else "no"
         color = o.color or "-"
@@ -31,10 +81,47 @@ def describe(snapshot: dict[str, Any], memory: Any = None, scratchpad: Any = Non
     posture = snapshot.get("posture", "neutral")
     others = ", ".join(r for r in rooms if r != room)
 
+    objects = snapshot.get("objects", [])
+    user_id = snapshot.get("user")
+    pose = snapshot.get("pose")
+
     lines = [
         f"Robot: in room {room}, battery {battery:.0%}, posture {posture}. Other rooms: {others or 'none'}.",
-        f"Known objects:\n{scene_table(snapshot.get('objects', []), snapshot.get('user'))}",
     ]
+    if pose is not None:
+        if hasattr(pose, "x"):
+            lines.append(f"Pose: x={pose.x:.2f}, y={pose.y:.2f}, yaw={getattr(pose, 'yaw', 0.0):.0f}°")
+        elif isinstance(pose, (tuple, list)) and len(pose) >= 2:
+            yaw = float(pose[2]) if len(pose) >= 3 else 0.0
+            lines.append(f"Pose: x={float(pose[0]):.2f}, y={float(pose[1]):.2f}, yaw={yaw:.0f}°")
+
+    user_obj = next(
+        (
+            o
+            for o in objects
+            if (user_id is not None and getattr(o, "id", None) == user_id)
+            or "user" in str(getattr(o, "label", "")).lower()
+            or "user" in str(getattr(o, "what", "")).lower()
+            or getattr(o, "name", "") == "person(user)"
+        ),
+        None,
+    )
+    if user_obj is not None:
+        u_id = getattr(user_obj, "id", user_id)
+        u_name = (
+            getattr(user_obj, "name", None)
+            or ("person(user)" if getattr(user_obj, "id", None) == user_id else getattr(user_obj, "label", "person(user)"))
+        )
+        u_dist = float(getattr(user_obj, "distance", 0.0))
+        u_side = getattr(user_obj, "side", "front")
+        u_bearing = float(getattr(user_obj, "bearing", 0.0))
+        lines.append(
+            f"User: id={u_id} ({u_name}) at {u_dist:.1f} m {u_side} ({u_bearing:+.0f}°); "
+            f"use target: user or target: {u_id} when approaching or facing the user."
+        )
+
+    lines.append(f"Surroundings: {synthesize_perception(objects, user_id)}")
+    lines.append(f"Known objects:\n{scene_table(objects, user_id)}")
 
     human_pose = snapshot.get("human_pose")
     if human_pose is not None:

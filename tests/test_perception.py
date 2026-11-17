@@ -574,3 +574,234 @@ def test_track_predict_and_active_vision():
     clear_track = Track(12, "chair", 2.0, 0.0, 0.3, 0.0, 0.0, hits=5, sized=True, noise=0.1)
     assert needs_active_vision(clear_track, decision_prob=0.95) is None
 
+
+def test_locate_mask_guided_localization():
+    from robot.perception.locate import locate
+
+    cam = RIG["front_camera"]
+    h, w = cam.height, cam.width
+    depth = np.full((h, w), np.nan, dtype=np.float32)
+
+    # Box region [300:450, 500:650]
+    box = (500.0, 300.0, 650.0, 450.0)
+    r0, r1 = int(box[1]), int(box[3])
+    c0, c1 = int(box[0]), int(box[2])
+
+    # Unmasked region has close clutter/noise at 0.5 m
+    depth[r0:r1, c0:c1] = 0.5
+
+    # True object isolated by mask is at 2.0 m
+    depth[350:410, 540:600] = 2.0
+    mask_patch = np.zeros((r1 - r0, c1 - c0), dtype=bool)
+    mask_patch[350 - r0:410 - r0, 540 - c0:600 - c0] = True
+
+    # Without mask, locate picks up the 0.5 m clutter
+    place_unmasked = locate(cam, box, depth=depth)
+    assert place_unmasked is not None
+    assert place_unmasked.how == "depth"
+    dist_unmasked = math.hypot(place_unmasked.x, place_unmasked.y)
+    assert dist_unmasked < 1.3
+
+    # With mask, locate isolates the 2.0 m object
+    place_masked = locate(cam, box, depth=depth, mask=mask_patch)
+    assert place_masked is not None
+    assert place_masked.how == "depth"
+    dist_masked = math.hypot(place_masked.x, place_masked.y)
+    assert dist_masked > 2.0
+
+
+def test_draw_set_of_mark_with_labels_and_letters():
+    from robot.perception.overlay import draw_set_of_mark
+
+    cam = RIG["front_camera"]
+    rgb = np.zeros((cam.height, cam.width, 3), dtype=np.uint8)
+
+    # Pass (box, id, label) tuples with uppercase/lowercase letters beyond G
+    boxes_and_ids = [
+        ((100, 100, 250, 300), 1, "table"),
+        ((400, 150, 600, 350), 2, "couch"),
+        ((700, 200, 850, 400), 3, "lamp:01"),
+    ]
+
+    annotated = draw_set_of_mark(rgb, boxes_and_ids, cam=cam)
+    assert annotated.shape == rgb.shape
+    # Ensure badges are drawn
+    assert (annotated[100:130, 100:250] > 0).any()
+    assert (annotated[150:180, 400:550] > 0).any()
+
+
+def test_tracker_person_merge_distance_and_cut():
+    tr = Tracker()
+    # Two person detections separated by 0.32 m (< 0.35 m threshold)
+    d1 = Detection("person", 1.0, 0.0, 0.25)
+    d2 = Detection("person", 1.32, 0.0, 0.25)
+    tr.update([d1, d2], 0.0)
+    # Should merge into a single person track
+    persons = [o for o in tr.objects() if o.person]
+    assert len(persons) == 1
+
+    # Two person detections separated by 0.60 m with one cut by edge (< 0.75 m cut threshold)
+    tr2 = Tracker()
+    d3 = Detection("person", 2.0, 0.0, 0.25, cut=True)
+    d4 = Detection("person", 2.60, 0.0, 0.25, cut=False)
+    tr2.update([d3, d4], 0.0)
+    persons2 = [o for o in tr2.objects() if o.person]
+    assert len(persons2) == 1
+
+
+def test_verify_loop_inspect_gate_rejects_on_none_name():
+    import threading
+    from unittest.mock import MagicMock
+
+    from robot.perception.tracker import Track, Tracker
+    from robot.ros.perceive import Perception
+
+    perc = object.__new__(Perception)
+    perc._stop = False
+    perc.lock = threading.Lock()
+    perc.tracker = Tracker()
+    perc.crops = {}
+    perc.detector = MagicMock()
+    perc.detector.vocabulary = ["chair", "table", "cup"]
+
+    # Track with hits=2 so confirmed=True and to_name picks it up
+    track = Track(1, "chair", 1.0, 0.0, 0.3, 0.0, 0.0, hits=2)
+    perc.tracker.tracks[1] = track
+    crop = np.zeros((50, 50, 3), dtype=np.uint8)
+    perc.crops[1] = crop
+
+    # Mock brain with yes_probability -> 0.50 (gate == 'inspect') and name -> None (not a thing / wall)
+    brain = MagicMock()
+    brain.yes_probability.return_value = 0.50
+    brain.name.return_value = None
+    perc.brain = brain
+
+    # Stop verify loop after first iteration
+    def stop_and_none(*args, **kwargs):
+        perc._stop = True
+        return None
+
+    brain.name.side_effect = stop_and_none
+
+    perc._verify_loop()
+
+    assert track.verified is True
+    assert track.rejected is True
+    assert 1 not in [o.id for o in perc.tracker.objects()]
+
+
+def test_locate_wide_angle_depth_overlap_consistency():
+    from robot.perception.locate import locate
+
+    cam = RIG["front_camera"]
+    h, w = cam.height, cam.width
+
+    # Object at bearing ~ +50 deg (off-axis)
+    # Target pixel u near the edge
+    u_edge = int(w * 0.15)
+    box = (float(u_edge - 40), 300.0, float(u_edge + 40), 420.0)
+    r0, r1 = int(box[1]), int(box[3])
+    c0, c1 = int(box[0]), int(box[2])
+
+    depth = np.full((h, w), np.nan, dtype=np.float32)
+    # Fill object with true pinhole depth 1.5 m
+    depth[r0:r1, c0:c1] = 1.5
+
+    place = locate(cam, box, depth=depth)
+    assert place is not None
+    assert place.how == "depth"
+
+    # Radial distance should not blow up: seen is radial range, reach is radial distance
+    # With secant correction and radial projection, distance to base frame is ~3.2-3.3 m (not inflated 2x to 7.0m)
+    reach_actual = math.hypot(place.x - cam.x, place.y - cam.y)
+    assert 2.8 <= reach_actual <= 3.6
+
+
+def test_perception_scan_surface_consistency():
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from robot.perception.detector import Seen
+    from robot.perception.rig import RIG
+    from robot.perception.tracker import Tracker
+    from robot.ros.perceive import Perception
+
+    perc = object.__new__(Perception)
+    perc.lock = threading.Lock()
+    perc.tracker = Tracker()
+    perc.pose = (0.0, 0.0, 0.0)
+    perc.pose_sigma = (0.05, 0.05)
+    perc.scan_bridge = MagicMock()
+    perc.scan_bridge.turn_rate = 0.0
+    perc.boxes = {}
+    perc.detected = {}
+    perc.sightings = []
+    perc.crops = {}
+    perc.tof_grids = {}
+
+    cam = RIG["front_camera"]
+    h, w = cam.height, cam.width
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    depth = np.full((h, w), 3.5, dtype=np.float32)  # depth camera sees object at 3.5m
+
+    # Scan has a solid obstacle/wall at 1.5m straight ahead
+    scan_ranges = np.full(360, 1.5, dtype=np.float32)
+    scan = (scan_ranges, -math.pi, 2 * math.pi / 360)
+
+    stamp = SimpleNamespace(sec=1, nanosec=0)
+    perc.frames = {"front_camera": (stamp, rgb)}
+    perc.cam_depths = {"front_camera": [(1.0, (stamp, depth))]}
+    perc.scans = [(1.0, scan)]
+    perc.scan = scan
+
+    # Seen object in middle of frame at 3.5m, which lies behind the 1.5m scan surface
+    seen = [Seen("chair", 0.9, (float(w // 2 - 30), float(h // 2 - 30), float(w // 2 + 30), float(h // 2 + 30)))]
+    perc.pose_at = lambda s: (0.0, 0.0, 0.0)
+    perc.tilt_at = lambda s: (0.0, 0.0)
+    perc.timings = []
+    perc.counts = {}
+    perc.depth_pairs = []
+    perc._depth_for = lambda name, stamp, pose: (depth, 0.0)
+    perc.detector = MagicMock(return_value=seen)
+    perc.detector.estimate_depth.return_value = None
+
+    perc.process("front_camera")
+
+    # Detection behind the scan obstacle should have been discarded
+    assert len(perc.tracker.objects()) == 0
+
+
+def test_tracker_cut_sighting_downweighting_and_furniture_merge():
+    tr = Tracker()
+
+    # Sighting 1: whole-view chair
+    d1 = Detection("chair", 2.0, 0.0, 0.3, sigma=0.05, cut=False)
+    tr.update([d1], 0.0)
+    tr.update([d1], 0.1)
+    track1 = tr.objects()[0]
+    orig_x = track1.x
+    assert track1.hits == 2
+    assert track1.sized is True and not track1.cut
+
+    # Sighting 2: edge-cut sighting shifted by 0.2m
+    d2 = Detection("chair", 2.2, 0.0, 0.3, sigma=0.05, cut=True)
+    tr.update([d2], 0.2)
+
+    # Position change should be small (gain capped at 0.15)
+    assert abs(track1.x - orig_x) < 0.06
+
+    # Test cross-camera furniture merge: table and desk within radius overlap
+    tr2 = Tracker()
+    d_table = Detection("table", 3.0, 1.0, 0.45, sigma=0.05)
+    d_box = Detection("box", 3.2, 1.0, 0.40, sigma=0.05)
+    tr2.update([d_table], 0.0)
+    tr2.update([d_box], 0.0)
+
+    # _merge is called at end of update; box and table should merge into 1 track
+    furniture = [o for o in tr2.objects() if not o.person]
+    assert len(furniture) == 1
+
+
+
+

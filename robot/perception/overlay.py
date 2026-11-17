@@ -31,6 +31,28 @@ _FONT_5X7: dict[str, list[int]] = {
     "E": [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
     "F": [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
     "G": [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110],
+    "H": [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+    "I": [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+    "J": [0b00001, 0b00001, 0b00001, 0b00001, 0b10001, 0b10001, 0b01110],
+    "K": [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+    "L": [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+    "M": [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
+    "N": [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
+    "O": [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+    "P": [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
+    "Q": [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
+    "R": [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
+    "S": [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+    "T": [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+    "U": [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+    "V": [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+    "W": [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
+    "X": [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+    "Y": [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
+    "Z": [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
+    ".": [0, 0, 0, 0, 0, 0b01100, 0b01100],
+    ":": [0, 0b01100, 0b01100, 0, 0b01100, 0b01100, 0],
+    "_": [0, 0, 0, 0, 0, 0, 0b11111],
 }
 
 BOX_PALETTE = [
@@ -98,7 +120,8 @@ def _draw_rect(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, color: tuple
     img[y1:y2, max(0, x2 - t):x2] = color
 
 
-def draw_set_of_mark(rgb: np.ndarray, boxes_and_ids: list[tuple[tuple[int, int, int, int], int]],
+def draw_set_of_mark(rgb: np.ndarray,
+                     boxes_and_ids: list[tuple[tuple[int, int, int, int], int] | tuple[tuple[int, int, int, int], int, str]],
                      candidate_paths: list[tuple[str, list[tuple[float, float]]]] = (),
                      cam: Camera | None = None) -> np.ndarray:
     """Draw Set-of-Mark ID badges on detected objects and projected 3D floor path ribbons."""
@@ -134,12 +157,17 @@ def draw_set_of_mark(rgb: np.ndarray, boxes_and_ids: list[tuple[tuple[int, int, 
                 _draw_text(out, tag, bx0 + 2, by0 + 2, path_color, scale=scale)
 
     # 2. Draw bounding boxes + solid [ID] badges
-    for box, track_id in boxes_and_ids:
+    for item in boxes_and_ids:
+        if len(item) == 3:
+            box, track_id, label = item
+            badge_str = f"[{track_id} {label}]" if label else f"[{track_id}]"
+        else:
+            box, track_id = item
+            badge_str = f"[{track_id}]"
         color = BOX_PALETTE[track_id % len(BOX_PALETTE)]
         x1, y1, x2, y2 = (int(round(v)) for v in box)
         _draw_rect(out, x1, y1, x2, y2, color, thickness=2)
 
-        badge_str = f"[{track_id}]"
         scale = 2
         bw = len(badge_str) * 6 * scale + 4
         bh = 7 * scale + 4

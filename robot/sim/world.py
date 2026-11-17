@@ -66,6 +66,18 @@ MOTION = {
 BASE_VOCABULARY = frozenset("""person chair sofa couch table desk box ball backpack bag cup mug bottle plant lamp tv bed
 door shoe book laptop phone cat dog charger bin toy pillow shelf cabinet fridge sink window basket""".split())
 COLORS = frozenset("red orange yellow green blue purple pink brown black white grey gray".split())
+SYNONYMS = {
+    "table": ("desk", "coffee table", "work table"),
+    "desk": ("table", "coffee table", "work table"),
+    "couch": ("sofa", "chair"),
+    "sofa": ("couch", "seat"),
+    "mug": ("cup",),
+    "cup": ("mug",),
+    "bag": ("backpack",),
+    "backpack": ("bag",),
+    "trash can": ("bin",),
+    "bin": ("trash can",),
+}
 
 
 def _words(text: str) -> set[str]:
@@ -178,6 +190,7 @@ class SimRobot:
             thing.id = thing.id or i
         self.things = {t.id: t for t in scene.things}
         self.t = 0.0
+        self._task_t0: float = 0.0
         self.x, self.y, self.yaw = scene.start.x, scene.start.y, math.radians(scene.start.yaw)
         self.v_now = self.w_now = 0.0
         self.held = False  # the collision monitor stopped the last step
@@ -319,18 +332,46 @@ class SimRobot:
         return target
 
     def _named(self, name: str) -> Pose | Point | Object:
-        key = name.lower().removeprefix("the ").strip()
+        raw = str(name).strip()
+        lowered = raw.lower()
+        key = lowered.removeprefix("the ").strip()
+
+        # 1. User alias resolution
+        user_aliases = {"user", "me", "you", "the user", "person(user)", "human", "speaker"}
+        if (
+            lowered in user_aliases
+            or key in {"user", "me", "you", "person(user)", "human", "speaker"}
+            or (key in ("person", "the person") and self.user() is not None)
+        ):
+            u = self.user()
+            if u is not None:
+                return u
+            raise NotFound(f"{name!r} is the user, but no user is present")
+
+        # 2. Saved place or room
         if key in self.places:
             return self.places[key]
         if key in self.scene.rooms:  # the free spot nearest the room's middle that can be reached
             x0, y0, x1, y1 = self.scene.rooms[key]
             reach, mid = self._reachable(), ((x0 + x1) / 2, (y0 + y1) / 2)
-            cells = [(i, j) for i, j in zip(*np.nonzero(reach), strict=True)
-                     if x0 < self._centre(i, j, RES * PLAN)[0] < x1 and y0 < self._centre(i, j, RES * PLAN)[1] < y1]
+            cells = [
+                (i, j)
+                for i, j in zip(*np.nonzero(reach), strict=True)
+                if x0 < self._centre(i, j, RES * PLAN)[0] < x1 and y0 < self._centre(i, j, RES * PLAN)[1] < y1
+            ]
             if cells:
                 i, j = min(cells, key=lambda c: math.dist(self._centre(*c, RES * PLAN), mid))
                 return self._centre(i, j, RES * PLAN)
             raise PathBlocked(f"no reachable spot in the {key}")
+
+        # 3. Embedded integer ID e.g. "10 table", "10  table", "desk 7", "#7"
+        m = re.search(r"^#?(\d+)\b", raw) or re.search(r"\b(\d+)$", raw)
+        if m:
+            oid = int(m.group(1))
+            if oid in self.things:
+                return self.obj(oid)
+
+        # 4. Seen/remembered object query
         seen = self._remembered(key)
         if seen:
             return seen[0]
@@ -362,7 +403,7 @@ class SimRobot:
             self._halt()
             self.ended_by = "stop word"
             raise Preempted('the user said "stop"')
-        if self.t > self.max_time:
+        if self.t - getattr(self, "_task_t0", 0.0) > self.max_time:
             self.ended_by = "budget"
             raise BudgetSpent(f"used {self.max_time:.0f} s of simulated time")
 
@@ -512,8 +553,9 @@ class SimRobot:
             hazard = self._check_hazard()
             is_snagged = self.scene.snag_at is not None and math.dist((self.x, self.y), self.scene.snag_at) < 0.35
             v_actual = 0.0 if (is_snagged and abs(self.v_now) > 0.08) else self.v_now
+            v_expected = (self.v_now or speed) if is_snagged else self.v_now
             status, v_safe, w_safe, torque = self.body.check_proprioception(
-                self.v_now or speed, self.w_now, v_actual, self.w_now, DT, pitch_rad=0.0, hazard=hazard
+                v_expected, self.w_now, v_actual, self.w_now, DT, pitch_rad=0.0, hazard=hazard
             )
             if status == "cliff_stop":
                 self._step(v_safe, 0.0)
@@ -767,6 +809,25 @@ class SimRobot:
             views = [v for v in self._unseen(region or "all") if all(math.dist((v.x, v.y), s) > 0.5 for s in skipped)]
             if not views:
                 break
+            brain = getattr(self, "brain", None)
+            if len(views) > 1 and brain is not None and hasattr(brain, "score_frontiers") and hasattr(self, "render_view"):
+                frame = self.render_view()
+                if frame is not None and getattr(frame, "size", 0) > 0:
+                    try:
+                        from robot.perception.camera import data_url
+
+                        labels = tuple("ABC"[:min(3, len(views))])
+                        probs = brain.score_frontiers(data_url(frame), description, labels=labels)
+                        ranked = [
+                            v for _, v in sorted(
+                                zip(labels, views[:len(labels)], strict=True),
+                                key=lambda item: probs.get(item[0], 0.0),
+                                reverse=True,
+                            )
+                        ]
+                        views = ranked + views[len(labels):]
+                    except Exception:  # noqa: BLE001 - fall back to nearest frontier order
+                        pass
             try:
                 self._go(views[0], 0.0)
             except PathBlocked:
@@ -1021,7 +1082,12 @@ class SimRobot:
 
     # ---- senses -------------------------------------------------------------------------------------------------
     def _watch(self, description: str) -> None:
-        new = _words(description) - COLORS - self.vocabulary
+        words = _words(description) - COLORS
+        for w in list(words):
+            if w in SYNONYMS:
+                for alt in SYNONYMS[w]:
+                    words |= _words(alt)
+        new = words - self.vocabulary
         if new:
             self.vocabulary |= new
             self._last_perceive = -1.0
@@ -1031,7 +1097,27 @@ class SimRobot:
         """Things the description names, best first; colour words must match too (on the robot, the mask's colour)."""
         colors = _words(description) & COLORS
         found = [t for t in things if self._detectable(t) and t.score(description) and (not colors or t.color in colors)]
-        return sorted(found, key=lambda t: -t.score(description))
+        if found:
+            return sorted(found, key=lambda t: -t.score(description))
+
+        # Synonym fallback if direct matching yielded no results
+        desc_words = _words(description)
+        desc_lower = description.lower()
+        for w, alts in SYNONYMS.items():
+            if w in desc_words or w in desc_lower:
+                for alt in alts:
+                    alt_desc = desc_lower.replace(w, alt)
+                    alt_found = [
+                        t
+                        for t in things
+                        if self._detectable(t)
+                        and (t.score(alt) or t.score(alt_desc))
+                        and (not colors or t.color in colors)
+                    ]
+                    if alt_found:
+                        return sorted(alt_found, key=lambda t: -(t.score(alt) or t.score(alt_desc)))
+
+        return []
 
     def _remembered(self, description: str) -> list[Object]:
         things = [self.things[i] for i in self.memory]
@@ -1228,6 +1314,7 @@ class SimRobot:
 
     def begin(self) -> None:
         """A new task starts here: "start" names this spot, and an earlier stop no longer applies."""
+        self._task_t0 = self.t
         self.places["start"] = Pose(self.x, self.y, math.degrees(self.yaw))
         self._cancel.clear()
         self.ended_by = ""
