@@ -21,7 +21,7 @@ foreach ($f in $model, $proj) { if (-not (Test-Path $f)) { throw "missing $f (se
 if (Test-Ready) { "the model is already running on port 8081"; return }
 
 $log = Join-Path $env:TEMP "sprocket-llama.log"
-$serverArgs = @("-m", "`"$model`"", "--mmproj", "`"$proj`"", "-ngl", "99", "-c", "16384", "-np", "2", "--jinja",
+$serverArgs = @("-m", "`"$model`"", "--mmproj", "`"$proj`"", "-ngl", "99", "-c", "32768", "-np", "2", "--jinja",
                 "--host", "127.0.0.1", "--port", "8081")
 Start-Process -FilePath $exe -ArgumentList $serverArgs -WindowStyle Hidden -RedirectStandardError $log
 "starting LFM3-VL-2B with $exe..."

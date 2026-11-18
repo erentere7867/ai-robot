@@ -25,7 +25,6 @@ MAX_TURNS = 16  # model replies per task
 MAX_OBJECTS = 15  # nearest objects listed in full in an observation
 MAX_FARTHER = 40  # more after them, by id and name only
 MAX_IMAGES = 4  # pictures kept in the conversation; older ones are replaced by a note
-KEEP_THOUGHTS = 2  # the newest turns whose reasoning stays in the conversation
 IMAGE_WIDTH = 768  # pixels across each picture; at 512 the 2B model misjudged colours of small things (a red bike)
 THINK = {"off": 0, "low": 128, "medium": 512, "high": 2048}  # most tokens of reasoning before each turn
 EARLIER = 4  # earlier tasks summarised at the start of a new one
@@ -104,14 +103,12 @@ class Agent:
         self.see_after_moves = see_after_moves
         self.max_turns, self.think, self.image_width = max_turns, THINK[think], image_width
         self.earlier: list[str] = []  # one line per task before the last one
-        self.last_task: list[dict[str, Any]] = []  # the whole conversation of the last task
+        self.last = ""  # the last task step by step: each call with its result, and the reply
         self._heard: queue.Queue[str] = queue.Queue()
         self._acting = threading.Event()
         self._robot: Any = None
         self._stopped = threading.Event()
         self._seen_id = 0
-        self._messages: list[dict[str, Any]] | None = None  # the conversation of the task running now
-        self._task_start = 0
 
     # ---- from other threads (the live page, the microphone) ------------------------------------------------------
     def interject(self, text: str) -> None:
@@ -194,12 +191,8 @@ class Agent:
         return {"role": "user", "content": parts}
 
     @staticmethod
-    def _trim(messages: list[dict[str, Any]]) -> None:
-        """Keep only the newest pictures and the newest turns' reasoning, so a long task fits the model's context
-        (8k tokens a slot here; a 16-turn task kept every 512-token thought and overflowed it)."""
-        thoughts = [m for m in messages if m.get("reasoning_content")]
-        for msg in thoughts[:-KEEP_THOUGHTS]:
-            del msg["reasoning_content"]
+    def _trim_images(messages: list[dict[str, Any]]) -> None:
+        """Keep only the newest pictures so a long task fits the model's context."""
         seen = 0
         for msg in reversed(messages):
             content = msg.get("content")
@@ -230,18 +223,21 @@ class Agent:
         self._mood(robot, "listening", "listen")
         self._push(status="thinking", instruction=instruction, steps=[], todo="", problems=[])
 
-        # context: one line per older request, then the whole of the last one (what it did and what came back)
+        # One user turn per request, as the model is trained for tool use (its card advises against multi-turn chat):
+        # earlier requests one line each, the last one step by step, then what the robot senses and the words.
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM}]
-        older = self.earlier[:-1] if self.last_task else self.earlier
+        context = []
+        older = self.earlier[:-1] if self.last else self.earlier
         if older:
-            messages.append({"role": "user", "content": "Earlier requests (oldest first):\n"
-                             + "\n".join(f"- {e}" for e in older)})
-        messages += self.last_task
+            context.append("Earlier requests (oldest first):\n" + "\n".join(f"- {e}" for e in older))
+        if self.last:
+            context.append(f"The last request, step by step:\n{self.last}")
         first = self._observation(robot, tools, list(self.cameras), "What you sense now:",
                                   when="when the task started")
+        if context:
+            first["content"].insert(0, {"type": "text", "text": "\n".join(context) + "\n"})
         first["content"].append({"type": "text", "text": f'The user says: "{instruction}"'})
         messages.append(first)
-        self._messages, self._task_start = messages, len(messages) - 1
         reviewed = False
         last_said = ""
         last_call, repeats = None, 0
@@ -250,7 +246,7 @@ class Agent:
             for _ in range(self.max_turns):
                 if self._stopped.is_set():
                     return self._finish(robot, record, "preempted", last_said)
-                self._trim(messages)
+                self._trim_images(messages)
                 t0 = time.perf_counter()
                 reply = self.brain.chat(messages, tools.schemas(), think=self.think)
                 step = Step(reply.text, model_s=round(time.perf_counter() - t0, 3), tokens=reply.write_tokens,
@@ -316,19 +312,16 @@ class Agent:
                 heard = self._drain()
                 moved = self.see_after_moves and tools.moved
                 cameras = list(dict.fromkeys([*(self.cameras if moved else ()), *tools.looked]))
-                if cameras or heard:
-                    if heard:
-                        header = "".join(f'The user says: "{h}"\n' for h in heard) + "What you sense now:"
-                    else:  # an update, not a new request: restate the task and what is done so far
-                        done = "; ".join(record.lines()[-6:])
-                        header = (f'Update while you work on the user\'s request "{instruction}" (not a new '
-                                  f"request).\nDone so far: {done}\nIf the request is complete, reply to the user "
-                                  "without calling a tool.\nWhat you sense now:")
+                if heard:  # the user spoke mid-task: a new user turn with their words and what the robot senses now
+                    header = "".join(f'The user says: "{h}"\n' for h in heard) + "What you sense now:"
+                    messages.append(self._observation(robot, tools, cameras, header, when="when the user spoke"))
+                elif cameras:  # pictures come back inside the turn's last tool result, as the model was trained:
                     asked = [f"{c.name}({', '.join(f'{v}' for v in c.args.values())})" for c in reply.tool_calls
-                             if c.name == "look"]
-                    when = f"after {', '.join(asked)}" if asked else "after moving" if moved else "when the user spoke"
-                    messages.append(self._observation(robot, tools, cameras, header, when=when))
-                    tools.moved, tools.looked = False, []
+                             if c.name == "look"]  # a new user message would end its tool-use turn and drop the
+                    when = f"after {', '.join(asked)}" if asked else "after moving"  # reasoning so far
+                    seen = self._observation(robot, tools, cameras, "What you sense now:", when=when)
+                    messages[-1]["content"] = [{"type": "text", "text": messages[-1]["content"]}, *seen["content"]]
+                tools.moved, tools.looked = False, []
             record.problems.append(f"no answer after {self.max_turns} turns")
         except SafetyStop as exc:
             record.problems.append(f"safety stop: {exc}")
@@ -396,16 +389,15 @@ class Agent:
         summary = (f'"{record.instruction}" -> {outcome}' + (f"; you did: {actions}" if actions else "")
                    + (f'; you said "{said[:100]}"' if said else ""))
         self.earlier = [*self.earlier, summary][-EARLIER:]
-        if self._messages is not None:  # kept whole for the next request
-            self.last_task = self._messages[self._task_start:]
-            self._messages = None
+        self.last = "\n".join([f'  The user said "{record.instruction}"', *(f"  {line}" for line in record.lines()),
+                               f"  ({outcome})"])
         self._push(status="stopped" if outcome == "preempted" else outcome, steps=record.lines(thoughts=True),
                    problems=list(record.problems))
         return record
 
     def forget(self) -> None:
         """Start a fresh conversation (a new room, a new user)."""
-        self.earlier, self.last_task = [], []
+        self.earlier, self.last = [], ""
 
     @staticmethod
     def _mood(robot: Any, posture: str, chime: str) -> None:

@@ -27,6 +27,7 @@ from robot.sim.home3d import Home3D, _Server
 TUNE = ("apt_0", "v3_sc0_staging_00")  # the layouts tasks and harness are tuned on; hold others out
 WORDS = {"sofa": ("sofa", "couch"), "bike": ("bike", "bicycle"), "tv": ("tv", "television", "monitor", "screen"),
          "fridge": ("fridge", "refrigerator")}
+CLEAR = 400  # pixels (of a 512 x 288 camera) for a thing to be plainly in view, not just detectable
 NUMBERS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
 
 
@@ -146,8 +147,10 @@ TASKS = [
          lambda s, st: sum(mentions(said(s), lbl) for lbl in st["front"]) >= 2),
     Task("Q2", ("Turn around and tell me what you see.",),
          lambda s, st: abs(turned(s)) >= 2.5 and any(mentions(said(s), lbl) for lbl in st["rear"])),
-    Task("Q3", ("How many chairs can you see right now?",),
-         lambda s, st: says_number(said(s), st["seen"].count("chair")), ("chair",)),
+    Task("Q3", ("How many chairs can you see right now?",),  # from those plainly in view to all the detector found:
+         lambda s, st: any(says_number(said(s), n) for n in range(  # a chair behind a table and a bike, legs only,
+             sum(st["pixels"].get(k, 0) >= CLEAR for k in st["ids"]["chair"]),  # counts either way
+             st["seen"].count("chair") + 1)), ("chair",)),
     Task("Q4", ("Which is closer to you, the sofa or the fridge?",),
          lambda s, st: first_named(said(s, last_only=True), *(lambda c: (c, "fridge" if c == "sofa" else "sofa"))(
              _closer(s, st, "sofa", "fridge"))), ("sofa", "fridge")),
@@ -182,6 +185,8 @@ def start_facts(robot: Home3D) -> dict:
                 if b[4] >= 60 and k in robot.things]
     return {"front": set(labels(("front_camera",))), "rear": set(labels(("rear_left_camera", "rear_right_camera"))),
             "seen": [robot.things[k].label for k in sorted(robot._detected)], "xy": (robot.x, robot.y),
+            "pixels": dict(robot._seen), "ids": {lbl: [k for k in robot._detected if robot.things[k].label == lbl]
+                                                 for lbl in {robot.things[k].label for k in robot._detected}},
             "pose": (robot.x, robot.y, robot.yaw)}
 
 

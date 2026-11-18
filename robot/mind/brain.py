@@ -29,6 +29,9 @@ class Reply:
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 
+# The model card's sampling for LFM3-VL-2B (with temperature 0.1); llama-server's own defaults differ (top_p 0.95,
+# min_p 0.05, no repeat penalty).
+CARD_SAMPLING = {"top_k": 50, "top_p": 1.0, "min_p": 0.0, "repeat_penalty": 1.1}
 NOT_A_THING = ("wall", "floor", "nothing")  # answers to "what object is this?" that mean there is none
 
 
@@ -87,7 +90,7 @@ class Brain:
             "messages": messages,
             "tools": tools,
             "temperature": temperature,
-            "top_k": 50,
+            **CARD_SAMPLING,
             "max_tokens": max_tokens + max(0, think),
             "cache_prompt": True,
             "stream": False,

@@ -34,7 +34,7 @@ if curl -s --max-time 2 http://127.0.0.1:8081/health | grep -q ok; then
 else
   [ -f "$MODEL" ] || { echo "missing LLM model: $MODEL (run tools/wsl/setup_models.sh)"; exit 1; }
   [ -f "$MMPROJ" ] || { echo "missing mmproj: $MMPROJ (run tools/wsl/setup_models.sh)"; exit 1; }
-  nohup "$bin" -m "$MODEL" --mmproj "$MMPROJ" $gpu -c 16384 -np 2 --jinja --swa-full --port 8081 -t 4 \
+  nohup "$bin" -m "$MODEL" --mmproj "$MMPROJ" $gpu -c 32768 -np 2 --jinja --swa-full --port 8081 -t 4 \
     > ~/llama-wsl.log 2>&1 &
   echo "starting LFM3-VL-2B on the $where ($MODEL)..."
   for _ in $(seq 1 120); do curl -s http://127.0.0.1:8081/health | grep -q ok && break; sleep 2; done

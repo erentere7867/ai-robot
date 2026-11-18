@@ -68,14 +68,14 @@ def test_the_next_request_sees_what_the_last_one_did_and_where_it_began():
     agent = Agent(brain)
     agent.do("Go forward a metre.", sim)
     agent.do("Come back.", sim)
-    second = brain.seen[-1]
-    assert tool_results(second)[0].startswith("Moved 1 m forward.")  # the last request whole, results included
-    ask = next(m for m in second if isinstance(m["content"], list)
-               and any('"Come back."' in p.get("text", "") for p in m["content"]))
-    scene = ask["content"][0]["text"]
-    assert "where you were before (where the request before began, 1.0 m behind)" in scene
     assert "Places you can go_to by name: start (where this request began, 1.0 m behind)" \
-        in tool_results(second)[0]  # a move's result says where the request began, from the new spot
+        in tool_results(brain.seen[1])[0]  # a move's result says where the request began, from the new spot
+    second = brain.seen[3]  # the first turn of "Come back." (the first request took three: act, reply, review)
+    assert [m["role"] for m in second] == ["system", "user"]  # one user turn: the last request is told, not replayed
+    text = " ".join(p.get("text", "") for p in second[1]["content"])
+    assert "move(metres=1, direction='forward') -> Moved 1 m forward." in text  # step by step, results included
+    assert "where you were before (where the request before began, 1.0 m behind)" in text
+    assert text.endswith('The user says: "Come back."')
 
 
 def test_stop_never_waits_for_the_model():
