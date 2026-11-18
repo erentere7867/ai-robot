@@ -245,6 +245,10 @@ class RealRobot(RosRobot):
             return []
         return [(c.label, [to_robot(pose, wx, wy) for wx, wy in c.points]) for c in rollouts[:3]]
 
+    def camera_view(self, camera: str = "front_camera", width: int = 512, height: int = 288) -> np.ndarray | None:
+        """The latest real frame from one camera with the tracker's ids marked, as the vision model sees it."""
+        return self.perception.render_annotated_view(camera=camera, width=width, height=height)
+
     def render_view(self, width: int = 320, height: int = 240, candidate_paths: Any = ()) -> np.ndarray:
         """Latest front CSI view with Set-of-Mark box IDs and *PIVOT* floor trajectory ribbons."""
         paths = list(candidate_paths) if candidate_paths else self._pivot_paths()

@@ -1,14 +1,14 @@
 """The live page: what Sprocket v2 is thinking and doing, and a box to command it.
 
-One small web page (standard library only) shows the instruction, current action, subgoal, posture, chime,
-working-memory scratchpad, intent step trace, optional camera/Set-of-Mark view, a 2D map with the robot's
-pose/poses/trail/objects/rooms, what the robot has said, and the history of instructions. Commands typed on the
+One small web page (standard library only) shows the instruction, the agent's to-do list and every tool call
+with its result, the latest camera picture the model saw, a 2D map with the robot's pose, trail, objects and rooms,
+what the robot has said, and the history of instructions. Commands typed on the
 page, the Stop button, and the room picker arrive in `Live.inbox` for whoever drives the robot
 (`robot/interfaces/demo.py`).
 
     live = Live()
     live.serve(port=8765)          # then open http://localhost:8765
-    agent = Agent(planner, live=live)
+    agent = Agent(brain, live=live)
 
 It listens on this computer only by default: the page can command the robot.
 """
@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -26,14 +26,12 @@ from urllib.parse import parse_qs, urlparse
 
 @dataclass
 class State:
-    status: str = "idle"  # idle, planning, running, done, failed, stopped, refused
+    status: str = "idle"  # idle, thinking, acting, done, failed, stopped
     instruction: str = ""
-    subgoal: str = ""
-    action: str = ""
     posture: str = "neutral"
     chime: str = ""
-    intents: list[dict[str, Any] | str] = field(default_factory=list)
-    scratchpad: str = ""
+    steps: list[str] = field(default_factory=list)  # every tool call and its result, in order
+    todo: str = ""  # the model's to-do list
     problems: list[str] = field(default_factory=list)
     said: list[str] = field(default_factory=list)
     pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -49,26 +47,12 @@ class State:
     history: list[dict[str, Any]] = field(default_factory=list)
     cameras: list[str] = field(default_factory=list)
     scan: list[tuple[float, float]] = field(default_factory=list)
-    view: str = ""  # optional base64 camera or Set-of-Mark image data URL
+    seen: list[dict[str, str]] = field(default_factory=list)  # the pictures the model was last given: camera, url
+    seen_when: str = ""  # when it was given them
+    seen_id: int = 0  # changes whenever it is given new ones
     voice: bool = False
     heard: str = ""
     said_total: int = 0
-
-
-def _serialize_intent(item: Any) -> dict[str, Any] | str:
-    """Convert an Intent dataclass, dict, or string into a JSON-safe representation."""
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        out = dict(item)
-    elif is_dataclass(item) and not isinstance(item, type):
-        out = asdict(item)
-    else:
-        return str(item)
-    target = out.get("target")
-    if target is not None and not isinstance(target, (str, int, float, bool)):
-        out["target"] = str(target)
-    return out
 
 
 class Live:
@@ -87,15 +71,13 @@ class Live:
             for key, value in changes.items():
                 if not hasattr(self.state, key):
                     continue
-                if key == "intents" and isinstance(value, (list, tuple)):
-                    value = [_serialize_intent(item) for item in value]
                 setattr(self.state, key, value)
 
     def snapshot(self) -> str:
         with self._lock:
             return json.dumps(asdict(self.state), default=str)
 
-    def show_world(self, sim: Any, *, include_view: bool = False) -> None:
+    def show_world(self, sim: Any) -> None:
         """Copy the robot pose, trail, objects, walls, and speech from a SimRobot (or RosRobot)."""
         scene = sim.scene
         w, h = scene.width, scene.height
@@ -148,15 +130,6 @@ class Live:
         }
         if hasattr(sim, "posture"):
             changes["posture"] = sim.posture
-        if getattr(sim, "scratchpad_summary", ""):
-            changes["scratchpad"] = sim.scratchpad_summary
-        if include_view and hasattr(sim, "render_view"):
-            try:
-                from robot.perception.camera import data_url
-
-                changes["view"] = data_url(sim.render_view())
-            except Exception:  # noqa: BLE001 - rendering is best-effort for live visualization
-                pass
         self.update(**changes)
 
     def hear(self, audio: bytes) -> None:
@@ -271,10 +244,10 @@ margin:0 0 8px}h3{font-size:12px;letter-spacing:.04em;text-transform:uppercase;c
 .status.refused{background:var(--warn);color:#fff}
 pre{margin:0;padding:8px 10px;border-radius:8px;background:var(--bg);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
 overflow-x:auto;white-space:pre-wrap}
-.intents{margin:0;padding-left:20px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
-.intents li{padding:3px 6px;border-radius:6px;margin-bottom:4px}.intents li.now{background:var(--hi)}
+.steps{margin:0;padding-left:20px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.steps li{padding:3px 6px;border-radius:6px;margin-bottom:4px}.steps li.now{background:var(--hi)}
+.steps li.thought{color:var(--muted);font-style:italic}
 canvas{width:100%;aspect-ratio:4/3;border-radius:8px;background:var(--bg)}
-.viewframe{width:100%;max-height:320px;object-fit:contain;border-radius:8px;background:var(--bg);display:block}
 ul{margin:0;padding-left:18px}.muted{color:var(--muted)}.wide{grid-column:1/-1}
 .mind-kv{display:flex;gap:12px;flex-wrap:wrap;font-size:14px;margin-bottom:6px}
 form{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
@@ -311,15 +284,11 @@ Pink dots show 360° 3-CSI depth contours (no LiDAR). Faded objects are remember
 </section>
 
 <section>
-<h2>Living Mind</h2>
-<div class="mind-kv">
-<span>Action: <strong id="action">—</strong></span>
-<span>Subgoal: <span id="subgoal" class="muted">—</span></span>
-</div>
-<h3>Cognitive Synthesis (Perception · Memory · Intent)</h3>
-<pre id="scratchpad" class="muted">(empty)</pre>
-<h3>Intents</h3>
-<ol id="intents" class="intents"></ol>
+<h2>Agent</h2>
+<h3>To-do</h3>
+<pre id="todo" class="muted">(no to-do list)</pre>
+<h3>Tool calls</h3>
+<ol id="steps" class="steps"></ol>
 </section>
 
 <section>
@@ -327,9 +296,10 @@ Pink dots show 360° 3-CSI depth contours (no LiDAR). Faded objects are remember
 <canvas id="map" width="800" height="600"></canvas>
 </section>
 
-<section id="viewsec" hidden>
-<h2>Camera / Set-of-Mark View</h2>
-<img id="view" class="viewframe" alt="Visual observation">
+<section class="wide" id="seensec" hidden>
+<h2>What the model saw <span id="seenwhen" class="muted"></span></h2>
+<div class="hint">Snapshots, not video: the model is given pictures when a task starts and when it calls look.</div>
+<div id="seen" class="cams"></div>
 </section>
 
 <section>
@@ -345,7 +315,7 @@ Pink dots show 360° 3-CSI depth contours (no LiDAR). Faded objects are remember
 </section>
 
 <section class="wide" id="camsec" hidden>
-<h2>What the cameras see</h2>
+<h2>Live cameras</h2>
 <div id="cams" class="cams"></div>
 </section>
 </main><script>
@@ -355,17 +325,6 @@ const post=(p,text)=>fetch(p,{method:'POST',headers:{'Content-Type':'application
 $('form').onsubmit=e=>{e.preventDefault();const t=$('cmd').value.trim();if(t){$('instruction').textContent=t;$('status').textContent='planning';$('status').className='status planning';post('/instruct',t);$('cmd').value=''}};
 $('stop').onclick=()=>post('/stop','');
 $('scene').onchange=()=>post('/scene',$('scene').value);
-
-function formatIntent(item){
-if(typeof item==='string')return esc(item);
-if(!item||typeof item!=='object')return esc(String(item));
-const act=esc(item.action||'done');
-const tgt=item.target!==undefined&&item.target!==null&&item.target!==''?'('+esc(item.target)+')':'';
-const sg=item.subgoal?' — '+esc(item.subgoal):'';
-const meta=[item.posture&&item.posture!=='neutral'?'posture:'+item.posture:'',item.chime?'chime:'+item.chime:''].filter(Boolean).join(', ');
-const suffix=meta?' ['+esc(meta)+']':'';
-return `<b>${act}</b>${tgt}${sg}${suffix}`;
-}
 
 function draw(s){
 const c=$('map'),g=c.getContext('2d'),[W,H]=s.size||[8,6];
@@ -471,7 +430,7 @@ g.beginPath();g.moveTo(X(x),Y(y));g.lineTo(X(x+.35*Math.cos(a)),Y(y+.35*Math.sin
 g.strokeStyle=ink;g.lineWidth=3;g.stroke();
 }
 
-let scenesKey='';
+let scenesKey='',seenId=-1;
 function render(s){
 $('instruction').textContent=s.instruction||'Tell the robot what to do';
 $('status').textContent=s.status||'idle';
@@ -479,13 +438,13 @@ $('status').className='status '+(s.status||'idle');
 $('posture').textContent='posture: '+(s.posture||'neutral');
 if(s.chime){$('chime').hidden=false;$('chime').textContent='chime: '+s.chime}else{$('chime').hidden=true}
 $('rooms').textContent=(s.rooms&&s.rooms.length)?'rooms: '+s.rooms.join(', '):'';
-$('action').textContent=s.action||'—';
-$('subgoal').textContent=s.subgoal||'—';
-$('scratchpad').textContent=s.scratchpad||'(empty)';
-$('scratchpad').className=s.scratchpad?'':'muted';
-const intents=s.intents||[];
-$('intents').innerHTML=intents.map((it,idx)=>`<li class="${idx===intents.length-1?'now':''}">${formatIntent(it)}</li>`).join('')||'<li class="muted">none yet</li>';
-if(s.view){$('viewsec').hidden=false;$('view').src=s.view}else{$('viewsec').hidden=true}
+$('todo').textContent=s.todo||'(no to-do list)';
+$('todo').className=s.todo?'':'muted';
+const steps=s.steps||[];
+$('steps').innerHTML=steps.map((it,idx)=>`<li class="${idx===steps.length-1?'now':''}${String(it).startsWith('thought:')?' thought':''}">${esc(it)}</li>`).join('')||'<li class="muted">none yet</li>';
+if(s.seen&&s.seen.length){$('seensec').hidden=false;$('seenwhen').textContent=s.seen_when?'('+s.seen_when+')':'';
+if(s.seen_id!==seenId){seenId=s.seen_id;$('seen').innerHTML=s.seen.map(v=>`<figure><img src="${v.url}" alt="${esc(v.camera)}"><figcaption>${esc(v.camera)} camera</figcaption></figure>`).join('')}}
+else{$('seensec').hidden=true}
 $('said').innerHTML=(s.said||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">nothing yet</li>';
 const saidArr=s.said||[];
 if(saidArr.length>0){
@@ -522,7 +481,7 @@ img.onerror=()=>{img.dataset.loading='';img.dataset.loadingAt='0'};
 lastCamAt=0;
 }
 const now=Date.now();
-if(now-lastCamAt<1500)return;
+if(now-lastCamAt<500)return;
 lastCamAt=now;
 $('cams').querySelectorAll('img[data-cam]').forEach(img=>{
 const started=Number(img.dataset.loadingAt||0);

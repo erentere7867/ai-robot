@@ -11,6 +11,7 @@ for pat in "[g]z-sim-main" "[g]z-sim-gui" "[p]arameter_bridge" "[i]mage_bridge" 
   pkill -9 -f "$pat" || true
 done
 source /opt/ros/lyrical/setup.bash
+export GALLIUM_DRIVER="${GALLIUM_DRIVER:-d3d12}"  # OpenGL on the GPU in WSL; without it Mesa renders on the CPU
 . ~/sprocket-venv/bin/activate
 export PYTHONPATH="$repo:${PYTHONPATH:-}"  # appended: ROS's own Python packages are on it
 cd "$MODELS_DIR" || { echo "missing models dir: $MODELS_DIR (run tools/wsl/setup_models.sh)"; exit 1; }

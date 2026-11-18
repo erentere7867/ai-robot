@@ -1,4 +1,4 @@
-"""Tests for circulating hybrid memory: short-term scratchpad and long-term SQLite vector memory."""
+"""Tests for long-term memory: objects, facts, habits, clearing and people survive a restart."""
 
 from __future__ import annotations
 
@@ -11,8 +11,6 @@ from robot.mind.memory import (
     HALF_LIFE,
     Memory,
     PersonProfile,
-    TaskScratchpad,
-    VisualRingBuffer,
     cosine_similarity,
     embed_text,
     freshness,
@@ -58,59 +56,6 @@ def test_a_thing_found_gone_is_not_remembered_as_there(tmp_path):
     restored = Tracker()
     memory.restore(restored)
     assert not restored.objects()[0].present
-
-
-def test_task_scratchpad_state_and_spot_checking():
-    pad = TaskScratchpad(goal="find mug")
-    pad.mark_visited("kitchen", (2.0, 1.0))
-    pad.mark_visited("kitchen", (2.5, 1.2))
-    pad.inspected_ids.add(42)
-    pad.blockers.append("closed door")
-    pad.steps += 3
-    for i in range(15):
-        pad.record_step(f"  step {i}  ")
-    pad.record_step("   ")
-
-    assert len(pad.completed_steps) == 12
-    assert pad.completed_steps[0] == "step 3"
-    assert pad.completed_steps[-1] == "step 14"
-    assert pad.is_spot_checked((2.1, 1.1), radius=0.6)
-    assert not pad.is_spot_checked((5.0, 5.0), radius=0.6)
-    assert "kitchen" in pad.visited_rooms
-    assert "find mug" in pad.summary()
-    assert "closed door" in pad.summary()
-    assert "Completed: [" in pad.summary()
-
-    pad.reset(goal="inspect table")
-    assert pad.goal == "inspect table"
-    assert len(pad.visited_rooms) == 0
-    assert len(pad.checked_spots) == 0
-    assert len(pad.blockers) == 0
-    assert len(pad.completed_steps) == 0
-    assert pad.steps == 0
-
-
-def test_visual_ring_buffer_expiry_and_lookup():
-    buf = VisualRingBuffer(maxlen=16, max_age_s=15.0)
-    img = np.zeros((40, 40, 3), dtype=np.uint8)
-
-    buf.push("front", (0.0, 0.0, 0.0), img, track_ids=(1,), timestamp=100.0)
-    buf.push("front", (1.0, 0.0, 0.0), img, track_ids=(2,), timestamp=105.0)
-    buf.push("front", (2.0, 0.0, 0.0), img, track_ids=(3,), timestamp=110.0)
-
-    # Frame at 100.0 is 20s older than 120.0 -> should be pruned on push at 120.0
-    buf.push("front", (3.0, 0.0, 0.0), img, track_ids=(4,), timestamp=120.0)
-    assert len(buf._frames) == 3
-    assert {f.timestamp for f in buf._frames} == {105.0, 110.0, 120.0}
-
-    # Query recent frames within 6 seconds of now=120.0 (should find 120.0)
-    recent = buf.recent(seconds=6.0, now=120.0)
-    assert len(recent) == 1
-    assert recent[0].timestamp == 120.0
-
-    # Query frame 10 seconds ago from 120.0 (target=110.0)
-    frame = buf.frame_at(seconds_ago=10.0, now=120.0)
-    assert frame is not None and frame.timestamp == 110.0
 
 
 def test_embed_text_semantic_matching_and_query_facts(tmp_path):

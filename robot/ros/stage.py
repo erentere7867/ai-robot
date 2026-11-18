@@ -1,12 +1,9 @@
-"""Run suite cases closed-loop in Gazebo with Nav2: the same room, agent and check as in the 2D world.
+"""Stage a scene in Gazebo with Nav2: the 2D world's room as a Gazebo world and a Nav2 map, with Sprocket in it.
 
-Each case gets a fresh simulation. Its scene becomes a Gazebo world (walls as boxes, things as cylinders) and a
-Nav2 map (the 2D world's occupancy grid), and Nav2's TurtleBot 4 simulation is launched in it with Sprocket's 3-CSI
-pure-vision URDF at the scene's start pose. Calibrated synthetic /scan from 3-CSI depth feeds AMCL/Nav2 without a
-hardware lidar, and `Agent(LocalPlanner(...))` runs closed-loop against `RosRobot`.
-
-    python3 -m robot.ros.stage                 # all static-room suite cases
-    python3 -m robot.ros.stage --cases R1 O3   # specific case IDs
+Each scene becomes a Gazebo world (walls as boxes, things as cylinders or Fuel models) and a Nav2 map (the 2D world's
+occupancy grid), and Nav2's TurtleBot 4 simulation is launched in it with Sprocket's three-camera URDF at the scene's
+start pose. Calibrated synthetic /scan from the cameras' depth feeds AMCL and Nav2 without a hardware lidar.
+`robot/ros/run3d.py` runs the agent on it.
 
 Runs inside WSL (or on the board) with ROS 2 sourced. Imports of ROS stay inside functions so this module stays
 lightweight when imported elsewhere.
@@ -19,7 +16,6 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -332,90 +328,3 @@ def set_initial_pose(node: object, world: SimRobot) -> None:
     for _ in range(5):
         pub.publish(msg)
         time.sleep(0.5)
-
-
-def run_case(
-    case: object,
-    planner: object | None = None,
-    *,
-    brain_url: str = "http://127.0.0.1:8080",
-    think: int = 0,
-) -> tuple[bool, str, SimRobot | None]:
-    """Like robot.eval.suite.run_case, closed-loop in Gazebo on RosRobot."""
-    import rclpy
-
-    from robot.agent.agent import Agent
-    from robot.agent.planner import LocalPlanner
-    from robot.mind.brain import Brain
-    from robot.ros.robot import RosRobot
-
-    if planner is None:
-        planner = LocalPlanner(Brain(brain_url), think=think)
-    scene = case.scene()
-    out = Path(tempfile.mkdtemp(prefix=f"sprocket-{case.id}-"))
-    sim = launch(SimRobot(scene), out)
-    robot = None
-    try:
-        rclpy.init()
-        helper = rclpy.create_node("sprocket_stage")
-        time.sleep(25.0)  # Gazebo, the robot and Nav2's lifecycle take a while to come up
-        set_initial_pose(helper, SimRobot(scene))
-        robot = RosRobot(case.scene(), nudge=lambda: set_initial_pose(helper, SimRobot(scene)))
-        if not robot.actions["navigate_to_pose"].wait_for_server(timeout_sec=120.0):
-            return False, "Nav2 did not come up", robot
-        time.sleep(3.0)
-        record = Agent(planner, brain=getattr(planner, "brain", None)).do(case.say, robot)
-        checked = bool(case.check(robot))
-        ok = checked and record.outcome in ("done", "preempted", "refused")
-        if ok:
-            why = "passed"
-        else:
-            why = "; ".join(record.problems[-2:]) or f"{record.outcome or 'failed'}, check failed"
-        return ok, why, robot
-    finally:
-        if robot is not None:
-            robot.shutdown()
-        if rclpy.ok():
-            rclpy.shutdown()
-        sim.stop()
-
-
-def main() -> None:
-    import argparse
-
-    from robot.agent.planner import LocalPlanner
-    from robot.eval.suite import CASES, end, turned
-    from robot.eval.suite import run_case as suite_run_case
-    from robot.mind.brain import Brain
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cases", nargs="*", default=[])
-    parser.add_argument("--brain", default="http://127.0.0.1:8080")
-    parser.add_argument("--think", type=int, default=0)
-    args = parser.parse_args()
-    planner = LocalPlanner(Brain(args.brain), think=args.think)
-    if not planner.brain.healthy():
-        raise SystemExit(f"llama-server is not answering on {args.brain}")
-    moving = {"F1"}  # a walking person needs an actor in Gazebo; not built yet
-    chosen = [c for c in CASES if (c.id in args.cases if args.cases else c.id not in moving)]
-    passed = 0
-    for case in chosen:
-        started = time.monotonic()
-        try:
-            ok, why, robot = run_case(case, planner)
-        except Exception as exc:  # one room that fails to start must not stop the rest
-            ok, why, robot = False, f"{type(exc).__name__}: {exc}"[:40], None
-        sim_ok = suite_run_case(case, planner)[0]
-        passed += ok
-        t = robot.t if robot else 0.0
-        print(f"[{'ok' if ok else 'XX'}] {case.id:<4} gazebo {why:<40} 2D world {'ok' if sim_ok else 'XX'}  "
-              f"({t:.0f} s simulated, {time.monotonic() - started:.0f} s wall)", flush=True)
-        if robot and not ok and robot.trace.poses:
-            x, y, yaw = end(robot)
-            print(f"       ended at ({x:.2f}, {y:.2f}) facing {math.degrees(yaw):.0f} deg, turned "
-                  f"{math.degrees(turned(robot)):.0f} deg in all", flush=True)
-    print(f"{passed}/{len(chosen)} pass in Gazebo")
-
-
-if __name__ == "__main__":
-    main()

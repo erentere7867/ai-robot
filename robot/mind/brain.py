@@ -1,12 +1,20 @@
-"""The brain: LFM3-VL-2B closed-loop planner and d1-2B calibrated decision scorer behind llama-server."""
+"""The brain: the vision-language model (LFM3-VL-2B for now) and the d1-2B decision scorer behind llama-server."""
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    args: dict[str, Any]
 
 
 @dataclass
@@ -18,6 +26,7 @@ class Reply:
     write_tokens: int = 0
     thought: str = ""
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 NOT_A_THING = ("wall", "floor", "nothing")  # answers to "what object is this?" that mean there is none
@@ -45,7 +54,7 @@ def active_vision_action(prob: float) -> str:
 
 
 class Brain:
-    def __init__(self, url: str = "http://127.0.0.1:8080", timeout_s: float = 180.0,
+    def __init__(self, url: str = "http://127.0.0.1:8081", timeout_s: float = 180.0,
                  decision_url: str | None = None) -> None:
         self.http = httpx.Client(base_url=url, timeout=timeout_s, trust_env=False)
         self.decision_http = (
@@ -60,23 +69,66 @@ class Brain:
         except httpx.HTTPError:
             return False
 
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_tokens: int = 400,
+        temperature: float = 0.1,
+        think: int = 0,
+    ) -> Reply:
+        """One assistant turn with the model's native tool calling: spoken text, tool calls, or both.
+
+        llama-server renders `tools` with the model's own chat template and parses the calls it writes back into
+        OpenAI-style `tool_calls`, so the model acts in the format it was trained on. With `think` > 0 the model
+        reasons first, for at most that many tokens (llama-server closes the thought when the budget runs out).
+        """
+        payload: dict[str, Any] = {
+            "messages": messages,
+            "tools": tools,
+            "temperature": temperature,
+            "top_k": 50,
+            "max_tokens": max_tokens + max(0, think),
+            "cache_prompt": True,
+            "stream": False,
+            "chat_template_kwargs": {"enable_thinking": think > 0},
+        }
+        if think > 0:
+            payload["thinking_budget_tokens"] = think
+        r = self.http.post("/v1/chat/completions", json=payload)
+        r.raise_for_status()
+        data = r.json()
+        message = data["choices"][0]["message"]
+        calls = []
+        for i, tc in enumerate(message.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            raw_args = fn.get("arguments") or {}
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+            except json.JSONDecodeError:
+                args = {"_unparsed": raw_args}
+            calls.append(ToolCall(tc.get("id") or f"call_{i}", str(fn.get("name", "")), args if isinstance(args, dict)
+                                  else {"_unparsed": raw_args}))
+        t = data.get("timings") or {}
+        return Reply(
+            (message.get("content") or "").strip(),
+            t.get("prompt_ms", 0.0),
+            t.get("predicted_ms", 0.0),
+            t.get("prompt_n", 0),
+            t.get("predicted_n", 0),
+            thought=message.get("reasoning_content") or "",
+            raw=data,
+            tool_calls=calls,
+        )
+
     def complete(
         self,
         messages: list[dict[str, Any]],
         rules: str,
         max_tokens: int,
-        think: int = 0,
         temperature: float = 0.0,
-        presence_penalty: float = 0.0,
     ) -> Reply:
-        """One answer held to the grammar `rules`. With `think` > 0 the model first reasons in up to that many
-
-        characters, then answers under the grammar.
-        """
-        if think:
-            head = f'root ::= [^<]{{1,{think}}} "</think>" [ \\n]* answer\n'
-            rules = head + rules.replace("root ::=", "answer ::=", 1)
-            max_tokens += think // 3
+        """One answer held to the grammar `rules` (short yes/no, one-word and number answers)."""
         payload: dict[str, Any] = {
             "messages": messages,
             "grammar": rules,
@@ -84,11 +136,9 @@ class Brain:
             "max_tokens": max_tokens,
             "cache_prompt": True,
             "stream": False,
-            "chat_template_kwargs": {"enable_thinking": bool(think)},
+            "chat_template_kwargs": {"enable_thinking": False},
             "reasoning_format": "none",
         }
-        if presence_penalty != 0.0:
-            payload["presence_penalty"] = presence_penalty
         r = self.http.post("/v1/chat/completions", json=payload)
         r.raise_for_status()
         data = r.json()

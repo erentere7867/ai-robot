@@ -21,7 +21,11 @@ MODEL="$MODELS_DIR/llm/LFM3-VL-2B-QAD-Q4_0.gguf"
 MMPROJ="$MODELS_DIR/llm/mmproj-LFM3-VL-2B-F16.gguf"
 [ -f "$MMPROJ" ] || MMPROJ=/mnt/c/Users/FixAccount/Downloads/mmproj-LFM3-VL-2B-F16.gguf
 
-cd ~/llama.cpp || { echo "no ~/llama.cpp"; exit 1; }
+cd ~/llama.cpp 2>/dev/null || {
+  echo "no llama.cpp build in WSL (~/llama.cpp). On Windows start the model with:"
+  echo "  powershell -ExecutionPolicy Bypass -File tools\\brain.ps1"
+  exit 1
+}
 if [ -x build-cuda/bin/llama-server ]; then bin=build-cuda/bin/llama-server; gpu="-ngl 99 -fa on"; where=GPU
 else bin=build/bin/llama-server; gpu=""; where=CPU; fi
 

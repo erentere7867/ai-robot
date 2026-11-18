@@ -1,19 +1,21 @@
 # Sprocket v2 Architecture
 
-**Single Source of Truth Specification — Living Body + 3-CSI Pure Vision + Circulating Hybrid Memory + Closed-Loop Visual Mind**
+**Specification — Living Body + 3-CSI Pure Vision + Long-Term Memory + an Agentic Vision-Language Mind**
 
-Sprocket is an indoor, general-purpose wheeled robot on the **Arduino VENTUNO Q**. Instead of compiling a blind text table into a static one-shot Python script behind a 2D dry-run gate, Sprocket runs a **continuous multi-rate embodied AI loop**: a 30–50 Hz driverless-car body engine, 360° pure-vision senses (no spinning lidar), a two-tier circulating hybrid memory, and a fast (~0.8 s) closed-loop Vision-Language + Calibrated Decision Mind.
+Sprocket is an indoor, general-purpose wheeled robot on the **Arduino VENTUNO Q**. Its mind is an **agentic tool-calling loop** around an on-board vision-language model, built the way coding agents are: the model sees the cameras, calls tools in its own native format, reads every result, keeps a to-do list for several-part requests, and ends a task by replying in words. Under it sit a body that drives itself between calls, 360° pure-vision senses (no spinning lidar), and long-term memory.
+
+> **Status (18 November 2026).** Section 6 (the agent) describes the code as it is. Sections 3–5 describe the target design and are only partly built: the wake-word turn reflex and the voice-direction buffer exist but are not wired in; the body runs one skill at a time (a skill's own control loop drives, the model is not re-asked while it runs); d1-2B scoring is used only in `pursue` path choice, frontier ranking during `search`, and perception's crop checks; the long-term memory stack is still being decided.
 
 ---
 
 ## 1. Core Principles
 
 1. **Living, Non-Stop Motion:** The body never freezes into warehouse-cart stop-and-go steps. It rolls out smooth trajectory curves at 30–50 Hz, blends waypoints continuously, yields politely to approaching people, and expresses attention through posture and synthesized chimes.
-2. **Closed-Loop Visual Mind (See While Acting):** `LFM3-VL-2B` receives annotated camera images (Set-of-Mark object IDs + *PIVOT* projected 3D floor paths) alongside scene state and emits compact structured `Intent` updates every ~0.8 s or immediately upon semantic world events.
-3. **Unified Calibrated Scoring (`d1-2B`):** Every scoring decision—*PIVOT* trajectory visual scoring, *VLFM* search frontier ranking, and Active Vision uncertainty triggers—uses `d1-2B` single-token calibrated log-probabilities (~200 ms) rather than uncalibrated chat heuristics.
+2. **An Agentic Mind That Actually Sees:** the vision-language model (`LFM3-VL-2B` for now; not final) gets real camera pictures with tracker ids drawn on them, not only a text list of detections. It acts through native tool calls and reads each result before deciding the next step (Section 6).
+3. **Calibrated Scoring (`d1-2B`), where it helps:** single-token calibrated probabilities for path choice and frontier ranking inside skills, and for perception's yes/no crop checks.
 4. **Pure 360° Vision + Low-Cost Multi-Zone ToF:** Three wide-angle MIPI-CSI cameras calibrated by floor-plane trigonometry, IMU pitch/roll, and 8×8 `VL53L5CX` laser ToF anchors replace the expensive spinning 2D lidar while catching low obstacles (cables, shoes, pets) below a lidar plane.
 5. **Circulating Memory (Nothing Is Set in Stone):** Short-term working memory tracks active goals and recent visual frames in RAM; long-term memory decays by volatility half-life, updates movable habits via EMA, overwrites stale entries instantly when cameras see empty space, and recycles expired records.
-6. **Zero Dead Fallback Legacy:** No blind one-shot script gate, no fake 2D dry-run simulation before motion, and no ungrounded guessing.
+6. **The Model Decides, the Harness Informs:** no keyword or regex routing of instructions and no silent rewriting of the model's choices. "Stop" and "wait" are the only words handled without the model.
 
 ---
 
@@ -103,14 +105,16 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
 
 ---
 
-## 5. Layer 2: Two-Tier Circulating Hybrid Memory (`robot/mind/memory.py`)
+## 5. Layer 2: Memory (`robot/agent/agent.py`, `robot/mind/memory.py`)
 
-### 5.1 Short-Term Working Memory (In RAM)
-- **`TaskScratchpad`:** Tracks `goal`, `subgoal`, `visited_rooms`, `inspected_ids`, `checked_spots`, `blockers`, and `steps`. Prevents search loops and keeps subgoals coherent across steps.
-- **`VisualRingBuffer`:** Holds up to 16 recent keyframes across 15 seconds (`(timestamp, camera, pose, rgb, track_ids)`), enabling *"what did you just pass?"* lookbacks.
-- **`SpeakerLock` & Dialogue:** Active speaker `PersonProfile` ID, DOA angle, and recent conversation turns.
+### 5.1 Short-Term Memory
+- **The task's conversation:** everything the model saw, called and was told during the current task, with the newest four pictures kept.
+- **The to-do list:** the model's own steps for a several-part request, ticked off as it goes.
+- **Earlier tasks:** a one-line summary of each of the last four tasks, shown at the start of the next.
 
-### 5.2 Long-Term Circulating Memory (SQLite + Embedded Vector Index)
+### 5.2 Long-Term Memory (SQLite; the final stack is still being decided)
+Today the text "embeddings" are hashed words with a hand-written synonym table, not a learned model, and the agent reaches long-term memory only through `recall` and `remember`.
+
 SQLite stores structured spatial/state records alongside normalized float32 embedding BLOBs (text trigram/token + synonym canonicalization, `MobileCLIP2` visual vectors, `WeSpeaker` voiceprint vectors):
 - **Volatility Half-Lives (`HALF_LIFE`):**
   - `"blocker"` / `route_notes` (closed door, dropped chair, cable snag): **$1500\text{ s}$ (25 min)**.
@@ -123,16 +127,17 @@ SQLite stores structured spatial/state records alongside normalized float32 embe
 
 ---
 
-## 6. Layer 2: Closed-Loop Visual Mind (`robot/mind/brain.py`, `robot/agent/`)
+## 6. Layer 2: The Agent (`robot/agent/`, `robot/mind/brain.py`)
 
-1. **Instant Reflex Commands (`robot/agent/instant.py`):** `"stop"`, `"wait"`, and `"come back"` act immediately without waiting for any language model.
-2. **Closed-Loop `Intent` Planning (`robot/agent/planner.py`, `robot/agent/agent.py`):**
-   - At ~0.8 s cadence (or immediately when semantic world events fire: target moved, target lost, occlusion/blocker detected, new object matching goal spotted), `LocalPlanner` sends `LFM3-VL-2B` the **annotated Set-of-Mark + *PIVOT* camera frame**, the **scene summary** (with velocities, human pose/pointing, scratchpad, habit anchors, and semantic facts), and receives a compact grammar-constrained `Intent`:
-     - `say` (spoken update if appropriate), `chime` (`wake`/`listen`/`curious`/`happy`/`uh_oh`/`yield`), `posture`, `action` (`go_to`, `pursue`, `orbit`, `search_frontier`, `peek`, `step_closer`, `look_under`, `face`, `move`, `turn`, `spin`, `motion_sequence`, `ask`, `remember`, `done`, `refuse`), `target`, `params`, `subgoal`.
-   - The Body Controller starts executing immediately without blocking future visual re-evaluation.
-3. **Unified `d1-2B` Decision Scoring (`Brain.decide`, `score_paths`, `score_frontiers`):**
-   - `d1-2B` outputs calibrated probabilities $P \in [0, 1]$ in ~200 ms for:
-     - **Trajectory tie-breaking:** Scoring projected floor paths `(A)`, `(B)`, `(C)`.
-     - **VLFM Frontier Search:** Ranking unexplored doorways/views by likelihood of holding the search target.
-     - **Active Vision Gate:** $P > 0.80 \rightarrow$ confirm; $0.30 \le P \le 0.80 \rightarrow$ trigger `peek` / `step_closer`; $P < 0.30 \rightarrow$ reject.
-4. **Escalation & Honesty:** If the local planner fails twice on a step and an optional cloud/stronger escalation planner is configured, it gets one attempt; otherwise Sprocket plays `"uh_oh"`, states plainly why it cannot proceed, and asks the user for help without guessing.
+An agentic loop, as in coding agents, around the robot's vision-language model. The design and the reasons for it are in [docs/ideas/sprocket-harness.md](ideas/sprocket-harness.md).
+
+1. **One task is one running conversation** (`robot/agent/agent.py`). The first message holds what the robot senses — room, battery, the nearest tracked objects (id, what, how far, which way) and the front camera picture with ids drawn on — then the user's words. Each model turn may speak, call tools, or both; every tool result goes back to the model before its next turn.
+2. **Native tool calls** (`Brain.chat`). Tools are JSON function schemas; llama-server renders them with the model's own chat template (`LFM3-VL` uses the `qwen3_coder` XML style) and parses the calls back into OpenAI-style `tool_calls`. Several calls in one turn run in order; after a failure the rest are skipped and say so.
+3. **Tools** (`robot/agent/tools.py`): `say`, `go_to`, `go_to_side`, `stop_near`, `move`, `turn`, `drive`, `orbit`, `follow`, `face`, `keep_facing`, `search`, `look`, `wait`, `ask`, `remember`, `recall`, `todo`, `todo_done`. A different behaviour is a different tool, not an optional argument: the 2B model filled optional arguments on almost every call (`side="front"`, `stop_distance=2` for "come here"). Targets are an object id, `user`, a room or saved place, or a description. Every call is checked first: an unknown tool, a missing or out-of-range argument, or a target that matches nothing or several things returns an error saying what to do instead (`'box' could be any of: box 1 (0.8 m front-left); box 2 … Use the id, or ask the user which one`). Nothing is silently changed.
+4. **Seeing**: the front camera comes with each request (`--cameras all` sends all three). `look(direction)` brings the front, rear-left, rear-right, behind or all-around pictures into the next message; looking again without moving is answered with "you already have those pictures". `see_after_moves=True` also sends fresh pictures after every move (measured against look-only; see the idea doc). In the 2D simulator the cameras are drawn in perspective (`SimRobot.camera_view`); in Gazebo and on the robot they are the real frames (`RealRobot.camera_view`).
+5. **To-do list**: for a several-part request the model writes `todo([...])` and ticks steps off with `todo_done(n)`; the list is shown back with every update and on the live page.
+6. **Ending a task**: a reply with no tool call is spoken and ends the task. The first time the model tries to finish after acting, a stop hook shows it the request, what it did and any open to-do steps, and asks it to check; its next plain reply ends the task.
+7. **Loops**: the same call with the same arguments a third time in a row is not run; the model is told to do something different or finish. Updates during a task restate the request and what is done so far, and say they are not a new request.
+8. **Real time**: `stop` and `wait` act at once without the model. Anything else the user says while a task runs interrupts the current step and joins the conversation (`Agent.interject`), so the model can change course. Posture and chime come from events (listening at the start, uh-oh on a failure, happy on success), not from the model.
+9. **Between tasks** the next request carries the last one whole (its calls and results), older ones as one line each with their actions, and the robot keeps the place "where you were before".
+10. **Thinking**: before each turn the model may reason, capped per request (`thinking_budget_tokens`): `off`, `low` (128 tokens), `medium` (512, the default) or `high` (2048). Its reasoning stays with its tool calls within a task and shows on the live page as grey "thought:" lines.

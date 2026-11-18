@@ -23,6 +23,7 @@ pythonpath = ["."]
 [tool.ruff]
 target-version = "py311"
 line-length = 120
+per-file-target-version = { "robot/sim/habitat_server.py" = "py39" }  # runs in Habitat-Sim's Python 3.9
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "UP", "B"]

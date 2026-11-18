@@ -15,6 +15,7 @@ from collections import Counter, deque
 import numpy as np
 
 KIND = {"fridge": "kitchen", "refrigerator": "kitchen", "oven": "kitchen", "microwave": "kitchen", "sink": "kitchen",
+        "kitchen counter": "kitchen", "kitchen cupboard": "kitchen",
         "sofa": "living room", "couch": "living room", "tv": "living room", "bed": "bedroom", "toilet": "bathroom",
         "bathtub": "bathroom", "desk": "office", "laptop": "office", "printer": "office"}
 STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1))

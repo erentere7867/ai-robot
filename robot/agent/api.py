@@ -1,9 +1,9 @@
-"""The robot API: definitions of Pose, Object, Intent, Robot protocol and geometry helpers."""
+"""The robot API: Pose, Object, the Robot protocol, errors and geometry helpers."""
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 Point = tuple[float, float]
@@ -27,17 +27,6 @@ class Object:
     radius: float
     color: str
     last_seen: float  # seconds ago
-
-
-@dataclass
-class Intent:
-    say: str = ""
-    chime: str = ""
-    posture: str = "neutral"
-    action: str = "done"  # "go_to" | "pursue" | "orbit" | "search_frontier" | "peek" | "step_closer" | "look_under" | "face" | "move" | "turn" | "spin" | "motion_sequence" | "ask" | "remember" | "done" | "refuse"
-    target: Any = None
-    params: dict[str, Any] = field(default_factory=dict)
-    subgoal: str = ""
 
 
 class PathBlocked(Exception):

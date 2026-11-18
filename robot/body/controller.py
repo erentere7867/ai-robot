@@ -21,6 +21,12 @@ class CandidatePath:
     total_score: float = 0.0
 
 
+def _clear(a: tuple[float, float], b: tuple[float, float], occupied_fn: Callable[[float, float], bool]) -> bool:
+    """No occupied point on the straight line from a to b (checked every 5 cm)."""
+    n = max(1, int(math.dist(a, b) / 0.05))
+    return not any(occupied_fn(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n) for k in range(1, n + 1))
+
+
 def _wrap(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
 
@@ -35,6 +41,7 @@ class BodyController:
         self._snag_timer: float = 0.0
         self.labels: tuple[str, ...] = ("A", "B", "C", "D", "E", "F", "G")
         self.curvatures: tuple[float, ...] = (-1.5, -0.9, -0.4, 0.0, 0.4, 0.9, 1.5)
+        self._turning_to: tuple[float, float] | None = None  # the waypoint it is turning on the spot to face
 
     def social_yield_score(
         self,
@@ -185,7 +192,11 @@ class BodyController:
         if not waypoints or idx >= len(waypoints):
             return 0.0, 0.0, idx, True
 
-        while idx < len(waypoints) - 1 and math.dist(pose[:2], waypoints[idx]) <= blend_r:
+        # On to the next waypoint near this one, but cut the corner only when the straight line there is clear: in a
+        # furnished room the cut line can run into the corner of a cabinet the path went round.
+        while idx < len(waypoints) - 1 and (
+                math.dist(pose[:2], waypoints[idx]) <= 0.1
+                or math.dist(pose[:2], waypoints[idx]) <= blend_r and _clear(pose[:2], waypoints[idx + 1], occupied_fn)):
             idx += 1
 
         is_last = idx == len(waypoints) - 1
@@ -199,6 +210,14 @@ class BodyController:
         else:
             speed = v_cruise
 
+        err = _wrap(math.atan2(waypoints[idx][1] - pose[1], waypoints[idx][0] - pose[0]) - pose[2])
+        # A waypoint well off to the side or behind: turn on the spot to face it first, as a differential drive can
+        # (arcs need room a corner may not have), and keep turning until nearly facing it, not just under the limit.
+        if abs(err) > 0.8 or (self._turning_to == waypoints[idx] and abs(err) > 0.15):
+            self._turning_to = waypoints[idx]
+            return 0.0, max(-1.5, min(1.5, 2.5 * err)), idx, False
+        self._turning_to = None
+
         candidates = self.rollout_trajectories(
             pose, waypoints[idx], occupied_fn, people, v_max=speed, horizon_s=1.2, dt=0.1
         )
@@ -210,12 +229,10 @@ class BodyController:
             v = best.v
             w = best.w
         else:
-            target_yaw = math.atan2(waypoints[idx][1] - pose[1], waypoints[idx][0] - pose[0])
-            err = _wrap(target_yaw - pose[2])
             w = max(-1.5, min(1.5, 2.5 * err))
             v = 0.05 if abs(err) < 0.6 else 0.0
 
-        if not is_last and v < 0.1:
+        if not is_last and v < 0.1 and abs(err) < 0.6:
             v = 0.15
 
         return v, w, idx, False

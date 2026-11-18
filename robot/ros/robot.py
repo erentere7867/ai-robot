@@ -18,34 +18,10 @@ import numpy as np
 from robot.agent.api import Object, PathBlocked, Point, Pose, Preempted, choose, wrap, xy
 from robot.interfaces.voice import chime as synth_chime
 from robot.perception.camera import data_url
+from robot.perception.camera import resize_rgb as _resize_rgb
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
 DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
-
-
-def _resize_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
-    """Resize an image array to `(height, width, 3)` uint8 using vectorized bilinear interpolation."""
-    if width <= 0 or height <= 0:
-        return np.zeros((max(0, height), max(0, width), 3), dtype=np.uint8)
-    arr = np.asarray(rgb, dtype=np.uint8)
-    if arr.ndim == 2:
-        arr = np.repeat(arr[:, :, None], 3, axis=2)
-    h, w = arr.shape[:2]
-    if h == height and w == width and arr.shape[2] == 3:
-        return arr.copy()
-    arr_f = arr[:, :, :3].astype(np.float32)
-    y_coords = np.clip((np.arange(height, dtype=np.float32) + 0.5) * (h / height) - 0.5, 0.0, h - 1.0)
-    x_coords = np.clip((np.arange(width, dtype=np.float32) + 0.5) * (w / width) - 0.5, 0.0, w - 1.0)
-    y0 = np.floor(y_coords).astype(np.int32)
-    y1 = np.clip(y0 + 1, 0, h - 1)
-    x0 = np.floor(x_coords).astype(np.int32)
-    x1 = np.clip(x0 + 1, 0, w - 1)
-    fy = (y_coords - y0)[:, None, None]
-    fx = (x_coords - x0)[None, :, None]
-    top = (1.0 - fx) * arr_f[y0[:, None], x0[None, :]] + fx * arr_f[y0[:, None], x1[None, :]]
-    bottom = (1.0 - fx) * arr_f[y1[:, None], x0[None, :]] + fx * arr_f[y1[:, None], x1[None, :]]
-    res = (1.0 - fy) * top + fy * bottom
-    return np.clip(res + 0.5, 0, 255).astype(np.uint8)
 
 
 class RosRobot(SimRobot):
@@ -97,10 +73,10 @@ class RosRobot(SimRobot):
         threading.Thread(target=self._action_executor.spin, daemon=True).start()
         self._goal: Any = None
         self.t0 = None
-        deadline, next_nudge = time.monotonic() + 120.0, time.monotonic() + 10.0
+        deadline, next_nudge = time.monotonic() + 300.0, time.monotonic() + 10.0  # Gazebo can take minutes
         while not self._read_pose():
             if time.monotonic() > deadline:
-                raise RuntimeError("no map -> base_link transform after 120 s: is Nav2 running and localised?")
+                raise RuntimeError("no map -> base_link transform after 300 s: is Nav2 running and localised?")
             if nudge is not None and time.monotonic() > next_nudge:  # e.g. send the initial pose again
                 nudge()
                 next_nudge = time.monotonic() + 10.0
@@ -520,7 +496,7 @@ class RosRobot(SimRobot):
                     self.on_chime(wav)
             except ValueError:
                 pass
-        steps = max(1, round(float(seconds) / DT))
+        steps = round(float(seconds) / DT)  # 0: just the posture and the chime, no motion
         try:
             for s in range(steps):
                 v, w = self.body.aliveness_velocity(posture, s * DT, (self.x, self.y, self.yaw))

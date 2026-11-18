@@ -1,33 +1,42 @@
-"""Try Sprocket v2: a simulated room in real time behind the live page, with a box to command it.
+"""Try Sprocket: a simulated home in real time behind the live page, with a box to talk to it.
 
-    python -m robot.interfaces.demo                              # needs llama-server on port 8080
-    python -m robot.interfaces.demo --case O3                  # run a suite case with closed-loop Agent
-    python -m robot.interfaces.demo --brain http://127.0.0.1:8081
+    python -m robot.interfaces.demo                     # the 3D apartment; needs llama-server on 8081 and Habitat
+    python -m robot.interfaces.demo --scene "two rooms" # a fast 2D room instead
+    python -m robot.interfaces.demo --case O3           # watch one 2D suite case
+    python -m robot.interfaces.demo --cameras all       # send all three cameras with each request
 
-Then open http://localhost:8765. Type an instruction and press Enter; Stop halts the robot at once; the room picker
-swaps the room ("random room" builds a new one each time). A new instruction pre-empts the one running, and "stop",
-"wait" and "come back" act at once via the instant reflex layer without waiting for the planner model.
+Then open http://127.0.0.1:8765. Type an instruction and press Enter. While a task runs, whatever you type joins
+that task's conversation (the model can change course); "stop" and the Stop button halt the robot at once; the room
+picker swaps the room ("random room" builds a new one each time).
 """
 
 from __future__ import annotations
 
 import argparse
+import queue
 import random
-import re
 import threading
 import time
 from typing import Any
 
-from robot.agent.agent import Agent, _accepts_kwarg
+from robot.agent.agent import Agent
 from robot.agent.api import Preempted
-from robot.agent.context import synthesize_perception
 from robot.agent.instant import instant
-from robot.agent.planner import LocalPlanner
 from robot.interfaces.live import Live
 from robot.mind.brain import Brain
+from robot.perception.camera import encode_png
 from robot.sim.world import SimRobot
 
-SCENES = ("living room", "two rooms", "office", "random room")
+SCENES = ("3D apartment", "living room", "two rooms", "office", "random room")
+
+
+def make_robot(name: str) -> Any:
+    """The 3D apartment (Habitat, robot/sim/home3d.py) or one of the 2D rooms, running in real time."""
+    if name == "3D apartment":
+        from robot.sim.home3d import Home3D
+
+        return Home3D(realtime=True)
+    return SimRobot(make_scene(name), realtime=True)
 
 
 def make_scene(name: str) -> Any:
@@ -45,261 +54,95 @@ def make_scene(name: str) -> Any:
 
 
 class Holder:
-    """The room now on screen; swapped by the room picker."""
+    """The robot now on screen; swapped by the room picker."""
 
     def __init__(self, sim: Any) -> None:
         self.sim = sim
 
 
-def _refresh(live: Live, holder: Holder, stop_event: threading.Event | None = None) -> None:
-    """Keep the map moving between robot calls: one navigation step can last many seconds."""
-    tick = 0
+CAMERAS = ("front_camera", "rear_left_camera", "rear_right_camera")
+
+
+def show_cameras(live: Live, holder: Holder) -> None:
+    """Live feeds of the three cameras on the page (the model itself only gets snapshots)."""
+
+    def frame(name: str) -> bytes | None:
+        if holder.sim is None or name not in CAMERAS:
+            return None
+        return encode_png(holder.sim.camera_view(name))
+
+    live.camera = frame
+    live.update(cameras=list(CAMERAS))
+
+
+def refresh(live: Live, holder: Holder, stop_event: threading.Event | None = None) -> None:
+    """Keep the map moving while the robot drives: one step can last many seconds."""
     while stop_event is None or not stop_event.is_set():
-        sim = holder.sim
-        if sim is not None:
+        if holder.sim is not None:
             try:
-                live.show_world(sim, include_view=(tick % 5 == 0))
+                live.show_world(holder.sim)
             except (RuntimeError, AttributeError):  # world swapped mid-copy; take the next frame
                 pass
-        tick += 1
         time.sleep(0.2)
 
 
-class _ObservingPlanner:
-    """Forwards step planning to an underlying planner while streaming each Intent to Live."""
+def drive(live: Live, agent: Agent, holder: Holder, new_scene: Any = None, *,
+          stop_event: threading.Event | None = None) -> None:
+    """Act on what arrives in Live.inbox until `stop_event` is set."""
+    worker: threading.Thread | None = None
 
-    def __init__(self, inner: Any, live: Live) -> None:
-        self._inner = inner
-        self._live = live
-        self._intents: list[dict[str, Any]] = []
+    def busy() -> bool:
+        return worker is not None and worker.is_alive()
 
-    def reset(self) -> None:
-        self._intents.clear()
-
-    def pop_last_intent(self) -> None:
-        if self._intents:
-            self._intents.pop()
-            self._live.update(intents=list(self._intents))
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    def plan_step(
-        self,
-        context: str,
-        instruction: str,
-        image_url: str | None = None,
-        scratchpad: str = "",
-        earlier: tuple[str, ...] | list[str] = (),
-        completed_steps: tuple[str, ...] | list[str] = (),
-        **kwargs: Any,
-    ) -> Any:
-        synth = _build_cognitive_synthesis(
-            focus=(instruction or "").strip(),
-            awareness=_extract_awareness_from_context(context),
-            dialogue_turns=len(earlier),
-            blockers=_extract_blockers_from_scratchpad(str(scratchpad)),
-        )
-        self._live.update(status="planning", scratchpad=synth or str(scratchpad))
-        inner_kwargs: dict[str, Any] = {
-            "image_url": image_url,
-            "scratchpad": scratchpad,
-            "earlier": earlier,
-            **kwargs,
-        }
-        if _accepts_kwarg(self._inner.plan_step, "completed_steps"):
-            inner_kwargs["completed_steps"] = completed_steps
-        intent = self._inner.plan_step(context, instruction, **inner_kwargs)
-        self._intents.append({
-            "say": getattr(intent, "say", ""),
-            "chime": getattr(intent, "chime", ""),
-            "posture": getattr(intent, "posture", "neutral"),
-            "action": getattr(intent, "action", "done"),
-            "target": getattr(intent, "target", None),
-            "params": dict(getattr(intent, "params", {}) or {}),
-            "subgoal": getattr(intent, "subgoal", ""),
-        })
-        self._live.update(
-            status="running",
-            subgoal=getattr(intent, "subgoal", "") or getattr(intent, "action", ""),
-            action=getattr(intent, "action", ""),
-            posture=getattr(intent, "posture", "neutral"),
-            chime=getattr(intent, "chime", ""),
-            intents=list(self._intents),
-        )
-        return intent
-
-
-def _wrap_planner(planner: Any, live: Live) -> Any:
-    if isinstance(planner, _ObservingPlanner) or not hasattr(planner, "plan_step"):
-        return planner
-    return _ObservingPlanner(planner, live)
-
-
-def _build_cognitive_synthesis(
-    focus: str,
-    awareness: str,
-    dialogue_turns: int = 0,
-    blockers: list[str] | tuple[str, ...] = (),
-) -> str:
-    """Format a living-mind summary combining current focus, perception, dialogue, and blockers."""
-    parts: list[str] = []
-    if focus:
-        parts.append(f"focus: {focus}")
-    if awareness:
-        parts.append(f"aware of: {awareness}")
-    if dialogue_turns > 0:
-        unit = "turn" if dialogue_turns == 1 else "turns"
-        parts.append(f"dialogue memory: {dialogue_turns} recent {unit}")
-    clean_blockers = [
-        b.strip() for b in blockers if b and b.strip().lower() not in {"none", "[none]"}
-    ]
-    if clean_blockers:
-        parts.append(f"blockers: {'; '.join(clean_blockers[-3:])}")
-    return " | ".join(parts)
-
-
-def _extract_awareness_from_context(context: str) -> str:
-    m = re.search(r"(?m)^Surroundings:\s*(.+)$", context or "")
-    if m:
-        val = m.group(1).strip()
-        if val and val != "(nothing detected yet)":
-            return val
-    return ""
-
-
-def _extract_blockers_from_scratchpad(scratchpad: str) -> list[str]:
-    m = re.search(r"blockers:\s*\[?([^|\]]+)\]?", scratchpad or "", re.I)
-    if m:
-        val = m.group(1).strip()
-        if val and val.lower() not in {"none", "[none]"}:
-            return [val]
-    return []
-
-
-def _format_scratchpad(agent: Any, sim: Any = None) -> str:
-    st = getattr(agent, "short_term", None)
-    sp = getattr(st, "scratchpad", None)
-    focus = str(getattr(sp, "goal", "") or "").strip() if sp is not None else ""
-    blockers = list(getattr(sp, "blockers", ()) or ()) if sp is not None else []
-    dialogue_turns = len(getattr(st, "dialogue", ()) or ()) if st is not None else 0
-
-    awareness = ""
-    if sim is not None and hasattr(sim, "snapshot"):
+    def halt() -> None:
+        if busy():
+            agent.stop()
+            worker.join(5.0)
         try:
-            snap = sim.snapshot()
-            objs = list(snap.get("objects") or ())
-            if objs:
-                awareness = synthesize_perception(objs, snap.get("user"))
-        except Exception:  # noqa: BLE001 - live UI summary is best-effort
-            awareness = ""
-    if not awareness and sp is not None and getattr(sp, "visited_rooms", None):
-        awareness = f"rooms {', '.join(sorted(sp.visited_rooms))}"
+            holder.sim.stop()
+        except Preempted:
+            pass
 
-    synth = _build_cognitive_synthesis(focus, awareness, dialogue_turns, blockers)
-    if synth:
-        return synth
-    return str(getattr(sim, "scratchpad_summary", "") or "")
+    def do(text: str) -> None:
+        print(f"instruct  {text}", flush=True)
+        try:
+            record = agent.do(text, holder.sim)
+        except Exception as exc:  # noqa: BLE001 - the worker must never die silently while showing "running"
+            print(f"error     {text}: {exc}", flush=True)
+            live.update(status="failed", problems=[str(exc)])
+            return
+        live.show_world(holder.sim)
+        live.update(history=(live.state.history + [{"instruction": text, "outcome": record.outcome}])[-12:])
+        print(f"{record.outcome:<9} {text}", flush=True)
 
-
-def _apply_record_to_live(live: Live, record: Any, agent: Any = None, sim: Any = None) -> None:
-    intents = list(getattr(record, "intents", []) or [])
-    last = intents[-1] if intents else None
-    outcome = getattr(record, "outcome", "") or "done"
-    status = "stopped" if outcome == "preempted" else outcome
-    changes: dict[str, Any] = {
-        "status": status,
-        "intents": intents,
-        "problems": list(getattr(record, "problems", []) or []),
-        "scratchpad": _format_scratchpad(agent, sim),
-    }
-    if last is not None:
-        changes["subgoal"] = getattr(last, "subgoal", "") or getattr(last, "action", "")
-        changes["action"] = getattr(last, "action", "")
-        changes["posture"] = getattr(last, "posture", "neutral")
-        changes["chime"] = getattr(last, "chime", "")
-    if sim is not None:
-        live.show_world(sim)
-    live.update(**changes)
-
-
-def run_case(
-    live: Live,
-    case_id: str,
-    brain_url: str = "http://127.0.0.1:8080",
-    *,
-    planner: Any = None,
-    realtime: bool = True,
-    keep_alive: bool = False,
-) -> tuple[Any, SimRobot]:
-    """Run one suite case closed-loop via Agent on SimRobot and stream Sprocket v2 state to Live."""
-    from robot.eval.suite import CASES
-
-    case = next((c for c in CASES if c.id == case_id), None)
-    if case is None:
-        raise ValueError(f"Unknown suite case: {case_id!r}")
-
-    sim = SimRobot(case.scene(), realtime=realtime)
-    holder = Holder(sim)
-    live.update(
-        scene=case.id,
-        scenes=[case.id],
-        status="idle",
-        instruction=case.say,
-        subgoal="",
-        action="",
-        posture="neutral",
-        chime="",
-        intents=[],
-        scratchpad="",
-        problems=[],
-    )
-    live.show_world(sim)
-
-    if planner is None:
-        brain = Brain(brain_url)
-        if not brain.healthy():
-            msg = f"Brain server is not answering on {brain_url}; start llama-server first."
-            print(msg, flush=True)
-            live.update(
-                status="failed",
-                instruction=case.say,
-                subgoal="brain unavailable",
-                action="none",
-                posture="uh_oh",
-                chime="uh_oh",
-                intents=[],
-                scratchpad="",
-                problems=[msg],
-            )
-            return None, sim
-        planner = LocalPlanner(brain)
-
-    stop_refresh = threading.Event()
-    threading.Thread(
-        target=_refresh,
-        args=(live, holder, None if keep_alive else stop_refresh),
-        daemon=True,
-    ).start()
-    try:
-        agent = Agent(_wrap_planner(planner, live), live=live)
-        live.update(status="running", instruction=case.say)
-        record = agent.do(case.say, sim)
-        _apply_record_to_live(live, record, agent=agent, sim=sim)
-        passed = bool(case.check(sim))
-        print(f"{record.outcome}; passes its check: {passed}.", flush=True)
-        return record, sim
-    finally:
-        if not keep_alive:
-            stop_refresh.set()
+    while stop_event is None or not stop_event.is_set():
+        try:
+            kind, text = live.inbox.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if kind == "instruct" and text and getattr(holder.sim, "waiting", False) and instant(text) is None:
+            holder.sim.answers.put(text)  # the answer to the robot's own question
+        elif kind == "scene" and new_scene is not None and text in SCENES:
+            halt()
+            new_scene(text)
+        elif kind == "stop" or (kind == "instruct" and instant(text) == "stop"):
+            halt()
+            live.update(status="stopped", posture="neutral", chime="uh_oh")
+        elif kind == "instruct" and text and busy():
+            agent.interject(text)  # joins the running task's conversation
+        elif kind == "instruct" and text:
+            worker = threading.Thread(target=do, args=(text,), daemon=True)
+            worker.start()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case", help="run this suite case closed-loop with the planner")
-    parser.add_argument("--scene", choices=SCENES, default="living room")
+    parser.add_argument("--case", help="run this suite case and keep the page open")
+    parser.add_argument("--scene", choices=SCENES, default="3D apartment")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--brain", default="http://127.0.0.1:8080", help="llama-server URL")
+    parser.add_argument("--brain", default="http://127.0.0.1:8081", help="llama-server URL")
+    parser.add_argument("--cameras", choices=("front", "all"), default="front")
+    parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="medium", help="how long the model may reason before each turn")
     args = parser.parse_args()
 
     live = Live()
@@ -307,119 +150,36 @@ def main() -> None:
     from robot.interfaces.voice import attach
 
     attach(live)
-    print(f"Open http://localhost:{args.port}", flush=True)
+    print(f"Open http://127.0.0.1:{args.port}", flush=True)
+    brain = Brain(args.brain)
+    if not brain.healthy():
+        print(f"llama-server is not answering on {args.brain}; start it first (tools/wsl/brain.sh)", flush=True)
+    agent = Agent(brain, live=live, cameras=args.cameras, think=args.think)
+
     if args.case:
-        run_case(live, args.case, brain_url=args.brain, keep_alive=True)
-        print("Ctrl+C to quit.", flush=True)
+        from robot.eval.suite import CASES
+
+        case = next(c for c in CASES if c.id == args.case)
+        holder = Holder(SimRobot(case.scene(), realtime=True))
+        live.update(scene=case.id, scenes=[case.id])
+        show_cameras(live, holder)
+        threading.Thread(target=refresh, args=(live, holder), daemon=True).start()
+        record = agent.do(case.say, holder.sim)
+        print(f"{record.outcome}; passes its check: {bool(case.check(holder.sim))}. Ctrl+C to quit.", flush=True)
         while True:
             time.sleep(1)
 
-    holder = Holder(SimRobot(make_scene(args.scene), realtime=True))
+    holder = Holder(make_robot(args.scene))
     live.update(scene=args.scene, scenes=list(SCENES))
-    threading.Thread(target=_refresh, args=(live, holder), daemon=True).start()
-    planner = LocalPlanner(Brain(args.brain))
-    agent = Agent(_wrap_planner(planner, live), live=live)
-    if not planner.brain.healthy():
-        print(f"llama-server is not answering on {args.brain}; start it first", flush=True)
+    show_cameras(live, holder)
+    threading.Thread(target=refresh, args=(live, holder), daemon=True).start()
 
     def new_scene(name: str) -> None:
-        holder.sim = SimRobot(make_scene(name), realtime=True)
-        live.update(
-            scene=name,
-            status="idle",
-            instruction="",
-            subgoal="",
-            action="",
-            posture="neutral",
-            chime="",
-            intents=[],
-            scratchpad="",
-            problems=[],
-            view="",
-        )
+        holder.sim = make_robot(name)
+        agent.forget()  # a new room: earlier requests no longer apply
+        live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], seen=[])
 
     drive(live, agent, holder, new_scene)
-
-
-def drive(
-    live: Live,
-    agent: Any,
-    holder: Holder,
-    new_scene: Any = None,
-    *,
-    stop_event: threading.Event | None = None,
-) -> None:
-    """Act on commands from Live.inbox: a new instruction pre-empts the running one;
-    "stop", "wait", and "come back" act at once via Agent.do / instant reflex without waiting for the model."""
-    import queue
-
-    worker: threading.Thread | None = None
-
-    def busy() -> bool:
-        return worker is not None and worker.is_alive()
-
-    def interrupt() -> None:
-        if busy():
-            if holder.sim is not None and hasattr(holder.sim, "cancel"):
-                holder.sim.cancel()
-            worker.join(5.0)
-
-    def do(text: str) -> None:
-        print(f"instruct  {text}", flush=True)
-        cmd = instant(text)
-        is_come_back = cmd == "come back"
-        if holder.sim is not None and hasattr(holder.sim, "begin"):
-            holder.sim.begin()
-        reset_fn = getattr(agent.planner, "reset", None)
-        if callable(reset_fn):
-            reset_fn()
-        live.update(
-            status="running",
-            instruction=text,
-            subgoal="returning to user" if is_come_back else ("waiting" if cmd == "wait" else ""),
-            action="pursue" if is_come_back else ("stop" if cmd == "wait" else ""),
-            posture="listening" if cmd in ("come back", "wait") else "neutral",
-            chime="listen" if cmd in ("come back", "wait") else "",
-            intents=[],
-            scratchpad="",
-            problems=[],
-        )
-        try:
-            record = agent.do(text, holder.sim)
-        except Preempted:
-            live.update(status="stopped")
-            return
-        except Exception as exc:  # noqa: BLE001 - worker must never die silently while leaving status running
-            print(f"error     {text}: {exc}", flush=True)
-            live.update(status="failed", problems=[str(exc)])
-            return
-        _apply_record_to_live(live, record, agent=agent, sim=holder.sim)
-        history = live.state.history + [{"instruction": text, "outcome": record.outcome}]
-        live.update(history=history[-12:])
-        print(f"{record.outcome:<9} {text}", flush=True)
-
-    while stop_event is None or not stop_event.is_set():
-        try:
-            kind, text = live.inbox.get(timeout=0.1) if stop_event is not None else live.inbox.get()
-        except queue.Empty:
-            continue
-        if kind == "instruct" and text and getattr(holder.sim, "waiting", False) and instant(text) is None:
-            holder.sim.answers.put(text)
-        elif kind == "scene" and new_scene is not None and text in SCENES:
-            interrupt()
-            new_scene(text)
-        elif kind == "stop" or (kind == "instruct" and instant(text) == "stop"):
-            interrupt()
-            if holder.sim is not None and hasattr(holder.sim, "stop"):
-                try:
-                    holder.sim.stop()
-                except Preempted:
-                    pass
-            live.update(status="stopped", subgoal="stopped", action="stop", posture="neutral", chime="uh_oh")
-        elif kind == "instruct" and text:
-            interrupt()  # a new instruction pre-empts the running one
-            worker = threading.Thread(target=lambda t=text: do(t), daemon=True)
-            worker.start()
 
 
 if __name__ == "__main__":

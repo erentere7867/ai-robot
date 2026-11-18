@@ -1,6 +1,43 @@
-# Sprocket v2 — Portable 3D Gazebo & ROS 2 Simulation Guide
+# Sprocket v2 — 3D Simulation Guide
 
-This guide documents the full 3D Gazebo + ROS 2 `lyrical` simulation stack for Sprocket v2, the on-disk AI & 3D asset inventory, verification commands, and how to export/import the self-contained model bundle to a faster PC.
+There are two 3D simulators. Use the first for work on the agent; the second for the ROS integration.
+
+## 0. The 3D apartment (Habitat-Sim): the agent's 3D reasoning
+
+`robot/sim/home3d.py` puts a real-looking apartment (ReplicaCAD `apt_0`: 119 objects, 67 m² of drivable ground
+floor) behind the same robot API as the 2D world. The robot drives with the 2D world's kinematics and planner on the
+home's real floor (from Habitat's navmesh, for a 0.3 m tall robot that climbs 3 cm: no stairs); everything it sees is
+rendered: the three cameras at 0.22 m, and which objects are in view (at least 60 of a camera's 512×288 pixels in a
+semantic camera, however far away: size in the picture, not a distance cap, decides), so furniture hides what is
+behind, under or on top of it. Rooms are found on the floor map as the real robot would (split at doorways, named by
+their furniture; an open-plan room with a fridge and a sofa becomes a kitchen end and a living-room end).
+
+- **GPU in WSL:** WSL ships Direct3D 12 for Mesa, but Mesa renders on the CPU unless `GALLIUM_DRIVER=d3d12` is set.
+  With it, on an AMD RX 6600: 255 robot views per second (three 512×288 cameras), against 27 on the CPU.
+- **Habitat-Sim 0.3.3 is built only for Python 3.9**, so it runs in its own micromamba env
+  (`~/micromamba/envs/habitat`) as `robot/sim/habitat_server.py`; the robot code talks to it over a local socket.
+  Its EGL context is opened by device number (`gpu_device_id = -1`), not the CUDA lookup that fails on AMD cards.
+- **Setup once:** `wsl -- bash tools/wsl/setup_habitat.sh` (the GPU setting, micromamba, the env, the free scenes).
+- **Run:** `python -m robot.eval.home3d` (27 tasks with automatic checks, worked out from whichever layout they run
+  in: `apt_0` and `v3_sc0_staging_00` by default, `--scenes` for any of ReplicaCAD's 91), or the demo, which starts
+  in it. This is the test that counts now; the 2D suite stays only as a quick smoke test.
+
+What it showed first: from 0.22 m the cameras never see the surface of an 86 cm kitchen counter, or a sofa's seat
+from its side. From a few metres back they do see the taller things on a counter (a kettle, a bowl), but nothing flat
+on it, and the closer the robot gets the less it sees. "What is on the table?" needs a taller camera mast or a camera
+that tilts up.
+
+Real homes also found a body bug the 2D rooms never did: the path follower (`robot/body/controller.py`) drove only
+forward arcs, so after a search left the robot in a corner beside the TV stand, facing the wall, every route out
+stalled at its first waypoint. It now turns on the spot to face a waypoint more than 45° off before driving (and
+keeps turning until nearly facing it, or it wobbles between turning and arcing away). It also cut corners: it switched
+to the next waypoint 28 cm early even when the straight line ran into a cabinet's corner, where the collision monitor
+held it. It cuts a corner only when that line is clear. Driving to every object in `apt_0` and `v3_sc0_staging_00` in
+turn, without the model, now reaches 140 of 142 (one stall, one with no path).
+
+## 0.1 Gazebo + ROS 2 + Nav2: the ROS integration
+
+This part documents the full 3D Gazebo + ROS 2 `lyrical` simulation stack for Sprocket v2, the on-disk AI & 3D asset inventory, verification commands, and how to export/import the self-contained model bundle to a faster PC. In WSL, Gazebo also needs `GALLIUM_DRIVER=d3d12` to render on the GPU (`tools/wsl/run3d.sh` sets it); on the CPU it takes minutes to come up.
 
 ## 1. Architecture Overview
 

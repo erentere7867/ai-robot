@@ -1,11 +1,11 @@
-"""Run the full Sprocket v2 stack in 3D Gazebo: Nav2, 3-CSI + ToF synthetic /scan, YOLOE-26, and Intent agent.
+"""Run the full Sprocket stack in 3D Gazebo: Nav2, 3-CSI + ToF synthetic /scan, YOLOE-26, and the agent.
 
     python -m robot.ros.run3d --perception             # how well the robot sees the room: tracked vs real objects
-    python -m robot.ros.run3d --cases O1 O3 S1 --brain http://127.0.0.1:8081  # closed-loop Intent agent, judged
+    python -m robot.ros.run3d --cases O1 O3 S1 --brain http://127.0.0.1:8081  # the agent on suite cases, judged
     python -m robot.ros.run3d --interactive --gui --brain http://127.0.0.1:8081  # Gazebo and the live page
 
-All of them serve the live page on --port (8765): the map with synthetic /scan, the 3-CSI cameras with Set-of-Mark
-& *PIVOT* overlays, and the closed-loop Intent agent state.
+All of them serve the live page on --port (8765): the map with synthetic /scan, the three cameras with ids marked,
+and the agent's to-do list and tool calls.
 
 Run inside WSL with ROS sourced and the YOLOE environment active, from ~/sprocket-models (where the weights are).
 """
@@ -247,8 +247,8 @@ def scan_points(robot, every: int = 3) -> list[tuple[float, float]]:  # noqa: AN
 
 
 def page(holder, port: int):  # noqa: ANN001, ANN201
-    """Live UI server for `holder.sim`: 2D map with synthetic /scan, 3-CSI Set-of-Mark camera feeds,
-    Sprocket v2 Intent agent state, and an instruction box (commands arrive in Live.inbox)."""
+    """Live page for `holder.sim`: 2D map with synthetic /scan, the three camera feeds with ids marked, the agent's
+    steps, and an instruction box (commands arrive in Live.inbox)."""
     import threading
 
     from robot.agent.api import Preempted
@@ -310,79 +310,42 @@ def page(holder, port: int):  # noqa: ANN001, ANN201
     return live
 
 
-def planner_for(brain_url: str, think: int = 0, decision_url: str | None = None):  # noqa: ANN201
-    """The on-board LocalPlanner talking to the llama-server at `brain_url`."""
-    from robot.agent.planner import LocalPlanner
+def agent_for(robot, brain_url: str, live=None, think: str = "medium", decision_url: str | None = None):  # noqa: ANN001, ANN201
+    """The agent on the robot, talking to the llama-server at `brain_url`."""
+    from robot.agent.agent import Agent
     from robot.mind.brain import Brain
 
     brain = Brain(brain_url, decision_url=decision_url)
-    planner = LocalPlanner(brain, think=think)
     if not brain.healthy():
         print(f"no model answering at {brain_url}: start llama-server there first", flush=True)
-    return planner
+    return Agent(brain, memory=getattr(robot, "store", None), live=live, think=think)
 
 
-def interactive(robot, room: str, brain_url: str, port: int, think: int = 0,  # noqa: ANN001
+def interactive(robot, room: str, brain_url: str, port: int, think: str = "medium",  # noqa: ANN001
                 decision_url: str | None = None) -> None:
-    """Type an instruction on the live page and watch Gazebo + Live as the Intent agent runs."""
-    from robot.agent.agent import Agent
-    from robot.interfaces.demo import Holder, _wrap_planner, drive
+    """Type an instruction on the live page and watch Gazebo and the page as the agent works."""
+    from robot.interfaces.demo import Holder, drive
 
     holder = Holder(robot)
     live = page(holder, port)
-    live.update(
-        scene=room,
-        scenes=[room],
-        status="idle",
-        subgoal="",
-        action="",
-        posture="neutral",
-        chime="",
-        intents=[],
-        said=[],
-        problems=[],
-    )
-    planner = planner_for(brain_url, think=think, decision_url=decision_url)
-    agent = Agent(
-        _wrap_planner(planner, live),
-        memory=getattr(robot, "store", None),
-        brain=getattr(robot, "brain", None),
-        live=live,
-    )
+    live.update(scene=room, scenes=[room], status="idle", steps=[], todo="", said=[], problems=[])
+    agent = agent_for(robot, brain_url, live, think=think, decision_url=decision_url)
     print("type an instruction on the page. Ctrl+C to quit.", flush=True)
     drive(live, agent, holder)
 
 
-def _intent_summary(intents: list) -> list[dict[str, object]]:
-    return [
-        {
-            "say": getattr(i, "say", ""),
-            "chime": getattr(i, "chime", ""),
-            "posture": getattr(i, "posture", "neutral"),
-            "action": getattr(i, "action", ""),
-            "target": getattr(i, "target", None),
-            "subgoal": getattr(i, "subgoal", ""),
-        }
-        for i in intents
-    ]
-
-
 def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, port: int,
-              own_map: bool = False, think: int = 0, mono_depth: bool = False,
+              own_map: bool = False, think: str = "medium", mono_depth: bool = False,
               decision_url: str | None = None) -> None:
-    """Closed-loop suite cases on the full 3D ROS stack: look for `look` s, run `Agent(LocalPlanner(...))`
-    against `CASES`, stream Sprocket v2 state to Live, and judge against the scene truth."""
-    from robot.agent.agent import Agent
+    """Suite cases on the full 3D stack: look for `look` s, run the agent, judge against the scene truth."""
     from robot.eval.suite import CASES
-    from robot.interfaces.demo import Holder, _wrap_planner
+    from robot.interfaces.demo import Holder
     from robot.ros.fuel import furnish
     from robot.ros.real import judge
 
     holder = Holder(None)
     live = page(holder, port)
     url = brain_url or "http://127.0.0.1:8081"
-    planner = planner_for(url, think=think, decision_url=decision_url)
-    wrapped = _wrap_planner(planner, live)
     passed = 0
     cases = [c for c in CASES if c.id in ids]
     for case in cases:
@@ -395,50 +358,18 @@ def run_cases(ids: list[str], gui: bool, brain_url: str | None, look: float, por
                                       map_file=mapped if own_map and mapped.exists() else None,
                                       mono_depth=mono_depth, decision_url=decision_url)
             holder.sim = robot
-            live.update(
-                scene=case.id,
-                scenes=[case.id],
-                status="idle",
-                instruction=case.say,
-                subgoal="",
-                action="",
-                posture="neutral",
-                chime="",
-                intents=[],
-                said=[],
-                problems=[],
-            )
+            live.update(scene=case.id, scenes=[case.id], status="idle", instruction=case.say, steps=[], todo="",
+                        said=[], problems=[])
             time.sleep(look)
             robot._perceive_objects()
-            if hasattr(wrapped, "reset"):
-                wrapped.reset()
-            agent = Agent(wrapped, memory=getattr(robot, "store", None), brain=getattr(robot, "brain", None), live=live)
+            agent = agent_for(robot, url, live, think=think, decision_url=decision_url)
             begun = time.monotonic()
             record = agent.do(case.say, robot)
-            said = [t for _, t in robot.trace.said[-6:]]
-            last = record.intents[-1] if record.intents else None
-            live.update(
-                status="stopped" if record.outcome == "preempted" else (record.outcome or "done"),
-                subgoal=(last.subgoal or last.action) if last else "",
-                action=last.action if last else "",
-                posture=last.posture if last else getattr(robot, "posture", "neutral"),
-                chime=last.chime if last else "",
-                intents=_intent_summary(record.intents),
-                said=said,
-                problems=list(record.problems),
-            )
             checked = bool(case.check(judge(robot, truth)))
-            ok = record.outcome in ("done", "preempted", "refused") and checked
-            outcome = (
-                "passed" if ok else
-                f"outcome={record.outcome}, check failed ({sum(record.plan_s):.1f}s plan)" if not record.problems else
-                f"{record.outcome}: {record.problems[-1][:60]}"
-            )
+            ok = record.outcome in ("done", "preempted") and checked
+            outcome = "passed" if ok else f"{record.outcome}, check {'passed' if checked else 'failed'}"
             if not ok:
-                steps_txt = " -> ".join(f"{i.action}({i.target})" for i in record.intents) or "(none)"
-                print(f"  intents ({len(record.intents)}, {sum(record.plan_s):.1f}s): {steps_txt}")
-                if record.problems:
-                    print(f"  problems: {record.problems}")
+                print("  steps:\n    " + "\n    ".join(record.lines() or ["(none)"]))
                 print("  the robot knew: " + ", ".join(sorted(f"{t.color} {t.label} {t.id} at ({t.x:.1f}, {t.y:.1f})"
                                                              for t in robot.things.values())))
                 print("  really there:   " + ", ".join(sorted(f"{t.color} {t.label} at ({t.x:.1f}, {t.y:.1f})"
@@ -480,7 +411,7 @@ def main() -> None:
     parser.add_argument("--interactive", action="store_true", help="the instruction page on --port")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--cases", nargs="+", help="suite cases to run on the full stack")
-    parser.add_argument("--think", type=int, default=0, help="thinking token budget for LocalPlanner")
+    parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="medium", help="how long the model may reason before each turn")
     parser.add_argument("--brain", default="", help="llama-server URL, e.g. http://127.0.0.1:8081: names new objects, "
                                                     "answers vision questions, and plans")
     parser.add_argument("--decision-brain", default="",

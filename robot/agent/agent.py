@@ -1,942 +1,422 @@
-"""The closed-loop multimodal agent: Sense-Think-Act loop with instant reflex, local Intent planning,
+"""The agent: an agentic tool-calling loop, as in coding agents, around the robot's vision-language model.
 
-active vision, and escalation.
+One task is one running conversation. The model sees the cameras and the object list, calls tools in its native
+format, and reads every result before it decides the next step. Pictures come back after anything that moves the
+robot or after it asks to look. A reply with no tool call is spoken and ends the task. The user can speak while a
+step runs: the step is interrupted and the words join the conversation, so the model can change course.
 """
 
 from __future__ import annotations
 
-import inspect
 import json
 import math
-import re
+import queue
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from robot.agent.api import (
-    Intent,
-    NotFound,
-    PathBlocked,
-    Preempted,
-    SafetyStop,
-    TargetLost,
-    Timeout,
-)
-from robot.agent.context import describe
-from robot.agent.instant import COME_BACK_INTENT, instant
-from robot.agent.planner import LocalPlanner
-from robot.mind.memory import ShortTermMemory, TaskScratchpad
+from robot.agent.api import Preempted, SafetyStop, side, wrap
+from robot.agent.instant import instant
+from robot.agent.tools import CAMERA_NAMES, Tools, speakable
 from robot.perception.camera import data_url
-from robot.perception.overlay import draw_set_of_mark
 
-MAX_STEPS = 12
-EARLIER = 4
+MAX_TURNS = 16  # model replies per task
+MAX_OBJECTS = 15  # nearest objects listed in full in an observation
+MAX_FARTHER = 40  # more after them, by id and name only
+MAX_IMAGES = 4  # pictures kept in the conversation; older ones are replaced by a note
+KEEP_THOUGHTS = 2  # the newest turns whose reasoning stays in the conversation
+IMAGE_WIDTH = 768  # pixels across each picture; at 512 the 2B model misjudged colours of small things (a red bike)
+THINK = {"off": 0, "low": 128, "medium": 512, "high": 2048}  # most tokens of reasoning before each turn
+EARLIER = 4  # earlier tasks summarised at the start of a new one
+REPEATS = 2  # the same call (same arguments) this many times in a row runs; the next is refused with a note
 
-PLAINLY = (
-    ("nothing matched", "I couldn't find what you meant"),
-    ("NotFound", "I couldn't find what you meant"),
-    ("list index out of range", "I couldn't find what you meant"),
-    ("unicorn", "I couldn't find what you meant"),
-    ("which way", "I wasn't sure which way to go"),
-    ("PathBlocked", "I couldn't find a way there"),
-    ("could not finish", "I couldn't find a way there"),
-    ("TimeLimit", "it was taking too long"),
-    ("format:", "I couldn't work out how to do it"),
-)
+SYSTEM = """You are Sprocket, a small wheeled robot who lives with people, like a friendly pet that can also help.
+You have three cameras (front, rear-left, rear-right) and act only by calling tools. You drive on flat floors only:
+you cannot climb stairs or steps, fly, or pick things up.
 
-_OBJECT_TARGET_ACTIONS = frozenset({"go_to", "pursue", "orbit", "peek", "look_under", "face", "step_closer"})
-_DONE_ACTIONS = frozenset({"done", "none", "say", "answer", "greet", "chat", "respond", "reply", "speak", ""})
-_IDEMPOTENT_ACTIONS = frozenset({"go_to", "face", "pursue", "orbit", "peek", "look_under", "remember"})
-_SINGLE_STEP_PHYSICAL_ACTIONS = frozenset({"go_to", "move", "turn", "spin", "orbit", "face"})
-_MULTI_STEP_RE = re.compile(
-    r"\b(?:then|after|and|each|every|square|figure|patrol|between|back\s+to|tell|ask|"
-    r"report|check|count|how\s+many|what|where|which|look|find|search|visit|if|otherwise|"
-    r"until|while|facing|whole)\b",
-    re.IGNORECASE,
-)
-_NULL_TARGET_STRINGS = frozenset({"", "none", "null", "n/a", "na", "nothing", "self"})
-_USER_ALIASES = frozenset({"user", "me", "you", "the user", "person(user)", "human", "speaker"})
-_DIRECTION_WORDS = frozenset({"forward", "backward", "back", "ahead", "straight", "left", "right"})
-_TARGET_SYNONYMS: dict[str, tuple[str, ...]] = {
-    "table": ("table", "desk"),
-    "coffee table": ("coffee table", "table", "desk"),
-    "counter": ("counter", "desk", "table"),
-    "couch": ("couch", "sofa", "chair"),
-    "seat": ("seat", "chair", "sofa"),
-}
+How you work:
+- The pictures are what you see right now. The numbers drawn on them are object ids, the same as in the object list.
+- Use ids from the object list as targets whenever you can. Left and right are your own.
+- Call one or more tools in a turn. You get each result back, then decide what to do next.
+- For a request with several parts, first write a to-do list with todo, then tick each step off with todo_done.
+- If a tool fails, read why and try another way, or ask the user.
+- To answer a question about what you see, look at the pictures (call look for other directions) and answer.
+- If something the user mentions is not in the object list or the pictures, it may be elsewhere: search for it
+  before you say it is not there. To see what is on, in or next to something, go to it first, then look.
+- When the request is done, reply with one or two short spoken sentences and no tool call. That reply ends the task.
+- If a request is impossible or unsafe for you, say so kindly instead.
+- Speak warmly and briefly, like a friend."""
 
 
-def _is_local_planner(planner: Any) -> bool:
-    """Return True if `planner` or its `_inner` wrapper chain is a LocalPlanner."""
-    seen: set[int] = set()
-    cur = planner
-    while cur is not None and id(cur) not in seen:
-        if isinstance(cur, LocalPlanner):
-            return True
-        seen.add(id(cur))
-        cur = getattr(cur, "_inner", None)
-    return False
+@dataclass
+class Step:
+    """One model turn: what it said aloud, the calls it made and what each returned."""
 
-
-def _is_simple_single_step(instruction: str) -> bool:
-    """Return True when the instruction does not contain multi-step, conditional, or query indicators."""
-    return bool(instruction.strip()) and _MULTI_STEP_RE.search(instruction) is None
-
-
-def _said_fields(robot: Any, fallback: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
-    """Build Live speech fields synced with `robot.trace.said` when available."""
-    trace = getattr(robot, "trace", None)
-    if trace is not None and hasattr(trace, "said"):
-        return {
-            "said": [text for _, text in trace.said][-6:],
-            "said_total": len(trace.said),
-        }
-    return {"said": list(fallback[-6:])}
-
-
-def _accepts_kwarg(fn: Any, name: str) -> bool:
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return False
-    return name in sig.parameters or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
-
-
-def _num_param(params: dict[str, Any], keys: tuple[str, ...], default: float) -> float:
-    for k in keys:
-        val = params.get(k)
-        if val is not None:
-            return float(val)
-    return default
-
-
-def _canonical_step_sig(
-    action: str, target_key: str, params: dict[str, Any]
-) -> tuple[str, str, tuple[tuple[str, str], ...]]:
-    return (
-        action,
-        target_key,
-        tuple(sorted((str(k), repr(v)) for k, v in params.items())),
-    )
-
-
-def plainly(problems: list[str]) -> str:
-    """The last problem, expressed in user-friendly words."""
-    last = problems[-1] if problems else ""
-    return next(
-        (words for key, words in PLAINLY if key.lower() in last.lower()),
-        "I couldn't find what you meant",
-    )
-
-
-def _pose_tuple(pose: Any) -> tuple[float, float, float]:
-    if pose is None:
-        return (0.0, 0.0, 0.0)
-    if hasattr(pose, "x"):
-        return (float(pose.x), float(pose.y), float(getattr(pose, "yaw", 0.0)))
-    if isinstance(pose, (tuple, list)):
-        if len(pose) >= 3:
-            return (float(pose[0]), float(pose[1]), float(pose[2]))
-        if len(pose) == 2:
-            return (float(pose[0]), float(pose[1]), 0.0)
-    return (0.0, 0.0, 0.0)
+    said: str
+    calls: list[tuple[str, dict[str, Any], str, bool]] = field(default_factory=list)
+    model_s: float = 0.0
+    tokens: int = 0
+    thought: str = ""  # what the model reasoned before acting (thinking on)
 
 
 @dataclass
 class TaskRecord:
     instruction: str
-    outcome: str = ""  # done, preempted, failed, or refused
-    intents: list[Intent] = field(default_factory=list)
+    outcome: str = ""  # done, preempted or failed
+    steps: list[Step] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
-    plan_s: list[float] = field(default_factory=list)
-    tokens: list[int] = field(default_factory=list)
 
     @property
-    def repairs(self) -> int:
-        return max(0, len(self.intents) - 1)
+    def model_s(self) -> float:
+        return sum(s.model_s for s in self.steps)
+
+    def lines(self, thoughts: bool = False) -> list[str]:
+        """Each call and its result, and each plain reply; with `thoughts`, the start of each turn's reasoning."""
+        out = []
+        for s in self.steps:
+            if thoughts and s.thought:
+                out.append(f"thought: {' '.join(s.thought.split())[:220]}")
+            for name, args, result, ok in s.calls:
+                arg_text = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                out.append(f"{name}({arg_text}) -> {result.splitlines()[0][:120] if result else ''}"
+                           + ("" if ok else "  [failed]"))
+            if s.said and not s.calls:
+                out.append(f'reply: "{s.said}"')
+        return out
+
+
+def _image_part(url: str) -> dict[str, Any]:
+    return {"type": "image_url", "image_url": {"url": url}}
 
 
 class Agent:
-    """Executes closed-loop Sense-Think-Act cycle with LFM3-VL-2B Intent planner and d1-2B decision scorer."""
+    def __init__(self, brain: Any, *, memory: Any = None, live: Any = None, cameras: str = "front",
+                 see_after_moves: bool = False, max_turns: int = MAX_TURNS, think: str = "medium",
+                 image_width: int = IMAGE_WIDTH) -> None:
+        """`cameras`: the pictures sent with each request, "front" or "all" three; the model asks for others with
+        look. `see_after_moves`: also send fresh pictures after every move, not only when the model looks.
+        `think`: how long the model may reason before each turn: off, low, medium or high (see THINK).
+        `image_width`: pixels across each picture the model gets (16:9)."""
+        self.brain, self.memory, self.live = brain, memory, live
+        self.cameras = ("front_camera", "rear_left_camera", "rear_right_camera") if cameras == "all" else \
+            ("front_camera",)
+        self.see_after_moves = see_after_moves
+        self.max_turns, self.think, self.image_width = max_turns, THINK[think], image_width
+        self.earlier: list[str] = []  # one line per task before the last one
+        self.last_task: list[dict[str, Any]] = []  # the whole conversation of the last task
+        self._heard: queue.Queue[str] = queue.Queue()
+        self._acting = threading.Event()
+        self._robot: Any = None
+        self._stopped = threading.Event()
+        self._seen_id = 0
+        self._messages: list[dict[str, Any]] | None = None  # the conversation of the task running now
+        self._task_start = 0
 
-    def __init__(
-        self,
-        planner: LocalPlanner | Any,
-        *,
-        escalate: Any = None,
-        memory: Any = None,
-        brain: Any = None,
-        live: Any = None,
-    ) -> None:
-        self.planner = planner
-        self.escalate = escalate
-        self.memory = memory
-        self.brain = brain
-        self.live = live
-        self.earlier: list[str] = []
-        self.short_term: ShortTermMemory = (
-            memory.short_term
-            if memory is not None and hasattr(memory, "short_term")
-            else ShortTermMemory()
-        )
+    # ---- from other threads (the live page, the microphone) ------------------------------------------------------
+    def interject(self, text: str) -> None:
+        """The user spoke while a task runs: interrupt the current step and give the words to the model."""
+        self._heard.put(text)
+        if self._acting.is_set() and self._robot is not None:
+            self._robot.cancel()
 
-    def _remember(self, instruction: str, what: str, said: str = "") -> None:
-        reply = " ".join(said.split())[:100]
-        detail = what
-        if reply:
-            m = re.match(r"^(.*?)\s+(\((?:done|failed|preempted|refused)\))$", what)
-            if m:
-                detail = f'{m.group(1)[:140]}; said "{reply}" {m.group(2)}'
-            else:
-                detail = f'{what[:140]}; said "{reply}"'
-        self.earlier = [*self.earlier, f'"{instruction}": {detail[:240]}'][-EARLIER:]
-        self.short_term.add_turn(instruction, detail)
+    def stop(self) -> None:
+        """End the task now."""
+        self._stopped.set()
+        if self._robot is not None:
+            self._robot.cancel()
 
-    def _push_live(self, **fields: Any) -> None:
-        if self.live is not None and hasattr(self.live, "update"):
-            try:
-                self.live.update(**fields)
-            except Exception:
-                pass
-
-    def _finish(
-        self,
-        record: TaskRecord,
-        outcome: str,
-        summary: str,
-        *,
-        task_said: str | None = None,
-        **live_fields: Any,
-    ) -> TaskRecord:
-        record.outcome = outcome
-        spoken = task_said
-        if spoken is None:
-            said_items = [str(s).strip() for s in (live_fields.get("said") or ()) if str(s).strip()]
-            spoken = said_items[-1] if said_items else ""
-        self._remember(record.instruction, f"{summary} ({outcome})", said=spoken)
-        status = "stopped" if outcome == "preempted" else outcome
-        self._push_live(
-            status=status,
-            instruction=record.instruction,
-            problems=list(record.problems),
-            **live_fields,
-        )
-        return record
-
-    def _summarize_action(self, robot: Any, target: Any = None) -> str:
-        if hasattr(robot, "snapshot"):
-            snap = robot.snapshot()
-            pose = snap.get("pose")
-            if pose is not None:
-                import math
-
-                for o in snap.get("objects", []):
-                    if math.dist((pose.x, pose.y), o.position) <= o.radius + 0.6:
-                        return f"drove to the {o.label} {o.id}"
-        if target is not None:
-            return f"addressed {target}"
-        return "done"
-
-    def _handle_instant(self, cmd: str, robot: Any, record: TaskRecord, speak: bool = True) -> TaskRecord:
-        if cmd == "stop":
-            robot.stop()
-            if hasattr(robot, "express"):
-                robot.express("neutral", chime_kind="uh_oh", seconds=0.2)
-            return self._finish(
-                record, "preempted", "stopped",
-                task_said="",
-                action="stop", subgoal="stop", posture="neutral", chime="uh_oh",
-                **_said_fields(robot),
-            )
-        if cmd == "wait":
-            robot.stop()
-            if hasattr(robot, "express"):
-                robot.express("listening", chime_kind="listen", seconds=0.2)
-            return self._finish(
-                record, "done", "waited",
-                task_said="",
-                action="wait", subgoal="wait", posture="listening", chime="listen",
-                **_said_fields(robot),
-            )
-        # cmd == "come back"
-        user = None
-        if hasattr(robot, "user"):
-            try:
-                user = robot.user()
-            except Exception:
-                user = None
-        spoken_now = ""
-        if speak and COME_BACK_INTENT.say and hasattr(robot, "say"):
-            try:
-                robot.say(COME_BACK_INTENT.say)
-                spoken_now = COME_BACK_INTENT.say
-            except Exception:
-                pass
-        if hasattr(robot, "express"):
-            robot.express("listening", chime_kind="listen", seconds=0.3)
-        fallback_said = [spoken_now] if spoken_now else ([COME_BACK_INTENT.say] if speak else [])
-        try:
-            if user is not None:
-                if hasattr(robot, "pursue"):
-                    robot.pursue(user, distance=1.0)
-                elif hasattr(robot, "go_to"):
-                    robot.go_to(user, distance=1.0)
-            elif hasattr(robot, "go_to"):
-                robot.go_to("start")
-        except (PathBlocked, NotFound, TargetLost, Timeout) as exc:
-            record.problems.append(f"{type(exc).__name__}: {exc}")
-            return self._finish(
-                record, "failed", f"could not come back: {exc}",
-                task_said=spoken_now,
-                action="pursue", subgoal="come back", posture="uh_oh", chime="uh_oh",
-                **_said_fields(robot, fallback_said),
-            )
-        return self._finish(
-            record, "done", "came back to user",
-            task_said=spoken_now,
-            action="pursue", subgoal="come back", posture="listening", chime="listen",
-            **_said_fields(robot, fallback_said),
-        )
-
-    def _observe(
-        self, robot: Any, scratchpad: TaskScratchpad
-    ) -> tuple[str, str | None, str | None]:
-        snapshot = robot.snapshot() if hasattr(robot, "snapshot") else {}
-        room = str(snapshot.get("room", "") or "")
-        pose = snapshot.get("pose")
-        if pose is None and hasattr(robot, "pose"):
-            try:
-                pose = robot.pose()
-            except Exception:
-                pose = None
-        if pose is not None:
-            px, py, pyaw = _pose_tuple(pose)
-            scratchpad.mark_visited(room, (px, py))
+    # ---- what the model sees -----------------------------------------------------------------------------------
+    def _scene_text(self, robot: Any) -> str:
+        snap = robot.snapshot()
+        user_id = snap.get("user")
+        rooms = [r for r in snap.get("rooms", []) if r]
+        lines = [f"You are in the {snap.get('room') or 'room'}"
+                 + (f" (rooms you know: {', '.join(rooms)})" if len(rooms) > 1 else "")
+                 + f". Battery {snap.get('battery', 1.0):.0%}."]
+        everything = sorted(snap.get("objects", []), key=lambda o: o.distance)
+        objects, farther = everything[:MAX_OBJECTS], everything[MAX_OBJECTS:]
+        if objects:
+            lines.append("Objects (id, what, colour, how far, which way):")
+            for o in objects:
+                who = "person (the user)" if o.id == user_id else o.label
+                tint = f", {o.color}" if o.color and o.id != user_id else ""
+                seen = "" if o.last_seen < 2 else f", seen {o.last_seen:.0f} s ago"
+                lines.append(f"  {o.id} {who}{tint}, {o.distance:.1f} m {o.side}{seen}")
+            if farther:  # the rest, short: a far chair in the picture still counts when asked "how many chairs?"
+                lines.append("Farther: " + ", ".join(f"{o.id} {o.label}" for o in farther[:MAX_FARTHER]))
         else:
-            px, py, pyaw = (0.0, 0.0, 0.0)
-            if room and room not in scratchpad.visited_rooms:
-                scratchpad.visited_rooms.append(room)
+            lines.append("Objects: none seen yet.")
+        places = self._places_text(robot, snap.get("pose"))
+        if places:
+            lines.append(places)
+        return "\n".join(lines)
 
-        context_text = describe(snapshot, memory=self.memory, scratchpad=None)
+    @staticmethod
+    def _places_text(robot: Any, pose: Any) -> str:
+        """The named places with how far and which way each is from here."""
+        places = getattr(robot, "places", {})
+        if pose is None or not places:
+            return ""
+        about = {"start": "where this request began", "where you were before": "where the request before began"}
+        here = []
+        for name, p in places.items():
+            d = math.dist((p.x, p.y), (pose.x, pose.y))
+            if name == "start" and d <= 0.3:  # worth naming once the robot has left it
+                continue
+            bearing = math.degrees(wrap(math.atan2(p.y - pose.y, p.x - pose.x) - math.radians(pose.yaw)))
+            where = f"{d:.1f} m {side(bearing)}" if d > 0.3 else "here"
+            here.append(f"{name} ({about[name]}, {where})" if name in about else f"{name} ({where})")
+        return "Places you can go_to by name: " + "; ".join(here) if here else ""
 
-        frame = None
-        if hasattr(robot, "render_view"):
-            try:
-                frame = robot.render_view()
-            except Exception:
-                frame = None
-
-        annotated = None
-        if frame is not None and getattr(frame, "ndim", 0) == 3 and getattr(frame, "size", 0) > 0:
-            track_ids = tuple(o.id for o in snapshot.get("objects", []) if hasattr(o, "id"))
-            self.short_term.visual_buffer.push("front", (px, py, pyaw), frame, track_ids=track_ids)
-            boxes_and_ids = snapshot.get("boxes_and_ids") or []
-            candidate_paths = snapshot.get("candidate_paths") or ()
-            cam = snapshot.get("cam")
-            if boxes_and_ids or (cam is not None and candidate_paths):
-                annotated = draw_set_of_mark(frame, boxes_and_ids, candidate_paths, cam)
-            else:
-                annotated = frame
-
-        image_url: str | None = None
-        if hasattr(robot, "camera_image_url"):
-            cam_val = robot.camera_image_url
-            raw_url = cam_val() if callable(cam_val) else cam_val
-            if isinstance(raw_url, str) and raw_url:
-                image_url = raw_url
-        elif annotated is not None and (getattr(self.planner, "multimodal", False) or self.brain is not None):
-            try:
-                image_url = data_url(annotated)
-            except Exception:
-                image_url = None
-
-        som_url: str | None = image_url
-        if som_url is None and self.live is not None and annotated is not None:
-            try:
-                som_url = data_url(annotated)
-            except Exception:
-                som_url = None
-
-        return context_text, image_url, som_url
-
-    def _plan_next(
-        self,
-        context_text: str,
-        instruction: str,
-        image_url: str | None,
-        scratchpad: TaskScratchpad,
-    ) -> tuple[Intent, int]:
-        if hasattr(self.planner, "plan_step"):
-            kwargs: dict[str, Any] = {
-                "image_url": image_url,
-                "scratchpad": scratchpad.summary(),
-                "earlier": self.earlier[-EARLIER:],
-            }
-            if _accepts_kwarg(self.planner.plan_step, "completed_steps"):
-                kwargs["completed_steps"] = tuple(scratchpad.completed_steps)
-            intent = self.planner.plan_step(context_text, instruction, **kwargs)
-            if not hasattr(intent, "action"):
-                raise TypeError(f"planner.plan_step returned {type(intent).__name__}, expected Intent")
-            return intent, 0
-
-        if hasattr(self.planner, "plan"):
-            plan_res = self.planner.plan(
-                context_text,
-                instruction,
-                earlier=tuple(self.earlier[-EARLIER:]),
-            )
-            write_tokens = int(getattr(getattr(plan_res, "reply", None), "write_tokens", 0) or 0)
-            if isinstance(plan_res, Intent) or hasattr(plan_res, "action"):
-                return plan_res, write_tokens
-            if hasattr(plan_res, "intent"):
-                return plan_res.intent, write_tokens
-            raise TypeError(f"planner.plan returned {type(plan_res).__name__}, expected Intent or PlanResult")
-
-        return Intent(action="done"), 0
-
-    def _resolve_target(self, robot: Any, target: Any) -> tuple[Any, str, Any]:
-        """Resolve an Intent target into (exec_target, canonical_key, matched_object_or_None)."""
-        if target is None or isinstance(target, bool):
-            return None, "none", None
-        if isinstance(target, int):
-            if hasattr(robot, "obj"):
-                resolved = robot.obj(target)
-                return resolved, f"id:{getattr(resolved, 'id', target)}", resolved
-            return target, f"id:{target}", None
-        if not isinstance(target, str):
-            obj_id = getattr(target, "id", None)
-            key = f"id:{obj_id}" if obj_id is not None else repr(target)
-            return target, key, target if hasattr(target, "position") else None
-
-        s = target.strip().strip("\"'")
-        low = s.lower()
-        if low not in _USER_ALIASES:
-            s = re.sub(r"\s*\([^)]*\)", "", s).strip()
-            low = s.lower()
-        if not s or low in _NULL_TARGET_STRINGS:
-            return None, "none", None
-        if low in _USER_ALIASES:
-            if hasattr(robot, "user"):
-                u = robot.user()
-                if u is None:
-                    raise NotFound("no user in view")
-                return u, "user", u
-            return "user", "user", None
-
-        # Parse ID prefixes/formats such as "#7", "id=4", "10  table", or "table #7"
-        m_lead = re.match(r"^(?:id\s*[=:]?\s*|#\s*)?(-?\d+)(?:\s+(.*))?$", s, re.IGNORECASE)
-        if m_lead:
-            obj_id = int(m_lead.group(1))
-            rem = (m_lead.group(2) or "").strip(" ()")
-            if hasattr(robot, "obj"):
-                try:
-                    resolved = robot.obj(obj_id)
-                    return resolved, f"id:{getattr(resolved, 'id', obj_id)}", resolved
-                except NotFound:
-                    if not rem:
-                        raise
-                    s = rem
-                    low = s.lower()
-            else:
-                return obj_id, f"id:{obj_id}", None
+    def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str,
+                     when: str = "") -> dict[str, Any]:
+        parts: list[dict[str, Any]] = [{"type": "text", "text": f"{header}\n{self._scene_text(robot)}"}]
+        if tools.todo.steps:
+            parts[0]["text"] += f"\nTo-do list:\n{tools.todo.text()}"
+        view_fn = getattr(robot, "camera_view", None)
+        shown = []
+        width, height = self.image_width, round(self.image_width * 9 / 16)
+        for cam in cameras:
+            frame = view_fn(cam, width, height) if view_fn else None
+            if frame is None or getattr(frame, "size", 0) == 0:
+                continue
+            url = data_url(frame, max_width=width)
+            name = CAMERA_NAMES.get(cam, cam)
+            parts += [{"type": "text", "text": f"{name} camera:"}, _image_part(url)]
+            shown.append({"camera": name, "url": url})
+            tools.seen.add(cam)
+        if shown:  # the live page shows exactly the pictures the model was given, and when
+            self._seen_id += 1
+            self._push(seen=shown, seen_when=when, seen_id=self._seen_id)
         else:
-            m_hash_trail = re.match(r"^(.+?)\s+#(-?\d+)$", s)
-            if m_hash_trail:
-                obj_id = int(m_hash_trail.group(2))
-                rem = m_hash_trail.group(1).strip()
-                if hasattr(robot, "obj"):
-                    try:
-                        resolved = robot.obj(obj_id)
-                        return resolved, f"id:{getattr(resolved, 'id', obj_id)}", resolved
-                    except NotFound:
-                        s = rem or s
-                        low = s.lower()
-                else:
-                    return obj_id, f"id:{obj_id}", None
+            parts[0]["text"] += "\n(No camera pictures right now.)"
+        return {"role": "user", "content": parts}
 
-        # Snapshot grounding: match object IDs for dedup/distance checks + synonym fallback
-        if hasattr(robot, "snapshot"):
-            try:
-                snap = robot.snapshot() or {}
-            except Exception:
-                snap = {}
-            objects = snap.get("objects", []) or []
-            rooms_low = {str(r).lower() for r in snap.get("rooms", ())}
-            if low not in rooms_low:
-                # Trailing bare numeric suffix like "table 10" when not a room name
-                m_num_trail = re.match(r"^(.+?)\s+(\d+)$", s)
-                if m_num_trail and hasattr(robot, "obj"):
-                    try:
-                        resolved = robot.obj(int(m_num_trail.group(2)))
-                        return resolved, f"id:{getattr(resolved, 'id', m_num_trail.group(2))}", resolved
-                    except NotFound:
-                        pass
-                tokens = set(low.split())
-                exact = [
-                    o
-                    for o in objects
-                    if low in str(getattr(o, "label", "")).lower()
-                    or (
-                        tokens
-                        and tokens
-                        <= ({str(getattr(o, "label", "")).lower(), str(getattr(o, "color", "")).lower()} - {""})
-                    )
-                ]
-                if exact:
-                    nearest = min(exact, key=lambda o: float(getattr(o, "distance", 0.0)))
-                    key = f"id:{nearest.id}" if hasattr(nearest, "id") else f"name:{low}"
-                    return nearest, key, nearest
-                syns = _TARGET_SYNONYMS.get(low)
-                if syns:
-                    for syn in syns:
-                        matched = [o for o in objects if syn in str(getattr(o, "label", "")).lower()]
-                        if matched:
-                            nearest = min(matched, key=lambda o: float(getattr(o, "distance", 0.0)))
-                            key = f"id:{nearest.id}" if hasattr(nearest, "id") else f"name:{syn}"
-                            return nearest, key, nearest
+    @staticmethod
+    def _trim(messages: list[dict[str, Any]]) -> None:
+        """Keep only the newest pictures and the newest turns' reasoning, so a long task fits the model's context
+        (8k tokens a slot here; a 16-turn task kept every 512-token thought and overflowed it)."""
+        thoughts = [m for m in messages if m.get("reasoning_content")]
+        for msg in thoughts[:-KEEP_THOUGHTS]:
+            del msg["reasoning_content"]
+        seen = 0
+        for msg in reversed(messages):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for i in range(len(content) - 1, -1, -1):
+                if content[i].get("type") == "image_url":
+                    seen += 1
+                    if seen > MAX_IMAGES:
+                        content[i] = {"type": "text", "text": "(older picture removed)"}
 
-        return s, f"name:{low}", None
-
-    def _prepare_intent(
-        self, robot: Any, intent: Intent
-    ) -> tuple[str, Any, str, Any, dict[str, Any]]:
-        action = intent.action.lower().strip().replace("-", "_")
-        params = dict(intent.params or {})
-        raw_target = intent.target
-
-        if action == "move" and raw_target is not None:
-            t_low = str(raw_target).strip().lower()
-            if t_low not in _NULL_TARGET_STRINGS and t_low not in _DIRECTION_WORDS:
-                action = "go_to"
-
-        redirected = False
-        if (
-            action == "search_frontier"
-            and raw_target is not None
-            and str(raw_target).strip().lower() not in (_NULL_TARGET_STRINGS | {"frontier", "room", "here", "everywhere"})
-        ):
-            try:
-                cand_target, cand_key, cand_obj = self._resolve_target(robot, raw_target)
-                if cand_obj is not None:
-                    action = "go_to"
-                    exec_target, target_key, target_obj = cand_target, cand_key, cand_obj
-                    params.setdefault("distance", 0.5)
-                    redirected = True
-            except NotFound:
-                pass
-
-        if not redirected:
-            if action in _OBJECT_TARGET_ACTIONS:
-                if action == "pursue" and (
-                    raw_target is None or str(raw_target).strip().lower() in _NULL_TARGET_STRINGS
-                ):
-                    raw_target = "user"
-                exec_target, target_key, target_obj = self._resolve_target(robot, raw_target)
-            else:
-                exec_target = raw_target
-                target_key = "none" if raw_target is None else str(raw_target).strip().lower()
-                target_obj = None
-
-        if action == "go_to" and "distance" in params and params["distance"] is not None:
-            try:
-                d_val = float(params["distance"])
-                if target_key != "user" and d_val >= 1.0:
-                    params["distance"] = 0.5
-                elif target_key == "user" and d_val > 1.0:
-                    params["distance"] = 1.0
-            except (TypeError, ValueError):
-                pass
-
-        return action, exec_target, target_key, target_obj, params
-
-    def _format_step_summary(
-        self,
-        action: str,
-        target_key: str,
-        target_obj: Any,
-        params: dict[str, Any],
-        step_num: int | None = None,
-    ) -> str:
-        if step_num is None:
-            pad = getattr(self.short_term, "scratchpad", None)
-            step_num = len(pad.completed_steps) + 1 if pad is not None else 1
-        t_desc = target_key
-        if target_obj is not None and hasattr(target_obj, "id") and hasattr(target_obj, "label"):
-            t_desc = f"{target_obj.label}#{target_obj.id}"
-        elif t_desc.startswith("name:"):
-            t_desc = t_desc[5:]
-        params_json = json.dumps(params, sort_keys=True, default=str)
-        return f"Step {step_num}: {action} target={t_desc} params={params_json} (completed)"
-
-    def _execute_prepared(
-        self, robot: Any, action: str, target: Any, params: dict[str, Any], raw_target: Any = None
-    ) -> str:
-        if action in ("go_to", "orbit", "peek", "look_under", "face") and target is None:
-            raise NotFound(f"{action} requires a target")
-
-        if action == "go_to":
-            dist = _num_param(params, ("distance",), 0.0)
-            robot.go_to(target, distance=dist)
-            return f"drove to {target}"
-        if action == "pursue":
-            dist = _num_param(params, ("distance",), 1.0)
-            sec = params.get("seconds")
-            if hasattr(robot, "pursue"):
-                robot.pursue(target, distance=dist, seconds=sec)
-            elif hasattr(robot, "follow"):
-                robot.follow(target, distance=dist, seconds=sec)
-            else:
-                robot.go_to(target, distance=dist)
-            return f"pursued {target}"
-        if action == "orbit":
-            laps = _num_param(params, ("laps", "turns", "count"), 1.0)
-            raw_dir = str(params.get("direction") or "left").lower().strip()
-            direction = "right" if raw_dir in ("clockwise", "cw", "right") else "left"
-            dist = _num_param(params, ("distance", "radius"), 0.5)
-            robot.orbit(target, laps=laps, direction=direction, distance=dist)
-            return f"orbited {target}"
-        if action == "peek":
-            if hasattr(robot, "peek"):
-                robot.peek(target)
-            return f"peeked at {target}"
-        if action == "look_under":
-            if hasattr(robot, "look_under"):
-                robot.look_under(target)
-            return f"looked under {target}"
-        if action == "move":
-            metres = _num_param(params, ("metres", "meters", "distance"), 1.0)
-            default_dir = (
-                "backward"
-                if raw_target is not None and str(raw_target).strip().lower() in ("backward", "back")
-                else "forward"
-            )
-            direction = str(params.get("direction") or default_dir).lower().strip() or "forward"
-            robot.move(metres, direction=direction)
-            return f"moved {metres}m {direction}"
-        if action == "turn":
-            degrees = _num_param(params, ("degrees", "angle"), 90.0)
-            direction = str(params.get("direction") or "left").lower().strip() or "left"
-            robot.turn(degrees, direction=direction)
-            return f"turned {degrees}° {direction}"
-        if action == "spin":
-            turns = _num_param(params, ("turns", "laps", "count"), 1.0)
-            robot.spin(turns=turns)
-            return f"spun {turns} turns"
-        if action == "face":
-            robot.face(target)
-            return f"faced {target}"
-        if action == "motion_sequence":
-            steps = params.get("steps", [])
-            if hasattr(robot, "motion_sequence"):
-                robot.motion_sequence(steps)
-            return "executed motion sequence"
-        if action == "ask":
-            q = params.get("question", "")
-            ans = robot.ask(q)
-            return f"asked '{q}' -> '{ans}'"
-        if action == "remember":
-            fact = params.get("fact", "")
-            robot.remember(fact)
-            if self.memory is not None and hasattr(self.memory, "remember_fact") and fact:
-                self.memory.remember_fact(fact)
-            return f"remembered '{fact}'"
-        if action == "search_frontier":
-            if hasattr(robot, "search"):
-                robot.search(str(target or "frontier"), area="here")
-            return f"explored frontier for {target}"
-        if action == "step_closer":
-            if target is not None:
-                robot.go_to(target, distance=float(params.get("distance", 0.5)))
-            else:
-                robot.move(0.5, "forward")
-            return f"stepped closer to {target}"
-        return f"performed {action}"
-
-    def _execute_intent(self, robot: Any, intent: Intent) -> str:
-        action, exec_target, _, _, params = self._prepare_intent(robot, intent)
-        return self._execute_prepared(robot, action, exec_target, params, raw_target=intent.target)
-
-    def _escalated_summary(self, robot: Any, again: TaskRecord) -> str:
-        last_intent = again.intents[-1] if again.intents else None
-        if again.outcome == "done":
-            return self._summarize_action(robot, last_intent.target if last_intent else None)
-        if again.outcome == "refused":
-            reason = (last_intent.say if last_intent else "") or "cannot do it"
-            return f"refused: {reason}"
-        return "stopped"
-
-    def _is_repeated_step(
-        self,
-        robot: Any,
-        action: str,
-        target_obj: Any,
-        params: dict[str, Any],
-        step_sig: tuple[str, str, tuple[tuple[str, str], ...]],
-        succeeded_sigs: list[tuple[str, str, tuple[tuple[str, str], ...]]],
-    ) -> bool:
-        if action in _IDEMPOTENT_ACTIONS and step_sig in succeeded_sigs:
-            return True
-        if action == "go_to" and target_obj is not None and succeeded_sigs and hasattr(target_obj, "position"):
-            pose = robot.pose() if hasattr(robot, "pose") else None
-            if pose is None and hasattr(robot, "snapshot"):
-                try:
-                    pose = (robot.snapshot() or {}).get("pose")
-                except Exception:
-                    pose = None
-            if pose is not None:
-                px, py, _ = _pose_tuple(pose)
-                radius = float(getattr(target_obj, "radius", 0.3))
-                reach = max(0.0, float(params.get("distance", 0.0)))
-                if math.dist((px, py), target_obj.position) <= radius + reach + 0.25:
-                    return True
-        return False
-
+    # ---- the loop ----------------------------------------------------------------------------------------------
     def do(self, instruction: str, robot: Any, speak: bool = True) -> TaskRecord:
         record = TaskRecord(instruction)
-
-        # 1. Instant reflex commands act immediately without a model
         cmd = instant(instruction)
-        if cmd is not None:
-            return self._handle_instant(cmd, robot, record, speak=speak)
+        if cmd is not None:  # "stop" and "wait" never wait for a model
+            robot.stop()
+            self._mood(robot, "listening" if cmd == "wait" else "neutral", "listen" if cmd == "wait" else "uh_oh")
+            return self._finish(robot, record, "preempted" if cmd == "stop" else "done", "")
 
+        self._robot = robot
+        self._stopped.clear()
+        self._drain()  # words meant for an earlier task
         if hasattr(robot, "begin"):
             robot.begin()
+        tools = Tools(robot, self.memory)
+        tools.seen.clear()  # filled by the pictures actually sent
+        self._mood(robot, "listening", "listen")
+        self._push(status="thinking", instruction=instruction, steps=[], todo="", problems=[])
 
-        scratchpad = TaskScratchpad(goal=instruction)
-        self.short_term.scratchpad = scratchpad
-        self._push_live(status="planning", instruction=instruction, problems=[], **_said_fields(robot))
+        # context: one line per older request, then the whole of the last one (what it did and what came back)
+        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM}]
+        older = self.earlier[:-1] if self.last_task else self.earlier
+        if older:
+            messages.append({"role": "user", "content": "Earlier requests (oldest first):\n"
+                             + "\n".join(f"- {e}" for e in older)})
+        messages += self.last_task
+        first = self._observation(robot, tools, list(self.cameras), "What you sense now:",
+                                  when="when the task started")
+        first["content"].append({"type": "text", "text": f'The user says: "{instruction}"'})
+        messages.append(first)
+        self._messages, self._task_start = messages, len(messages) - 1
+        reviewed = False
+        last_said = ""
+        last_call, repeats = None, 0
 
-        step_failures = 0
-        said_log: list[str] = []
-        last_spoken = ""
-        succeeded_sigs: list[tuple[str, str, tuple[tuple[str, str], ...]]] = []
+        try:
+            for _ in range(self.max_turns):
+                if self._stopped.is_set():
+                    return self._finish(robot, record, "preempted", last_said)
+                self._trim(messages)
+                t0 = time.perf_counter()
+                reply = self.brain.chat(messages, tools.schemas(), think=self.think)
+                step = Step(reply.text, model_s=round(time.perf_counter() - t0, 3), tokens=reply.write_tokens,
+                            thought=reply.thought.strip())
+                record.steps.append(step)
+                self._push(steps=record.lines(thoughts=True))
+                assistant: dict[str, Any] = {"role": "assistant", "content": reply.text}
+                if step.thought:  # kept with its tool calls, as LFM3's template expects within a task
+                    assistant["reasoning_content"] = step.thought
+                if reply.tool_calls:
+                    assistant["tool_calls"] = [{"id": c.id, "type": "function", "function": {
+                        "name": c.name, "arguments": json.dumps(c.args)}} for c in reply.tool_calls]
+                messages.append(assistant)
 
-        # 2. Closed-Loop Sense-Think-Act Loop
-        for step_idx in range(MAX_STEPS):
-            scratchpad.steps = step_idx + 1
-            context_text, image_url, som_url = self._observe(robot, scratchpad)
+                if not reply.tool_calls:
+                    heard = self._drain()
+                    if heard:  # the user spoke while the model was answering: carry on with their words
+                        if reply.text and speak:
+                            robot.say(speakable(reply.text))
+                        messages.append({"role": "user", "content": "".join(f'The user says: "{h}"\n'
+                                                                            for h in heard).strip()})
+                        continue
+                    if not reviewed:  # a stop hook: check once, then finish (it catches "I'll head back" with no move)
+                        reviewed = True
+                        messages.append({"role": "user", "content": self._review(instruction, record, tools)})
+                        continue
+                    if reply.text and speak:
+                        robot.say(speakable(reply.text))
+                    last_said = reply.text or last_said
+                    return self._finish(robot, record, "done", last_said)
 
-            start_t = time.perf_counter()
+                failed = False
+                for call in reply.tool_calls:
+                    key = (call.name, json.dumps(call.args, sort_keys=True))
+                    repeats = repeats + 1 if key == last_call else 1
+                    last_call = key
+                    if failed:
+                        result, ok = "Skipped: an earlier call in this turn failed.", False
+                    elif repeats > REPEATS:  # a loop: the same call again and again changes nothing
+                        result, ok = (f"Not run: you made this exact call {repeats - 1} times in a row. Do something "
+                                      "different, or if the request is done, reply to the user."), False
+                        record.problems.append(f"{call.name}: repeated {repeats - 1} times")
+                    else:
+                        running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
+                        self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
+                        result, ok = self._run(robot, tools, call.name, call.args, record)
+                        failed = not ok
+                        if call.name == "say" and ok:
+                            last_said = str(call.args.get("text", ""))
+                    step.calls.append((call.name, call.args, result, ok))
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                self._push(status="acting", steps=record.lines(thoughts=True), todo=tools.todo.text() if tools.todo.steps else "",
+                           problems=list(record.problems))
+                if tools.todo.steps and not {c.name for c in reply.tool_calls} & {"todo", "todo_done"}:
+                    messages[-1]["content"] += f"\nTo-do list now:\n{tools.todo.text()}"
+                if tools.moved and not self.see_after_moves:  # where places are from here now ("come back here")
+                    snap = robot.snapshot()
+                    places = self._places_text(robot, snap.get("pose"))
+                    if places:
+                        messages[-1]["content"] += f"\nNow in the {snap.get('room') or 'room'}. {places}"
+                    tools.moved = False
+
+                heard = self._drain()
+                moved = self.see_after_moves and tools.moved
+                cameras = list(dict.fromkeys([*(self.cameras if moved else ()), *tools.looked]))
+                if cameras or heard:
+                    if heard:
+                        header = "".join(f'The user says: "{h}"\n' for h in heard) + "What you sense now:"
+                    else:  # an update, not a new request: restate the task and what is done so far
+                        done = "; ".join(record.lines()[-6:])
+                        header = (f'Update while you work on the user\'s request "{instruction}" (not a new '
+                                  f"request).\nDone so far: {done}\nIf the request is complete, reply to the user "
+                                  "without calling a tool.\nWhat you sense now:")
+                    asked = [f"{c.name}({', '.join(f'{v}' for v in c.args.values())})" for c in reply.tool_calls
+                             if c.name == "look"]
+                    when = f"after {', '.join(asked)}" if asked else "after moving" if moved else "when the user spoke"
+                    messages.append(self._observation(robot, tools, cameras, header, when=when))
+                    tools.moved, tools.looked = False, []
+            record.problems.append(f"no answer after {self.max_turns} turns")
+        except SafetyStop as exc:
+            record.problems.append(f"safety stop: {exc}")
+        except Preempted:
+            return self._finish(robot, record, "preempted", last_said)
+        except Exception as exc:  # the model server failed: say so plainly rather than freeze
+            record.problems.append(f"{type(exc).__name__}: {exc}")
+        if speak:
+            sorry = "Sorry, I couldn't finish that. Could you tell me another way?"
             try:
-                intent, write_tokens = self._plan_next(context_text, instruction, image_url, scratchpad)
-                if write_tokens:
-                    record.tokens.append(write_tokens)
-            except Exception as exc:
-                record.problems.append(f"plan: {exc}")
-                step_failures += 1
-                if step_failures >= 2:
-                    break
-                continue
-            finally:
-                record.plan_s.append(round(time.perf_counter() - start_t, 3))
-
-            record.intents.append(intent)
-            if intent.subgoal:
-                scratchpad.subgoal = intent.subgoal
-
-            action = intent.action.lower().strip().replace("-", "_")
-            say_text = intent.say.strip() if intent.say else ""
-            say_norm = " ".join(say_text.split())
-
-            # Prepare action and guard against repetition loops BEFORE speaking redundant announcements
-            prepared: tuple[str, Any, str, Any, dict[str, Any]] | None = None
-            target_obj: Any = None
-            step_sig: tuple[str, str, tuple[tuple[str, str], ...]] | None = None
-            if action not in _DONE_ACTIONS and action != "refuse":
-                try:
-                    prepared = self._prepare_intent(robot, intent)
-                    exec_action, exec_target, target_key, target_obj, exec_params = prepared
-                    step_sig = _canonical_step_sig(exec_action, target_key, exec_params)
-                    if step_idx > 0 and self._is_repeated_step(
-                        robot, exec_action, target_obj, exec_params, step_sig, succeeded_sigs
-                    ):
-                        if record.intents:
-                            record.intents.pop()
-                        pop_fn = getattr(self.planner, "pop_last_intent", None)
-                        if callable(pop_fn):
-                            pop_fn()
-                        last_kept = record.intents[-1] if record.intents else intent
-                        summary = self._summarize_action(robot, exec_target)
-                        return self._finish(
-                            record, "done", summary,
-                            task_said=said_log[-1] if said_log else "",
-                            subgoal=last_kept.subgoal or scratchpad.subgoal,
-                            action="done",
-                            posture=last_kept.posture,
-                            chime=last_kept.chime,
-                            **_said_fields(robot, said_log),
-                        )
-                except (PathBlocked, NotFound, TargetLost, Timeout) as exc:
-                    record.problems.append(f"{type(exc).__name__}: {exc}")
-                    step_failures += 1
-                    scratchpad.blockers.append(str(exc))
-                    if step_failures >= 2:
-                        break
-                    continue
-                except Exception as exc:
-                    record.problems.append(f"{type(exc).__name__}: {exc}")
-                    step_failures += 1
-                    if step_failures >= 2:
-                        break
-                    continue
-
-            # Speak (deduplicated) and express posture
-            if say_norm and say_norm != last_spoken and speak and hasattr(robot, "say"):
-                try:
-                    robot.say(say_text)
-                    said_log.append(say_text)
-                    last_spoken = say_norm
-                except Exception:
-                    pass
-            if hasattr(robot, "express") and (intent.posture != "neutral" or intent.chime):
-                try:
-                    robot.express(intent.posture, chime_kind=intent.chime, seconds=0.2)
-                except Exception:
-                    pass
-
-            live_step: dict[str, Any] = {
-                "status": "running",
-                "instruction": instruction,
-                "subgoal": intent.subgoal or scratchpad.subgoal,
-                "action": intent.action,
-                "posture": intent.posture,
-                "chime": intent.chime,
-                "plan": intent.subgoal or intent.action,
-                "say_first": intent.say,
-                "problems": list(record.problems),
-                **_said_fields(robot, said_log),
-            }
-            if som_url is not None:
-                live_step["set_of_mark"] = som_url
-            self._push_live(**live_step)
-
-            if action in _DONE_ACTIONS:
-                summary = (
-                    self._summarize_action(robot, intent.target)
-                    if succeeded_sigs
-                    else (f"replied: {say_text[:80]}" if say_text else "done")
-                )
-                return self._finish(
-                    record, "done", summary,
-                    task_said=said_log[-1] if said_log else "",
-                    subgoal=intent.subgoal or scratchpad.subgoal,
-                    action="done",
-                    posture=intent.posture,
-                    chime=intent.chime,
-                    **_said_fields(robot, said_log),
-                )
-
-            if action == "refuse":
-                return self._finish(
-                    record, "refused", f"refused: {intent.say or 'cannot do it'}",
-                    task_said=said_log[-1] if said_log else "",
-                    subgoal=intent.subgoal or scratchpad.subgoal,
-                    action="refuse",
-                    posture=intent.posture,
-                    chime=intent.chime,
-                    **_said_fields(robot, said_log),
-                )
-
-            # Execute prepared action
-            assert prepared is not None and step_sig is not None
-            exec_action, exec_target, target_key, target_obj, exec_params = prepared
-            try:
-                self._execute_prepared(
-                    robot, exec_action, exec_target, exec_params, raw_target=intent.target
-                )
-                succeeded_sigs.append(step_sig)
-                step_num = len(scratchpad.completed_steps) + 1
-                scratchpad.record_step(
-                    self._format_step_summary(exec_action, target_key, target_obj, exec_params, step_num=step_num)
-                )
-                step_failures = 0
-            except (PathBlocked, NotFound, TargetLost, Timeout) as exc:
-                record.problems.append(f"{type(exc).__name__}: {exc}")
-                step_failures += 1
-                scratchpad.blockers.append(str(exc))
-                if step_failures >= 2:
-                    break
-                continue
+                robot.say(sorry)
+                last_said = sorry
             except Preempted:
-                return self._finish(
-                    record, "preempted", "stopped",
-                    task_said=said_log[-1] if said_log else "",
-                    action="stop",
-                    **_said_fields(robot, said_log),
-                )
-            except SafetyStop as exc:
-                record.problems.append(f"SafetyStop: {exc}")
-                break
-            except Exception as exc:
-                record.problems.append(f"{type(exc).__name__}: {exc}")
-                step_failures += 1
-                if step_failures >= 2:
-                    break
-                continue
+                return self._finish(robot, record, "preempted", last_said)
+        return self._finish(robot, record, "failed", last_said)
 
-            # Update scratchpad
-            if target_obj is not None and hasattr(target_obj, "id"):
-                scratchpad.inspected_ids.add(target_obj.id)
-            elif intent.target is not None:
-                if not isinstance(intent.target, bool) and isinstance(intent.target, int):
-                    scratchpad.inspected_ids.add(intent.target)
-                elif hasattr(intent.target, "id"):
-                    scratchpad.inspected_ids.add(intent.target.id)
+    def _drain(self) -> list[str]:
+        heard = []
+        while not self._heard.empty():
+            heard.append(self._heard.get_nowait())
+        return heard
 
-            if self.memory is not None and hasattr(self.memory, "observe_clear_space"):
-                try:
-                    pose = robot.pose()
-                    self.memory.observe_clear_space(pose.x, pose.y, radius=1.0)
-                except Exception:
-                    pass
+    @staticmethod
+    def _review(instruction: str, record: TaskRecord, tools: Tools) -> str:
+        """Before a task ends: the request, what was done, and any open to-do steps, for one last check."""
+        calls = [line for line in record.lines() if not line.startswith("reply:")]
+        done = ("\n".join(f"- {line}" for line in calls[-12:]) if calls else
+                "- no tool call at all: you have not moved, turned, looked or done anything for this request; only "
+                "tools do things, so saying you did something does not do it")
+        open_steps = tools.todo.open_steps()
+        todo = f"\nOpen to-do steps: {'; '.join(open_steps)}." if open_steps else ""
+        return (f'Before you finish, check every part of the request: "{instruction}"\nWhat you did:\n{done}{todo}\n'
+                "If something is still missing, do it now with tools. If everything is done, give your final short "
+                "reply to the user, with no tool call.")
 
-            if (
-                step_idx == 0
-                and _is_local_planner(self.planner)
-                and exec_action in _SINGLE_STEP_PHYSICAL_ACTIONS
-                and _is_simple_single_step(instruction)
-            ):
-                summary = self._summarize_action(robot, exec_target)
-                return self._finish(
-                    record, "done", summary,
-                    task_said=said_log[-1] if said_log else "",
-                    subgoal=intent.subgoal or scratchpad.subgoal,
-                    action="done",
-                    posture=intent.posture,
-                    chime=intent.chime,
-                    **_said_fields(robot, said_log),
-                )
-        else:
-            if not record.problems:
-                record.problems.append("could not finish within step limit")
+    def _run(self, robot: Any, tools: Tools, name: str, args: dict[str, Any],
+             record: TaskRecord) -> tuple[str, bool]:
+        """One call. A user who speaks during it interrupts it; a plain stop ends the task (Preempted)."""
+        self._acting.set()
+        try:
+            result, ok = tools.run(name, args)
+        except Preempted:
+            if self._stopped.is_set() or self._heard.empty():
+                raise
+            robot.resume()
+            return "Interrupted: the user spoke (their words follow).", False
+        finally:
+            self._acting.clear()
+        if not ok:
+            record.problems.append(f"{name}: {result}")
+            self._mood(robot, "uh_oh", "uh_oh")
+        elif name == "search" and tools.found is not None:
+            self._mood(robot, "happy", "happy")
+        return result, ok
 
-        # 3. Escalation: if local planner failed twice, optional stronger planner gets one attempt
-        if self.escalate is not None:
-            again = Agent(self.escalate, live=self.live, brain=self.brain).do(instruction, robot, speak=False)
-            record.intents += again.intents
-            record.problems += again.problems
-            record.plan_s += again.plan_s
-            record.tokens += again.tokens
-            if again.outcome in ("done", "refused", "preempted"):
-                summary = self._escalated_summary(robot, again)
-                return self._finish(
-                    record, again.outcome, summary,
-                    task_said=said_log[-1] if said_log else "",
-                    **_said_fields(robot, said_log),
-                )
+    def _finish(self, robot: Any, record: TaskRecord, outcome: str, said: str) -> TaskRecord:
+        record.outcome = outcome
+        self._robot = None
+        if outcome == "done":
+            self._mood(robot, "happy" if not record.problems else "neutral", "happy" if not record.problems else "")
+        elif outcome == "failed":
+            self._mood(robot, "uh_oh", "uh_oh")
+        actions = "; ".join(line.split(" -> ")[0] + " -> " + line.split(" -> ")[1][:60] if " -> " in line else line
+                            for line in record.lines() if not line.startswith("reply:"))[:300]
+        summary = (f'"{record.instruction}" -> {outcome}' + (f"; you did: {actions}" if actions else "")
+                   + (f'; you said "{said[:100]}"' if said else ""))
+        self.earlier = [*self.earlier, summary][-EARLIER:]
+        if self._messages is not None:  # kept whole for the next request
+            self.last_task = self._messages[self._task_start:]
+            self._messages = None
+        self._push(status="stopped" if outcome == "preempted" else outcome, steps=record.lines(thoughts=True),
+                   problems=list(record.problems))
+        return record
 
-        problem_text = plainly(record.problems)
-        apology = f"Sorry, {problem_text}. Could you tell me another way?"
-        if speak and hasattr(robot, "say"):
+    def forget(self) -> None:
+        """Start a fresh conversation (a new room, a new user)."""
+        self.earlier, self.last_task = [], []
+
+    @staticmethod
+    def _mood(robot: Any, posture: str, chime: str) -> None:
+        """The body shows how things are going (a posture and a chime), so the model never has to."""
+        express = getattr(robot, "express", None)
+        if express is not None:
             try:
-                robot.say(apology)
-                said_log.append(apology)
-            except Exception:
+                express(posture, chime_kind=chime, seconds=0.0)
+            except (Exception, Preempted):  # noqa: BLE001 - only a gesture: a stop is seen by the next real step
                 pass
-        return self._finish(
-            record, "failed", f"could not do it: {problem_text}",
-            task_said=said_log[-1] if said_log else "",
-            **_said_fields(robot, said_log),
-        )
+
+    def _push(self, **fields: Any) -> None:
+        if self.live is not None:
+            self.live.update(**fields)

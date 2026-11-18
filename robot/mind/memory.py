@@ -1,12 +1,7 @@
-"""Circulating hybrid memory for Sprocket v2: short-term RAM working memory and long-term SQLite vector memory.
+"""Long-term memory for Sprocket: SQLite records that persist across restarts (the stack is still being decided).
 
-Two tiers (docs/architecture.md, Section 5):
-1. Short-Term Working Memory (in RAM):
-   - TaskScratchpad: tracks current goal, subgoals, visited rooms, inspected tracks, and checked floor spots.
-   - VisualRingBuffer: rolling buffer of recent visual keyframes across 15 seconds.
-   - ShortTermMemory: scratchpad, visual buffer, active speaker lock, DOA, and recent dialogue turns.
-
-2. Long-Term Circulating Memory (SQLite + Fast Vector Index):
+Short-term memory is the agent's own conversation for the current task, its to-do list, and a summary of the last
+few tasks (robot/agent/agent.py). This module keeps what lasts longer:
    - Objects with volatility half-lives ("blocker": 25m, "movable": 2h, "anchor": 7d).
    - Habit EMA linking movable items to nearby furniture anchors (e.g. keys on sofa vs desk).
    - Live visual overwrite ("Eyes beat old memory"): clearing blockers and absent movables.
@@ -24,7 +19,7 @@ import sqlite3
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -206,139 +201,6 @@ def freshness(last_seen_wall: float, kind: str, now_wall: float | None = None) -
 
 
 # ---------------------------------------------------------------------------
-# Short-Term Working Memory (RAM)
-# ---------------------------------------------------------------------------
-
-@dataclass
-class TaskScratchpad:
-    """Working scratchpad tracking the active mission state and preventing search loops."""
-    goal: str = ""
-    subgoal: str = ""
-    visited_rooms: list[str] = field(default_factory=list)
-    inspected_ids: set[int] = field(default_factory=set)
-    checked_spots: list[tuple[float, float]] = field(default_factory=list)
-    blockers: list[str] = field(default_factory=list)
-    completed_steps: list[str] = field(default_factory=list)
-    steps: int = 0
-
-    def reset(self, goal: str = "") -> None:
-        self.goal = goal
-        self.subgoal = ""
-        self.visited_rooms.clear()
-        self.inspected_ids.clear()
-        self.checked_spots.clear()
-        self.blockers.clear()
-        self.completed_steps.clear()
-        self.steps = 0
-
-    def record_step(self, summary: str) -> None:
-        cleaned = " ".join(str(summary).split())
-        if not cleaned:
-            return
-        self.completed_steps.append(cleaned)
-        if len(self.completed_steps) > 12:
-            self.completed_steps = self.completed_steps[-12:]
-
-    def mark_visited(self, room: str, xy: tuple[float, float]) -> None:
-        if room and room not in self.visited_rooms:
-            self.visited_rooms.append(room)
-        self.checked_spots.append((float(xy[0]), float(xy[1])))
-
-    def is_spot_checked(self, xy: tuple[float, float], radius: float = 0.6) -> bool:
-        rad_sq = radius * radius
-        for sx, sy in self.checked_spots:
-            if (sx - xy[0]) ** 2 + (sy - xy[1]) ** 2 <= rad_sq:
-                return True
-        return False
-
-    def summary(self) -> str:
-        visited = ", ".join(self.visited_rooms) if self.visited_rooms else "none"
-        blockers = ", ".join(self.blockers) if self.blockers else "none"
-        text = (
-            f"Goal: '{self.goal or 'none'}' | Subgoal: '{self.subgoal or 'none'}' | Steps: {self.steps} | "
-            f"Rooms: [{visited}] | Inspected: {len(self.inspected_ids)} | "
-            f"Checked spots: {len(self.checked_spots)} | Blockers: [{blockers}]"
-        )
-        if self.completed_steps:
-            text += f" | Completed: [{'; '.join(self.completed_steps)}]"
-        return text
-
-
-@dataclass
-class VisualFrame:
-    """A timestamped visual keyframe stored in the rolling buffer."""
-    timestamp: float
-    camera: str
-    pose: tuple[float, float, float]
-    rgb: np.ndarray
-    track_ids: tuple[int, ...] = ()
-
-
-class VisualRingBuffer:
-    """Rolling ring buffer holding recent camera frames up to maxlen and max_age_s."""
-
-    def __init__(self, maxlen: int = 16, max_age_s: float = 15.0) -> None:
-        self.maxlen = maxlen
-        self.max_age_s = max_age_s
-        self._frames: list[VisualFrame] = []
-
-    def push(
-        self,
-        camera: str,
-        pose: tuple[float, float, float],
-        rgb: np.ndarray,
-        track_ids: tuple[int, ...] = (),
-        timestamp: float | None = None,
-    ) -> None:
-        if timestamp is None:
-            timestamp = time.time()
-        frame = VisualFrame(
-            timestamp=timestamp,
-            camera=camera,
-            pose=pose,
-            rgb=rgb,
-            track_ids=tuple(track_ids),
-        )
-        cutoff = timestamp - self.max_age_s
-        self._frames = [f for f in self._frames if f.timestamp >= cutoff]
-        self._frames.append(frame)
-        if len(self._frames) > self.maxlen:
-            self._frames = self._frames[-self.maxlen :]
-
-    def recent(self, seconds: float = 5.0, now: float | None = None) -> list[VisualFrame]:
-        if now is None:
-            now = time.time()
-        cutoff = now - seconds
-        return [f for f in self._frames if cutoff <= f.timestamp <= now + 0.1]
-
-    def frame_at(self, seconds_ago: float, now: float | None = None) -> VisualFrame | None:
-        if now is None:
-            now = time.time()
-        target = now - seconds_ago
-        if not self._frames:
-            return None
-        return min(self._frames, key=lambda f: abs(f.timestamp - target))
-
-
-@dataclass
-class ShortTermMemory:
-    """Working short-term RAM memory holding active task state, visual buffer, and dialogue."""
-    scratchpad: TaskScratchpad = field(default_factory=TaskScratchpad)
-    visual_buffer: VisualRingBuffer = field(default_factory=VisualRingBuffer)
-    active_speaker_id: str | None = None
-    speaker_doa: float | None = None
-    dialogue: list[tuple[str, str]] = field(default_factory=list)
-
-    def add_turn(self, instruction: str, summary: str, limit: int = 6) -> None:
-        self.dialogue.append((instruction, summary))
-        if len(self.dialogue) > limit:
-            self.dialogue = self.dialogue[-limit:]
-
-    def recent_dialogue(self, limit: int = 4) -> list[str]:
-        return [f"User: {u} | Sprocket: {s}" for u, s in self.dialogue[-limit:]]
-
-
-# ---------------------------------------------------------------------------
 # Long-Term Circulating Memory (SQLite)
 # ---------------------------------------------------------------------------
 
@@ -353,14 +215,13 @@ class PersonProfile:
 
 
 class CirculatingMemory:
-    """Two-tier circulating hybrid memory managing short-term RAM state and long-term SQLite records."""
+    """Long-term memory in SQLite: objects, habits, people, facts, route notes and places."""
 
     def __init__(self, path: str | Path) -> None:
         path = Path(path).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.lock = threading.Lock()
-        self.short_term = ShortTermMemory()
 
         with self.lock, self.db:
             self.db.executescript(SCHEMA)
@@ -384,14 +245,6 @@ class CirculatingMemory:
                     self.db.execute(f"ALTER TABLE objects ADD COLUMN {col_name} {col_def}")
                 except sqlite3.OperationalError:
                     pass
-
-    @property
-    def scratchpad(self) -> TaskScratchpad:
-        return self.short_term.scratchpad
-
-    @property
-    def visual_buffer(self) -> VisualRingBuffer:
-        return self.short_term.visual_buffer
 
     def save(
         self,
@@ -592,8 +445,6 @@ class CirculatingMemory:
             for oid, ox, oy in objs:
                 if (ox - x) ** 2 + (oy - y) ** 2 <= rad_sq:
                     self.db.execute("UPDATE objects SET present = 0 WHERE id = ?", (oid,))
-
-        self.short_term.scratchpad.checked_spots.append((x, y))
 
     def circulate(self, now_wall: float | None = None) -> int:
         """Evict route_notes and movable objects whose freshness has dropped below 0.10."""

@@ -4,14 +4,14 @@ Written before any planner work so it cannot be fitted to the model. The two tas
 around the box behind you" and "search for a yellow box, come back and tell me") are held out of this suite, of
 every prompt and of every seed example.
 
-    python -m robot.eval.suite --tag v2    # runs closed-loop Agent(LocalPlanner) across the 50 cases
+    python -m robot.eval.suite --tag v3    # runs the agent across the 50 cases
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -331,105 +331,68 @@ def _cases() -> list[Case]:
 CASES = _cases()
 
 
-def _intent_dict(intent: Any) -> dict[str, Any]:
-    if isinstance(intent, dict):
-        out = dict(intent)
-    elif is_dataclass(intent) and not isinstance(intent, type):
-        out = asdict(intent)
-    else:
-        return {"action": str(intent)}
-    target = out.get("target")
-    if target is not None and not isinstance(target, (str, int, float, bool)):
-        out["target"] = str(target)
-    return out
-
-
-def run_case(
-    case: Case,
-    planner: Any,
-    *,
-    noise: float = 0.0,
-    max_time: float = 600.0,
-) -> tuple[bool, str, Any, SimRobot]:
-    """Run one suite case closed-loop with Agent(planner) on SimRobot and evaluate case.check(sim)."""
+def run_case(case: Case, brain: Any, *, noise: float = 0.0, max_time: float = 600.0,
+             cameras: str = "front", see_after_moves: bool = False, think: str = "medium") -> tuple[bool, Any, SimRobot]:
+    """Run one case with the agent on the 2D world and judge it with the case's check."""
     from robot.agent.agent import Agent
 
     scene = case.scene()
     scene.noise = noise
     sim = SimRobot(scene, max_time=max_time)
-    agent = Agent(planner)
-    record = agent.do(case.say, sim)
+    record = Agent(brain, cameras=cameras, see_after_moves=see_after_moves, think=think).do(case.say, sim)
+    if sim.ended_by == "budget":  # it ran out of time: a failure even if the check would hold
+        record.outcome = "failed"
+        record.problems.append(f"used all {max_time:.0f} s of simulated time")
     try:
-        checked = bool(case.check(sim))
+        passed = record.outcome in ("done", "preempted") and bool(case.check(sim))
     except Exception as exc:  # noqa: BLE001 - a check that cannot be evaluated counts as a failure
-        checked = False
+        passed = False
         record.problems.append(f"check: {exc}")
-    outcome = record.outcome or "failed"
-    passed = checked and outcome in ("done", "preempted", "refused")
-    return passed, outcome, record, sim
+    return passed, record, sim
 
 
-def run_planner(
-    tag: str,
-    only: list[str] | tuple[str, ...] = (),
-    think: int = 0,
-    noise: float = 0.0,
-    brain_url: str = "http://127.0.0.1:8080",
-    *,
-    planner: Any = None,
-    out_dir: Any = None,
-) -> list[dict[str, Any]]:
-    """Run selected CASES via Agent(LocalPlanner(think=think)) and log JSONL results."""
+def run_suite(tag: str, only: list[str] | tuple[str, ...] = (), *, brain: Any = None, noise: float = 0.0,
+              brain_url: str = "http://127.0.0.1:8081", cameras: str = "front", see_after_moves: bool = False,
+              think: str = "medium",
+              out_dir: Any = None) -> list[dict[str, Any]]:
+    """Run the cases with the agent and write one JSON line per case."""
     import json
     import statistics
     from collections import defaultdict
     from pathlib import Path
 
-    from robot.agent.planner import LocalPlanner
     from robot.mind.brain import Brain
 
-    if planner is None:
-        planner = LocalPlanner(Brain(brain_url), think=think)
-        if not planner.brain.healthy():
+    if brain is None:
+        brain = Brain(brain_url)
+        if not brain.healthy():
             raise SystemExit(f"llama-server is not answering on {brain_url}")
-
     rows: list[dict[str, Any]] = []
     by_category: dict[str, list[bool]] = defaultdict(list)
     for case in CASES:
         if only and case.id not in only:
             continue
-        passed, outcome, record, sim = run_case(case, planner, noise=noise)
+        passed, record, sim = run_case(case, brain, noise=noise, cameras=cameras,
+                                       see_after_moves=see_after_moves, think=think)
         by_category[case.category].append(passed)
-        row = {
-            "id": case.id,
-            "category": case.category,
-            "say": case.say,
-            "passed": passed,
-            "outcome": outcome,
-            "steps": len(record.intents),
-            "intents": [_intent_dict(intent) for intent in record.intents],
-            "problems": list(record.problems),
-            "plan_s": list(record.plan_s),
-            "said": [t for _, t in sim.trace.said],
+        rows.append({
+            "id": case.id, "category": case.category, "say": case.say, "passed": passed, "outcome": record.outcome,
+            "turns": len(record.steps), "steps": record.lines(), "problems": list(record.problems),
+            "model_s": [s.model_s for s in record.steps], "said": [t for _, t in sim.trace.said],
             "simulated_s": round(sim.t, 1),
-        }
-        rows.append(row)
-        print(
-            f"[{'ok' if passed else 'XX'}] {case.id:<4} {case.say[:56]:<56} {outcome:<9} "
-            f"steps {len(record.intents):<2} plan {sum(record.plan_s):5.1f} s  "
-            f"{(record.problems or [''])[-1][:70]}",
-            flush=True,
-        )
+        })
+        last = record.lines()[-1] if record.lines() else ""
+        print(f"[{'ok' if passed else 'XX'}] {case.id:<4} {case.say[:52]:<52} {record.outcome:<9} "
+              f"turns {len(record.steps):<2} model {record.model_s:5.1f} s  {last[:80]}", flush=True)
 
     passed_count = sum(r["passed"] for r in rows)
-    print(f"\n{tag}: {passed_count}/{len(rows)} = {100 * passed_count / max(1, len(rows)):.0f}% pass (target 80%)")
+    print(f"\n{tag}: {passed_count}/{len(rows)} = {100 * passed_count / max(1, len(rows)):.0f}% pass")
     for category, oks in by_category.items():
         print(f"  {category:<12} {sum(oks)}/{len(oks)}")
-    first = [r["plan_s"][0] for r in rows if r["plan_s"]]
-    if first:
-        print(f"  first step plan: median {statistics.median(first):.2f} s")
-
-    out = Path(out_dir).expanduser() if out_dir is not None else Path("~/robot-runtime/runs/v2").expanduser()
+    turns = [r["model_s"][0] for r in rows if r["model_s"]]
+    if turns:
+        print(f"  first model turn: median {statistics.median(turns):.2f} s")
+    out = Path(out_dir).expanduser() if out_dir is not None else Path("~/robot-runtime/runs").expanduser()
     out.mkdir(parents=True, exist_ok=True)
     out_file = out / f"{tag}.jsonl"
     with out_file.open("w", encoding="utf-8") as f:
@@ -443,18 +406,22 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tag", default="planner")
+    parser.add_argument("--tag", default="agent")
     parser.add_argument("--only", nargs="*", default=[])
-    parser.add_argument("--think", type=int, default=0, help="let the model reason first, in up to this many chars")
     parser.add_argument("--noise", type=float, default=0.0, help="detector noise, 0 (perfect) to 1 (poor)")
-    parser.add_argument("--brain", default="http://127.0.0.1:8080", help="llama-server URL")
+    parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="medium", help="how long the model may reason before each turn")
+    parser.add_argument("--cameras", choices=("front", "all"), default="front",
+                        help="pictures sent with each request: the front camera, or all three")
+    parser.add_argument("--see-after-moves", action="store_true", help="fresh pictures after every move too")
+    parser.add_argument("--brain", default="http://127.0.0.1:8081", help="llama-server URL")
     parser.add_argument("--list", action="store_true", help="list suite cases and exit")
     args = parser.parse_args()
     if args.list:
         for case in CASES:
             print(f"{case.id:<4} {case.category:<12} {case.say}")
         return
-    run_planner(args.tag, args.only, think=args.think, noise=args.noise, brain_url=args.brain)
+    run_suite(args.tag, args.only, noise=args.noise, brain_url=args.brain, cameras=args.cameras,
+              see_after_moves=args.see_after_moves, think=args.think)
 
 
 if __name__ == "__main__":

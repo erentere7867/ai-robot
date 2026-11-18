@@ -55,16 +55,6 @@ _FONT_5X7: dict[str, list[int]] = {
     "_": [0, 0, 0, 0, 0, 0, 0b11111],
 }
 
-BOX_PALETTE = [
-    (240, 60, 60),
-    (60, 200, 60),
-    (60, 120, 240),
-    (240, 190, 40),
-    (200, 60, 240),
-    (60, 230, 230),
-    (255, 140, 20),
-]
-
 PATH_PALETTE = [
     (0, 230, 120),
     (0, 180, 255),
@@ -156,17 +146,18 @@ def draw_set_of_mark(rgb: np.ndarray,
                 _draw_rect(out, bx0, by0, bx0 + tag_w, by0 + tag_h, path_color, thickness=1)
                 _draw_text(out, tag, bx0 + 2, by0 + 2, path_color, scale=scale)
 
-    # 2. Draw bounding boxes + solid [ID] badges
+    # 2. Thin black-and-white outlines and plain black badges with white numbers. The marks have no colour of their
+    #    own: coloured boxes made the vision model call a red bike "blue", the colour of the box drawn round it.
     for item in boxes_and_ids:
         if len(item) == 3:
             box, track_id, label = item
-            badge_str = f"[{track_id} {label}]" if label else f"[{track_id}]"
+            badge_str = f"{track_id} {label}" if label else f"{track_id}"
         else:
             box, track_id = item
-            badge_str = f"[{track_id}]"
-        color = BOX_PALETTE[track_id % len(BOX_PALETTE)]
+            badge_str = f"{track_id}"
         x1, y1, x2, y2 = (int(round(v)) for v in box)
-        _draw_rect(out, x1, y1, x2, y2, color, thickness=2)
+        _draw_rect(out, x1, y1, x2, y2, (0, 0, 0), thickness=1)
+        _draw_rect(out, x1 + 1, y1 + 1, x2 - 1, y2 - 1, (255, 255, 255), thickness=1)
 
         scale = 2
         bw = len(badge_str) * 6 * scale + 4
@@ -176,7 +167,7 @@ def draw_set_of_mark(rgb: np.ndarray,
         bx0 = max(0, min(w - bw, x1))
         by0 = y1 - bh if y1 >= bh else y1
 
-        out[by0:by0 + bh, bx0:bx0 + bw] = color
+        out[by0:by0 + bh, bx0:bx0 + bw] = (0, 0, 0)
         _draw_text(out, badge_str, bx0 + 2, by0 + 2, (255, 255, 255), scale=scale)
 
     return out

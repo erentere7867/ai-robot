@@ -204,7 +204,7 @@ def main() -> None:
         return
     brain, tally = Brain(), Tally()
     if not brain.healthy():
-        raise SystemExit("llama-server is not answering on http://127.0.0.1:8080")
+        raise SystemExit("llama-server is not answering on http://127.0.0.1:8081")
     photos = json.loads((DATA / "manifest.json").read_text(encoding="utf-8"))[:args.photos]
     check_photos(brain, tally, photos)
     print("\ngroup               score")

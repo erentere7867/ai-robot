@@ -1,0 +1,10 @@
+# Try Sprocket from Windows: start the model if needed, then the simulated room and the live page (in WSL).
+#   powershell -ExecutionPolicy Bypass -File tools\demo.ps1                  # then open http://127.0.0.1:8765
+#   powershell -ExecutionPolicy Bypass -File tools\demo.ps1 --scene "two rooms"
+# Extra arguments go to `python -m robot.interfaces.demo` (--case O3, --cameras all, --port 8766, ...). Ctrl+C stops it.
+$repo = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot "brain.ps1")
+if (-not $?) { exit 1 }
+$extra = ($args | ForEach-Object { if ("$_" -match "\s") { "'$_'" } else { "$_" } }) -join " "
+"open http://127.0.0.1:8765 (Ctrl+C here stops the demo; the model keeps running)"
+wsl --cd "$repo" -e bash -lc "exec ~/sprocket-venv/bin/python -m robot.interfaces.demo $extra"

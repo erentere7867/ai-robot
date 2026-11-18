@@ -10,10 +10,17 @@ import numpy as np
 
 
 def name(pixels: np.ndarray) -> str:
-    """The colour of an (N, 3) array of RGB pixels in 0..255: the median pixel's hue, saturation and value."""
+    """The colour of an (N, 3) array of RGB pixels in 0..255: the median pixel's hue, saturation and value; or, when
+    some of the pixels are clearly coloured, the median of those. People name a bike by its frame: in the 3D home a
+    red bike's frame was 18% of its pixels and a blue one's 9%, the rest black tyres and grey spokes."""
     if pixels.size == 0:
         return ""
-    rgb = np.median(pixels.reshape(-1, 3).astype(float), axis=0) / 255.0
+    px = pixels.reshape(-1, 3).astype(float)
+    hi, lo = px.max(axis=1), px.min(axis=1)
+    colourful = ((hi - lo) / np.maximum(hi, 1e-6) > 0.35) & (hi > 50)
+    if colourful.mean() >= 0.08 and colourful.sum() >= 20:
+        px = px[colourful]
+    rgb = np.median(px, axis=0) / 255.0
     r, g, b = rgb
     hi, lo = max(rgb), min(rgb)
     value, chroma = hi, hi - lo

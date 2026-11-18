@@ -1,4 +1,4 @@
-"""A 2D kinematic world behind the robot API: fast enough for the gate's dry run, honest enough for the test suite.
+"""A 2D kinematic world behind the robot API: fast enough for the suite, honest enough to trust its checks.
 
 The floor is an occupancy grid with walls; things are labelled discs with facts, and people can walk routes. The
 robot is a 0.30 m disc under the firmware's speed limits, and the collision monitor, camera range, live vocabulary,
@@ -14,7 +14,7 @@ import random
 import re
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -62,6 +62,20 @@ MOTION = {
     "wake_turn",
     "motion_sequence",
     "pursue",
+}
+CAMERA_YAWS = {"front_camera": 0.0, "rear_left_camera": 2 * math.pi / 3, "rear_right_camera": -2 * math.pi / 3}
+CAMERA_HFOV, CAMERA_HEIGHT, WALL_H = 2.44, 0.22, 2.4  # as on the robot (robot/ros/model.py)
+HEIGHTS = {  # metres, for drawing things in the simulated cameras
+    "person": 1.7, "chair": 0.9, "sofa": 0.85, "couch": 0.85, "table": 0.75, "desk": 0.75, "box": 0.35, "ball": 0.22,
+    "backpack": 0.45, "bag": 0.45, "plant": 0.9, "lamp": 1.5, "door": 2.0, "tv": 1.0, "fridge": 1.8, "bed": 0.55,
+    "cup": 0.1, "mug": 0.1, "bottle": 0.25, "shelf": 1.8, "cabinet": 1.0, "bin": 0.5, "keys": 0.05, "shoe": 0.1,
+    "book": 0.05, "laptop": 0.05, "phone": 0.03, "cat": 0.3, "dog": 0.55, "toy": 0.2, "pillow": 0.2, "charger": 0.05,
+}
+RGB = {
+    "red": (200, 40, 40), "orange": (235, 130, 30), "yellow": (230, 200, 40), "green": (60, 150, 60),
+    "blue": (50, 90, 200), "purple": (130, 60, 170), "pink": (230, 130, 170), "brown": (125, 82, 45),
+    "black": (35, 35, 38), "white": (238, 238, 232), "grey": (128, 128, 128), "gray": (128, 128, 128),
+    "person": (60, 70, 110),
 }
 BASE_VOCABULARY = frozenset("""person chair sofa couch table desk box ball backpack bag cup mug bottle plant lamp tv bed
 door shoe book laptop phone cat dog charger bin toy pillow shelf cabinet fridge sink window basket""".split())
@@ -165,7 +179,6 @@ class Trace:
     said: list[tuple[float, str]] = field(default_factory=list)
     asked: list[tuple[float, str, str]] = field(default_factory=list)
     listened: list[float] = field(default_factory=list)
-    announced: list[tuple[float, str]] = field(default_factory=list)  # the planner's say_first, not the program's
     notes: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     bumps: int = 0
@@ -175,17 +188,16 @@ class Trace:
     postures: list[tuple[float, str]] = field(default_factory=list)
 
 
-class BudgetSpent(BaseException):
-    """A dry run used up its calls or simulated time."""
+class BudgetSpent(Preempted):
+    """A task used up its simulated time (time running out is a kind of preemption)."""
 
 
 class SimRobot:
     """The robot API on a simulated floor. `realtime` paces motion like the real robot (for preemption tests)."""
 
-    def __init__(self, scene: Scene, *, realtime: bool = False, max_calls: int | None = None,
-                 max_time: float = 600.0) -> None:
+    def __init__(self, scene: Scene, *, realtime: bool = False, max_time: float = 600.0) -> None:
         self.scene = scene
-        self.realtime, self.max_calls, self.max_time = realtime, max_calls, max_time
+        self.realtime, self.max_time = realtime, max_time
         for i, thing in enumerate(scene.things, 1):
             thing.id = thing.id or i
         self.things = {t.id: t for t in scene.things}
@@ -209,7 +221,6 @@ class SimRobot:
         self.trace = Trace(poses=[(0.0, self.x, self.y, self.yaw)])
         self.body = BodyController()
         self.posture = "neutral"
-        self.scratchpad_summary = ""
         self._cancel = threading.Event()
         self._last_perceive = -1.0
         self._build_grid()
@@ -612,11 +623,8 @@ class SimRobot:
 
     # ---- the API ------------------------------------------------------------------------------------------------
     def _call(self, call: str = "", /, **args: Any) -> None:
-        """Every API call: count it against the dry run's budget, log it for the readback, honour a stop."""
+        """Every API call: count it, log it for the suite's checks, honour a stop."""
         self.trace.calls += 1
-        if self.max_calls is not None and self.trace.calls > self.max_calls:
-            self.ended_by = "budget"
-            raise BudgetSpent(f"made {self.max_calls} robot calls")
         if call:
             self.trace.events.append(Event(round(self.t, 2), call, args, (self.x, self.y, self.yaw)))
         if call in MOTION:  # any new motion replaces a background skill
@@ -784,10 +792,17 @@ class SimRobot:
 
     # ---- skills -------------------------------------------------------------------------------------------------
     def search(self, description: str, area: str = "here") -> Object | None:
-        """Memory first, checked in person; then camera coverage, viewpoint by viewpoint, until it is in view."""
+        """In view now: done, without moving. Otherwise memory first, checked in person; then camera coverage,
+        viewpoint by viewpoint, until it is in view."""
         self._call("search", description=description, area=area)
         self._watch(description)
         region, started = self._area(area), self.t
+        in_view = [t for t in self._matching(description, self._in_view())
+                   if not region or self._room_at(*self._where(t)) == region]
+        if in_view:
+            found = self._object(in_view[0])
+            self._result(f"found {found.label} {found.id} in view")
+            return found
         for o in self._remembered(description):
             if region and self._room_at(*o.position) != region:
                 continue
@@ -968,7 +983,7 @@ class SimRobot:
         self.trace.postures.append((round(self.t, 2), posture))
         if chime_kind:
             self.trace.chimes.append((round(self.t, 2), chime_kind))
-        steps = max(1, round(float(seconds) / DT))
+        steps = round(float(seconds) / DT)  # 0: just the posture and the chime, no motion
         for s in range(steps):
             t_in = s * DT
             v, w = self.body.aliveness_velocity(posture, t_in, (self.x, self.y, self.yaw))
@@ -1036,28 +1051,68 @@ class SimRobot:
                 self._step(v, w)
         self._halt()
 
-    def render_view(self, width: int = 320, height: int = 240) -> np.ndarray:
-        """Fast synthetic top-down or perspective RGB camera frame of visible objects & floor."""
-        frame = np.full((height, width, 3), 220, dtype=np.uint8)
-        cx, cy = width // 2, height // 2
-        frame[max(0, cy - 3):min(height, cy + 4), max(0, cx - 3):min(width, cx + 4)] = [50, 50, 200]
-        for t in self._visible():
-            p = self._where(t)
-            if p is None:
+    def camera_view(self, camera: str = "front_camera", width: int = 512, height: int = 288) -> np.ndarray:
+        """What one of the three cameras sees: walls, floor and every thing in its view at its size, colour and
+        bearing, drawn in perspective, with the tracker's ids marked on the things it has detected. Simple shapes,
+        but the vision model reads colours, sizes, counts and directions from the picture as it would on the robot."""
+        from robot.perception.overlay import draw_set_of_mark
+
+        yaw0 = self.yaw + CAMERA_YAWS[camera]
+        f = width / CAMERA_HFOV  # pixels per radian, equiangular across the wide lens
+        horizon = height // 2
+        img = np.empty((height, width, 3), np.uint8)
+        img[:horizon], img[horizon:] = (196, 204, 214), (176, 158, 128)
+        rows = np.arange(height)[:, None]
+        # walls: one ray per column
+        angles = yaw0 + (width / 2 - (np.arange(width) + 0.5)) / f
+        steps = np.arange(RADIUS, 15.0, RES / 2)
+        px, py = self.x + np.outer(np.cos(angles), steps), self.y + np.outer(np.sin(angles), steps)
+        ii = np.clip(((px + self.scene.width / 2) / RES).astype(int), 0, self.walls.shape[0] - 1)
+        jj = np.clip(((py + self.scene.height / 2) / RES).astype(int), 0, self.walls.shape[1] - 1)
+        hits = self.walls[ii, jj]
+        d = np.where(hits.any(axis=1), steps[hits.argmax(axis=1)], steps[-1]) * np.cos(angles - yaw0).clip(0.2)
+        top = horizon - f * np.arctan((WALL_H - CAMERA_HEIGHT) / d)
+        bottom = horizon + f * np.arctan(CAMERA_HEIGHT / d)
+        shade = (232 - np.clip(d, 0, 8) * 9).astype(np.uint8)
+        wall = (rows >= top[None, :]) & (rows <= bottom[None, :])
+        img[wall] = np.stack([shade, shade - 6, shade - 14], axis=1)[np.nonzero(wall)[1]]
+        # things, far to near; `owner` keeps which thing is in front at each pixel
+        boxes: dict[int, tuple[int, int, int, int]] = {}
+        owner = np.full((height, width), -1, np.int32)
+        seen = [(t, self._where(t)) for t in self._visible()]
+        for t, p in sorted(seen, key=lambda tp: -math.dist(tp[1], (self.x, self.y))):
+            dist = max(0.2, math.dist(p, (self.x, self.y)))
+            bearing = wrap(math.atan2(p[1] - self.y, p[0] - self.x) - yaw0)
+            half = math.atan2(t.radius, dist)
+            if abs(bearing) - half > CAMERA_HFOV / 2:
                 continue
-            dx, dy = p[0] - self.x, p[1] - self.y
-            xf = dx * math.cos(self.yaw) + dy * math.sin(self.yaw)
-            yf = -dx * math.sin(self.yaw) + dy * math.cos(self.yaw)
-            scale = 25.0
-            px = int(cx - yf * scale)
-            py = int(cy - xf * scale)
-            r_px = max(3, int(t.radius * scale))
-            if 0 <= px < width and 0 <= py < height:
-                y0, y1 = max(0, py - r_px), min(height, py + r_px + 1)
-                x0, x1 = max(0, px - r_px), min(width, px + r_px + 1)
-                color = [30, 160, 30] if t.label != "person" else [200, 80, 40]
-                frame[y0:y1, x0:x1] = color
-        return frame
+            x0, x1 = int(width / 2 - f * (bearing + half)), int(width / 2 - f * (bearing - half))
+            y1 = int(horizon + f * math.atan2(CAMERA_HEIGHT, dist))
+            y0 = int(horizon - f * math.atan2(HEIGHTS.get(t.label, 0.5) - CAMERA_HEIGHT, dist))
+            xa, xb, ya, yb = max(0, x0), min(width, x1 + 1), max(0, y0), min(height, y1 + 1)
+            if xa >= xb or ya >= yb:
+                continue
+            color = np.array(RGB.get(t.color, RGB.get(t.label, (150, 120, 90))), np.uint8)
+            img[ya:yb, xa:xb] = color
+            img[ya:yb, xa:min(xb, xa + 2)] = img[ya:yb, max(xa, xb - 2):xb] = (color * 0.55).astype(np.uint8)
+            owner[ya:yb, xa:xb] = t.id
+            if t.person:  # a head on top
+                head = max(2, (x1 - x0) // 3)
+                cx = (x0 + x1) // 2
+                img[max(0, y0 - 2 * head):max(0, y0), max(0, cx - head):max(0, cx + head)] = (224, 180, 150)
+            if t.id in self.memory and self._detectable(t):
+                boxes[t.id] = (xa, ya, xb - 1, yb - 1)  # clipped to the picture, so the id stays on it
+        # an id is marked only where its thing can be seen, not on whatever hides it
+        marks = []
+        for tid, (x0, y0, x1, y1) in boxes.items():
+            area = max(1, (x1 + 1 - x0) * (y1 + 1 - y0))
+            if (owner == tid).sum() >= 0.3 * area:
+                marks.append(((x0, y0, x1, y1), tid))
+        return draw_set_of_mark(img, marks) if marks else img
+
+    def render_view(self, width: int = 512, height: int = 288) -> np.ndarray:
+        """The front camera, for the live page and the frontier scorer."""
+        return self.camera_view("front_camera", width, height)
 
     def wait_for(self, description: str, seconds: float | None = None) -> Object | None:
         self._call("wait_for", description=description, seconds=seconds)
@@ -1293,9 +1348,9 @@ class SimRobot:
         self._call()
         return round(self.t, 2)
 
-    # ---- for the agent, the gate and the suite (not part of the program API) ------------------------------------
+    # ---- for the agent and the suite (not tools) ------------------------------------
     def snapshot(self) -> dict[str, Any]:
-        """What the context builder needs: pose, room, rooms, battery, objects, user, scratchpad, notes."""
+        """What the agent tells the model: pose, room, rooms, battery, objects, user, notes."""
         user = next((t for t, _ in self._people() if t.user), None)
         objects = [self._object(self.things[i], where, when) for i, (where, when) in self.memory.items()]
         if user is not None and user.id not in self.memory:
@@ -1307,27 +1362,23 @@ class SimRobot:
             "battery": max(0.0, 1.0 - self.t / 10800.0),
             "objects": objects,
             "user": user.id if user else None,
-            "scratchpad": getattr(self, "scratchpad_summary", ""),
             "notes": list(self.notes),
             "posture": getattr(self, "posture", "neutral"),
         }
 
     def begin(self) -> None:
-        """A new task starts here: "start" names this spot, and an earlier stop no longer applies."""
+        """A new task starts here: "start" names this spot, "where you were before" the start of the task before it
+        (so "come back" has somewhere to go), and an earlier stop no longer applies."""
         self._task_t0 = self.t
+        last = self.places.get("start")
+        if last is not None and math.dist((last.x, last.y), (self.x, self.y)) > 0.3:  # not just another name for here
+            self.places["where you were before"] = last
         self.places["start"] = Pose(self.x, self.y, math.degrees(self.yaw))
         self._cancel.clear()
         self.ended_by = ""
         self._behaviour = None
 
-    def announce(self, text: str) -> None:
-        """The planner's first sentence, spoken before the program runs."""
-        self.trace.announced.append((round(self.t, 2), str(text)))
-
-    def clone(self, **limits: Any) -> SimRobot:
-        """A copy of the world as it is now, with a fresh trace, for a dry run."""
-        twin = SimRobot(replace(self.scene, start=Pose(self.x, self.y, math.degrees(self.yaw))), **limits)
-        twin.t, twin.memory, twin.vocabulary = self.t, dict(self.memory), set(self.vocabulary)
-        twin.notes, twin.replies, twin.coverage = list(self.notes), list(self.replies), self.coverage.copy()
-        twin.places = dict(self.places)
-        return twin
+    def resume(self) -> None:
+        """Carry on after an interruption (the user spoke mid-step), keeping the task's start and places."""
+        self._cancel.clear()
+        self.ended_by = ""
