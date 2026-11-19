@@ -59,10 +59,11 @@ class Home:
         self.server, port = start(scene)
         self.world = Habitat(port)
         self.truth = self.world.call(op="info")  # the judge's: never handed to the robot
-        self.hardware = subprocess.Popen(
-            [sys.executable, "-u", "-m", "robot.sim.habitat_ros", "--port", str(port), "--rtf", str(rtf),
-             "--seed", str(seed)], stdout=open(self.out / "hardware.log", "w"), stderr=subprocess.STDOUT,
-            start_new_session=True)
+        with open(self.out / "hardware.log", "w") as log:
+            self.hardware = subprocess.Popen(
+                [sys.executable, "-u", "-m", "robot.sim.habitat_ros", "--port", str(port), "--rtf", str(rtf),
+                 "--seed", str(seed)], stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True)
         self.software: bringup.Running | None = None
         self._judge_node()
         self.map = MAPS / f"{scene}.yaml"
