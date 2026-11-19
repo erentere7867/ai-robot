@@ -61,7 +61,9 @@ class Referee:
 
 # ---- what the checks read ----------------------------------------------------------------------------------------
 def out_dir() -> Path:
-    return Path("~/robot-runtime/runs").expanduser()
+    from robot import paths
+
+    return paths.RUNS
 
 
 def keep_pictures(robot: Any, folder: Path) -> list[tuple[float, str]]:

@@ -1,0 +1,23 @@
+# Lint and the unit tests on every pull request and every push to main. They need no GPU, ROS or Habitat; the 3D
+# apartment runs only on a machine set up as docs/usage.md describes.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[eval,dev]" onnxruntime
+      - name: Lint
+        run: ruff check .
+      - name: Tests
+        run: pytest -q

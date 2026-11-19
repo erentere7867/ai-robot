@@ -20,7 +20,9 @@ from typing import Any
 
 import numpy as np
 
-VOICE = Path("~/sprocket-models/voice/en_US-lessac-medium.onnx").expanduser()
+from robot import paths
+
+VOICE = paths.MODELS / "voice" / "en_US-lessac-medium.onnx"
 
 
 def read_wav(data: bytes) -> tuple[np.ndarray, int]:
