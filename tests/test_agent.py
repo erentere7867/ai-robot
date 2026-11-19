@@ -111,3 +111,12 @@ def test_each_motion_says_what_the_request_has_done_so_far():
     second = tool_results(brain.seen[2])[-1]  # what the model reads after its second full turn
     assert "turned 360 degrees left; turned 360 degrees left; 720 degrees of turning in all" in second
     assert "facing the way it began" in second
+
+
+def test_a_number_written_with_an_exponent_or_a_leading_dot_still_moves_the_robot():
+    sim = SimRobot(living_room())
+    brain = Scripted(call("turn", degrees="9e1", direction="left"), call("move", metres=".5", direction="forward"),
+                     say("Done."), say("Turned and moved."))
+    Agent(brain).do("Turn left a quarter turn, then go forward half a metre.", sim)
+    results = tool_results(brain.seen[2])
+    assert results[0].startswith("Turned 90 degrees left.") and "0.5" in results[1]
