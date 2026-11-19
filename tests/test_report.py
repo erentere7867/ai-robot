@@ -39,7 +39,9 @@ def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):
     assert "The sofa is ahead." in text and "go_to(target=&#x27;sofa&#x27;)" in text and "001_front_camera.jpg" in text
     assert "sofa 3: a real one is there" in text and "tv 4: no real one there; nearest real thing: sofa" in text
     assert text.index("The sofa is ahead.") < text.index("search sofa") < text.index("001_front_camera.jpg")
-    assert "apt_0/N1/report.html" in report.index(tmp_path, [row]).read_text()
+    index = report.index(tmp_path, [row]).read_text()
+    assert "apt_0/N1/report.html" in index
+    assert all('<meta name=viewport content="width=device-width,initial-scale=1">' in page for page in (text, index))
 
 
 def test_same_mission_keeps_each_layout_report_and_photos(tmp_path):

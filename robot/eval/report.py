@@ -143,14 +143,17 @@ def write(folder: Path, task: Any, row: dict, records: list, robot: Any, home: A
     # what went wrong outside the model's turns (the model server timing out, a check that failed): without it a
     # task that failed before its first turn shows only its apology
     problems = "".join(f"<li>{html.escape(p)}</li>" for p in row["problems"])
-    page = f"""<!doctype html><html><head><meta charset=utf-8><title>{html.escape(task.id)}</title><style>
-body{{font:14px system-ui;background:#111;color:#ddd;margin:16px}} img{{max-width:100%}}
+    page = f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>{html.escape(task.id)}</title><style>
+body{{font:14px system-ui;background:#111;color:#ddd;margin:16px;overflow-wrap:anywhere}} img{{max-width:100%}}
 .pass{{color:#6f6}}.fail{{color:#f66}} .turn{{border-left:3px solid #48f;padding:6px 10px;margin:10px 0}}
 .thought{{color:#999;font-style:italic;white-space:pre-wrap}} .call{{margin:4px 0;padding:4px 6px;background:#1c1c24}}
 .call.bad{{background:#2a1515}} .reply{{color:#fd6}} .asked{{color:#9cf;margin:6px 0}} .t{{color:#777;font-size:12px}}
 figure{{display:inline-block;margin:4px;width:31%}} figcaption{{font-size:11px;color:#888}}
 li.false{{color:#f77}} li.gone{{color:#888}} li.real{{color:#8bf}}
 .cols{{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:16px}}
+@media(max-width:720px){{body{{margin:10px}} h1{{font-size:22px}} .cols{{grid-template-columns:1fr}}
+figure{{width:calc(50% - 8px);vertical-align:top}}}}
 </style></head><body>
 <h1>{html.escape(task.id)}: {html.escape(' / '.join(task.says))} <span class={'pass' if row['passed'] else 'fail'}>
 {'passed' if row['passed'] else 'FAILED'}</span></h1>
@@ -174,8 +177,11 @@ def index(run: Path, rows: list[dict]) -> Path:
                     f"{html.escape(r['scene'])} · {html.escape(r['id'])}: {html.escape(' / '.join(r['says']))}</a> "
                     f"{'passed' if r['passed'] else 'FAILED'}</li>" for r in rows)
     out = run / "index.html"
-    out.write_text(f"<!doctype html><html><head><meta charset=utf-8><title>{html.escape(run.name)}</title><style>"
-                   "body{font:15px system-ui;background:#111;color:#ddd;margin:16px}a{color:#9cf}.fail a{color:#f88}"
+    out.write_text('<!doctype html><html><head><meta charset=utf-8>'
+                   '<meta name=viewport content="width=device-width,initial-scale=1">'
+                   f"<title>{html.escape(run.name)}</title><style>"
+                   "body{font:15px system-ui;background:#111;color:#ddd;margin:16px;overflow-wrap:anywhere}"
+                   "a{color:#9cf}.fail a{color:#f88}@media(max-width:720px){body{margin:10px}h1{font-size:22px}}"
                    f"</style></head><body><h1>{html.escape(run.name)}</h1><ul>{lines}</ul></body></html>",
                    encoding="utf-8")
     return out
