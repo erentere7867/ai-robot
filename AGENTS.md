@@ -16,7 +16,7 @@ design is in [docs/architecture.md](docs/architecture.md).
 4. **The simulator runs the real robot.** In the 3D apartment only the world, the body and the raw sensors are
    simulated; perception, depth, Nav2 and the agent are the robot's own. Nothing from the simulator's truth reaches the
    robot; the truth is for judging only.
-5. **Judge the harness in 3D, not only in 2D**, and read the task reports (`~/robot-runtime/runs/<tag>/<task>/report.html`)
+5. **Judge the harness in 3D, not only in 2D**, and read the task reports (`~/robot-runtime/runs/<tag>/<scene>/<task>/report.html`)
    before deciding what went wrong: say whether a failure is the harness, the body (Nav2, the map), the check, or the
    model. One run per task is noisy; repeat before calling a change better or worse.
 6. **Everything runs on the robot**: the Arduino VENTUNO Q (Adreno GPU, 40 TOPS NPU, 16 GB). No cloud models. Sensors

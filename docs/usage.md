@@ -75,7 +75,7 @@ bash "<repo>/tools/wsl/stop.sh"                # stops everything the run starte
 
 - `--live 8765` serves the live page while it runs: the request, each tool call and its result, the model's
   reasoning, the search's choices, the map and the three cameras.
-- Each task leaves a report at `~/robot-runtime/runs/<tag>/<task>/report.html` (also at
+- Each task leaves a report at `~/robot-runtime/runs/<tag>/<scene>/<task>/report.html` (also at
   `http://127.0.0.1:8765/runs/<tag>/index.html` while the run is live): the house's map with the real objects, what the
   robot believed was where (false ones in red), where it really went and where it thought it was; then every model turn
   with its reasoning, calls, results and the exact pictures it was given.
