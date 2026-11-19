@@ -94,7 +94,7 @@ def write_report(run: Path, task: Task, rows: list[dict], records: list, robot: 
     near = "; ".join(f"{gap((x, y), nearest(things(referee, n), (x, y))):.2f} m from the nearest real {n}'s edge"
                      for n in task.needs if things(referee, n))
     try:
-        report.write(run / task.id, task, rows[-1], records, robot, home, mark, kept,
+        report.write(run / home.scene / task.id, task, rows[-1], records, robot, home, mark, kept,
                      f"ended at ({x:.1f}, {y:.1f}) in the house" + (f": {near}" if near else ""))
         report.index(run, rows)
     except Exception as exc:  # noqa: BLE001 - a page for people to read must not end the run
@@ -311,7 +311,7 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                     continue
                 home.reset()
                 robot = home.robot(detector, brain)
-                kept = keep_pictures(robot, out.parent / tag / task.id)
+                kept = keep_pictures(robot, out.parent / tag / scene / task.id)
                 try:
                     home.wait(WATCH)  # sitting on its dock, looking around
                     robot._perceive_objects()
