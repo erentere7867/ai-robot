@@ -33,10 +33,45 @@ tests/        unit and integration tests
 tools/        start the model (brain.ps1, wsl/brain.sh) and the GPU vision server (win/), set up WSL and models
 ```
 
-## Quick start (Windows + WSL)
+## Where the behaviour lives
+
+| To change or understand... | Look at |
+| :--- | :--- |
+| What the model is told, and the agent loop | `robot/agent/agent.py` (`SYSTEM`, `Agent.do`) |
+| The tools the model can call, their descriptions and checks | `robot/agent/tools.py` |
+| What a tool does in the world: `search`, `go_to`, `follow`, ... | `robot/sim/world.py` (`SimRobot`), overridden on the real stack in `robot/ros/real.py` (`RealRobot`) |
+| Driving through Nav2 | `robot/ros/robot.py` (`RosRobot`) |
+| What YOLOE looks for, tracking, the model's check of each detection | `robot/perception/detector.py`, `robot/perception/tracker.py`, `robot/ros/perceive.py` |
+| YOLOE and depth on the GPU | `tools/win/vision_server.py` (Windows), `robot/perception/gpu.py` (its client) |
+| The model's own calls (yes/no, room names) | `robot/mind/brain.py` |
+| The 3D tasks and how each is judged | `robot/eval/home3d.py` (`TASKS`); reports: `robot/eval/report.py` |
+
+## Run it (Windows + WSL)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\demo.ps1    # model + vision server + the 3D apartment; open http://127.0.0.1:8765
+powershell -ExecutionPolicy Bypass -File tools\demo.ps1    # model + vision server + the 3D apartment; talk to it at http://127.0.0.1:8765
 ```
 
-First-time setup, the tests and the evals are in [docs/usage.md](docs/usage.md).
+```bash
+# in WSL, from the repo
+~/sprocket-venv/bin/python -m pytest -q && ~/sprocket-venv/bin/python -m ruff check .
+. tools/wsl/env.sh && cd ~/sprocket-models && python -m robot.eval.home3d --tag mine --rtf 0.5 --live 8765 --only N1 S1
+```
+
+First-time setup and everything else are in [docs/usage.md](docs/usage.md).
+
+## Debug a 3D run
+
+1. **Watch it live**: run with `--live 8765` and open http://127.0.0.1:8765. You see the request, every tool call and
+   its result, the model's reasoning, the search's choices as it makes them, the map, and the three cameras.
+2. **Read the task's report**: `~/robot-runtime/runs/<tag>/<task>/report.html` (while the run is live, also
+   http://127.0.0.1:8765/runs/<tag>/index.html). It has the house's map with the real objects; what the robot
+   believed was where, each marked real, false (with the real thing nearest it) or rejected; where it really went and
+   where it thought it was; numbered places where each call began; and a timeline of every model turn with its full
+   reasoning, its calls and their results, and the exact pictures the model was given.
+3. **Name the cause** before changing code: the harness (prompt, tools, results), perception (false or missing
+   detections), the body (Nav2 failing, "status 6", a goal it cannot reach), the check itself, or the model.
+4. **Rerun just that task** with `--only <id>`; one run is noisy, so repeat before calling a change better.
+5. **Logs**: `~/robot-runtime/runs/<tag>.jsonl` (one line per task: steps, what it knew, model time),
+   `~/robot-runtime/runs/home_<scene>/robot.log` (ROS, Nav2, depth), `hardware.log` (the simulated body),
+   `%TEMP%\sprocket-vision.log` and `%TEMP%\sprocket-llama.log` on Windows. Stop a run with `bash tools/wsl/stop.sh`.

@@ -1,7 +1,19 @@
 # Working on Sprocket
 
-For people and coding agents changing this repository. How to run things is in [docs/usage.md](docs/usage.md); the
-design is in [docs/architecture.md](docs/architecture.md).
+For people and coding agents changing this repository.
+
+## Start here
+
+1. [README.md](README.md): what the robot is, **where each behaviour lives in the code** (a table), how to run it, and
+   **how to debug a 3D run** (live page, per-task reports, logs).
+2. [docs/usage.md](docs/usage.md): setup and every command.
+3. [docs/architecture.md](docs/architecture.md): the design; section 6 is the agent as it is.
+4. [docs/simulation_3d.md](docs/simulation_3d.md): what has been measured, including what did not work and why (read
+   it before trying an idea again: picking numbered dots, the fixed word list and the fridge task are there).
+
+When a 3D task fails, open its report (`~/robot-runtime/runs/<tag>/<task>/report.html`) first: it shows what the robot
+believed against what was really there, where it went, and every model turn with the pictures it was given. Most
+wrong guesses about a failure end there.
 
 ## Rules
 
