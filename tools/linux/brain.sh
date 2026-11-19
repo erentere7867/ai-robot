@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Start the robot's model (LFM3-VL-2B) with llama.cpp built in WSL or on Linux (the board), on port 8081: on the GPU
 # when llama.cpp was built with CUDA (~/llama.cpp/build-cuda), else on the CPU. On Windows use tools\brain.ps1.
-#   bash tools/wsl/brain.sh                    # 4 CPU threads by default
-#   SPROCKET_BRAIN_THREADS=8 bash tools/wsl/brain.sh  # CPU-only server with spare cores
+#   bash tools/linux/brain.sh                        # 4 CPU threads by default
+#   SPROCKET_BRAIN_THREADS=8 bash tools/linux/brain.sh  # CPU-only server with spare cores
 set -euo pipefail
 
-MODELS_DIR="${SPROCKET_MODELS_DIR:-$HOME/sprocket-models}"
+MODELS_DIR="${SPROCKET_MODELS_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/models}"
 MODEL="$MODELS_DIR/llm/LFM3-VL-2B-QAD-Q4_0.gguf"
 MMPROJ="$MODELS_DIR/llm/mmproj-LFM3-VL-2B-F16.gguf"
 
@@ -28,8 +28,8 @@ else
     exit 2
   fi
 fi
-[ -f "$MODEL" ] || { echo "missing model: $MODEL (see tools/wsl/setup_models.sh)"; exit 1; }
-[ -f "$MMPROJ" ] || { echo "missing vision projector: $MMPROJ (see tools/wsl/setup_models.sh)"; exit 1; }
+[ -f "$MODEL" ] || { echo "missing model: $MODEL (see tools/linux/setup_models.sh)"; exit 1; }
+[ -f "$MMPROJ" ] || { echo "missing vision projector: $MMPROJ (see tools/linux/setup_models.sh)"; exit 1; }
 nohup "$bin" -m "$MODEL" --mmproj "$MMPROJ" $gpu -c 32768 -np 2 --jinja --swa-full --port 8081 -t "$threads" \
   > ~/llama-wsl.log 2>&1 &
 echo "starting LFM3-VL-2B on the $where ($MODEL)..."

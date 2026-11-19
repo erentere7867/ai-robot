@@ -3,7 +3,7 @@
 the real robot. Nothing of the truth reaches the robot: the first time in a home it explores and builds its own map
 (slam_toolbox); afterwards it localises in that map (AMCL), from its dock, where its map's frame begins.
 
-    home = Home("apt_0")                     # explores and saves ~/sprocket-maps/apt_0.yaml the first time
+    home = Home("apt_0")                     # explores and saves maps/apt_0.yaml the first time
     robot = home.robot(detector, brain)      # a RealRobot at its dock that knows only its own map
     home.reset()                             # carried back to the dock (between eval tasks)
     home.truth, home.path                    # the judge's: the objects, and where the body really went
@@ -23,11 +23,12 @@ from typing import Any
 
 import numpy as np
 
+from robot import paths
 from robot.ros import bringup
 from robot.sim.habitat import Habitat, start
 
-MAPS = Path("~/sprocket-maps").expanduser()
-RUNS = Path("~/robot-runtime/runs").expanduser()
+MAPS = paths.MAPS
+RUNS = paths.RUNS
 RTF = 0.33  # simulated seconds per wall second: the robot's software gets about the board's work done per second
 SIMULATOR = ("robot.sim.habitat_ros", "habitat_server.py")  # what stands in for the home and the hardware
 

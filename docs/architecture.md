@@ -87,7 +87,7 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
    `follow("the cat")`, `go_to("ball")`), and gives their boxes and masks to ranging and tracking, so the fast loops
    run without the model. There is no fixed household list: in the apartment one added about 1.4 wrong names a
    picture, and big furniture was found under 8% of the time from 22 cm anyway. In the simulator YOLOE and depth run on
-   the Windows GPU (`tools/win/vision_server.py`, DirectML: 75 and 82 ms a frame); on the board, on its NPU.
+   the Windows GPU (`tools/vision_server.py`, DirectML: 75 and 82 ms a frame); on the board, on its NPU.
 1. **Metric depth from the floor (`depth.py`, the depth node in `robot/ros/perceive.py`):**
    - `Depth Anything V2 small` (ONNX) estimates relative inverse depth for each camera's newest frame.
    - `fit_to_floor()` turns it into metres: the camera's height and the IMU's tilt give the floor's true distance at

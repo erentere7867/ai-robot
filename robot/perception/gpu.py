@@ -1,4 +1,4 @@
-"""The client of the GPU vision server (tools/win/vision_server.py): YOLOE and depth run on the Windows GPU, everything
+"""The client of the GPU vision server (tools/vision_server.py): YOLOE and depth run on the Windows GPU, everything
 around them (the words' text features, masks, feet, ranges, tracking) stays here."""
 
 from __future__ import annotations

@@ -22,10 +22,11 @@ import cv2
 import httpx
 import numpy as np
 
+from robot import paths
 from robot.mind.brain import Brain, Reply
 
-DATA = Path("~/robot-runtime/datasets/m0").expanduser()
-RESULTS = Path("~/robot-runtime/runs/m0").expanduser()
+DATA = paths.DATA / "m0"
+RESULTS = paths.RUNS / "m0"
 ANNOTATIONS = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
 ROOM = {"chair", "couch", "bed", "dining table", "tv", "toilet", "sink", "refrigerator", "oven", "microwave",
         "potted plant"}

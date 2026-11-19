@@ -1,6 +1,8 @@
-"""The GPU vision server: YOLOE (open-vocabulary detection) and Depth Anything (depth) on the Windows GPU, through
-ONNX Runtime with DirectML, for the robot stack in WSL. WSL has no GPU compute for the RX 6600 (no ROCm), and on the
-CPU YOLOE took about 400 ms a frame against 75 ms here. On the board the same ONNX files are meant for its NPU.
+"""The vision server: YOLOE (open-vocabulary detection) and Depth Anything (depth) through ONNX Runtime, for the
+robot's software. On the development PC it runs on the Windows GPU with DirectML (tools/win/vision.ps1), as WSL has no
+GPU compute for its RX 6600; there YOLOE takes 75 ms a frame against about 400 ms on the CPU. On a Linux machine it
+runs on the CPU or an NVIDIA GPU (tools/linux/vision.sh, `--provider`). On the board the same ONNX files are meant
+for its NPU.
 
 Requests and answers are numpy archives (np.savez) over HTTP on 127.0.0.1:
   POST /detect?conf=0.22&n=3   picture uint8 720x1280x3 RGB, words float32 1xSLOTSx512 (the first n are real)
@@ -13,7 +15,7 @@ Requests and answers are numpy archives (np.savez) over HTTP on 127.0.0.1:
 Each word is scored on its own (YOLOE gives every box an independent score per word), so a box is kept under every
 word that scores it above `conf`, with non-max suppression within each word: asking for "plant" this way found 71%
 of plants against 76% for "potted plant" in a 53-word list where each box keeps only its best word. Needs only numpy
-and onnxruntime-directml:  python vision_server.py --models C:\\Users\\alide\\sprocket-win\\models
+and onnxruntime (onnxruntime-directml on Windows):  python vision_server.py --models <repo>/models/vision
 """
 from __future__ import annotations
 
@@ -181,7 +183,7 @@ def handler(models: Models) -> type[BaseHTTPRequestHandler]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--models", default=str(Path.home() / "sprocket-win" / "models"))
+    parser.add_argument("--models", default=str(Path(__file__).resolve().parents[1] / "models" / "vision"))
     parser.add_argument("--yoloe", default="yoloe26l_8.onnx")
     parser.add_argument("--depth", default="depth_small.onnx")
     parser.add_argument("--port", type=int, default=8090)

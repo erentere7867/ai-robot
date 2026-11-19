@@ -337,19 +337,6 @@ class RosRobot(SimRobot):
         self._halt()
 
     # ---- Sprocket v2 skills on ROS 2 --------------------------------------------------------------------------
-    def _people_with_vel(self) -> list[tuple[float, float, float, float]]:
-        vel_map = getattr(self, "_people_velocities", {})
-        out: list[tuple[float, float, float, float]] = []
-        for t, p in self._people():
-            vx, vy = vel_map.get(t.id, (0.0, 0.0))
-            if vx == 0.0 and vy == 0.0 and getattr(t, "route", None) and getattr(t, "speed", 0.0) > 0:
-                p_next = t.at(self.t + 0.5)
-                if p_next is not None:
-                    vx = (p_next[0] - p[0]) / 0.5
-                    vy = (p_next[1] - p[1]) / 0.5
-            out.append((p[0], p[1], vx, vy))
-        return out
-
     def express(self, posture: str, chime_kind: str = "", seconds: float = 0.6) -> None:
         self._call("express", posture=posture, chime_kind=chime_kind)
         self.posture = posture
