@@ -59,12 +59,7 @@ MOTION = {
     "stop",
     "orbit",
     "follow",
-    "peek",
-    "look_under",
     "express",
-    "wake_turn",
-    "motion_sequence",
-    "pursue",
 }
 CAMERA_YAWS = {"front_camera": 0.0, "rear_left_camera": 2 * math.pi / 3, "rear_right_camera": -2 * math.pi / 3}
 CAMERA_HFOV, CAMERA_HEIGHT, WALL_H = 2.44, 0.22, 2.4  # as on the robot (robot/ros/model.py)
@@ -974,28 +969,6 @@ class SimRobot:
                     return round(p[0], 2), round(p[1], 2)
         raise NotFound(f"no free spot {side} it")
 
-    def peek(self, target: Any) -> None:
-        self._call("peek", target=target)
-        target_pt = xy(self._target(target))
-        peek_pt = self.body.plan_peek(
-            (self.x, self.y, self.yaw), target_pt, lambda x, y: self._occ(x, y, self.inflated)
-        )
-        if peek_pt is not None:
-            self.go_to(peek_pt)
-            self.face(target_pt)
-
-    def look_under(self, anchor: Any) -> None:
-        self._call("look_under", anchor=anchor)
-        t = self._target(anchor)
-        anchor_radius = t.radius if isinstance(t, Object) else 0.5
-        anchor_xy = xy(t)
-        look_pt = self.body.plan_look_under(
-            (self.x, self.y, self.yaw), anchor_xy, anchor_radius, lambda x, y: self._occ(x, y, self.inflated)
-        )
-        if look_pt is not None:
-            self.go_to(look_pt)
-            self.face(anchor_xy)
-
     def express(self, posture: str, chime_kind: str = "", seconds: float = 0.6) -> None:
         self._call("express", posture=posture, chime_kind=chime_kind)
         self.posture = posture
@@ -1007,67 +980,6 @@ class SimRobot:
             t_in = s * DT
             v, w = self.body.aliveness_velocity(posture, t_in, (self.x, self.y, self.yaw))
             self._step(v, w)
-        self._halt()
-
-    def wake_turn(self, doa_rad: float) -> None:
-        self._call("wake_turn", doa_rad=doa_rad)
-        self._rotate(wrap(doa_rad), rate=2.5)
-        self.express("listening", chime_kind="wake", seconds=0.3)
-
-    def motion_sequence(self, steps: list[Any]) -> None:
-        self._call("motion_sequence", count=len(steps))
-        for step in steps:
-            if isinstance(step, dict):
-                v = float(step.get("v", 0.0))
-                w = float(step.get("w", 0.0))
-                sec = float(step.get("seconds", step.get("s", 0.5)))
-            elif isinstance(step, (list, tuple)) and len(step) >= 3:
-                v, w, sec = float(step[0]), float(step[1]), float(step[2])
-            else:
-                continue
-            n = max(1, round(sec / DT))
-            for _ in range(n):
-                self._step(v, w)
-        self._halt()
-
-    def pursue(self, target: Any, distance: float = 1.0, seconds: float | None = None) -> None:
-        self._call("pursue", target=target, distance=distance, seconds=seconds)
-        tgt = self._target(target)
-        end = self.t + float(seconds) if seconds is not None else math.inf
-        while self.t < end:
-            self._interrupts()
-            if isinstance(tgt, Object) and tgt.id in self.things:
-                th = self.things[tgt.id]
-                pt = self._where(th) or (th.x, th.y)
-            elif isinstance(tgt, str) and tgt == "user":
-                u = self.user()
-                if not u:
-                    break
-                pt = u.position
-            else:
-                pt = xy(tgt)
-            d = math.hypot(pt[0] - self.x, pt[1] - self.y)
-            if d <= distance + 0.15:
-                err = wrap(math.atan2(pt[1] - self.y, pt[0] - self.x) - self.yaw)
-                if abs(err) > 0.15:
-                    self._step(0.0, 2.0 * err)
-                else:
-                    break
-            else:
-                route = self._plan(pt, distance)
-                if not route:
-                    route = [pt]
-                people = [(p[0], p[1], 0.0, 0.0) for _, p in self._people()]
-                v, w, _, _ = self.body.step_pursuit(
-                    (self.x, self.y, self.yaw),
-                    route,
-                    0,
-                    blend_r=0.28,
-                    v_cruise=CRUISE,
-                    occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
-                    people=people,
-                )
-                self._step(v, w)
         self._halt()
 
     def camera_view(self, camera: str = "front_camera", width: int = 512, height: int = 288) -> np.ndarray:

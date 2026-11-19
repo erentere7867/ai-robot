@@ -261,48 +261,6 @@ class BodyController:
 
         return 0.0, 0.0
 
-    def plan_peek(
-        self,
-        robot_pose: tuple[float, float, float],
-        target_xy: tuple[float, float],
-        occupied_fn: Callable[[float, float], bool],
-        offset: float = 0.35,
-    ) -> tuple[float, float] | None:
-        """Finds a candidate free vantage point perpendicular to the target line to peek past occlusions."""
-        dx = target_xy[0] - robot_pose[0]
-        dy = target_xy[1] - robot_pose[1]
-        length = math.hypot(dx, dy)
-        if length < 1e-4:
-            return None
-        perp_x, perp_y = -dy / length, dx / length
-        for off in (offset, -offset, 0.5, -0.5, 0.25, -0.25):
-            cand_x = robot_pose[0] + perp_x * off
-            cand_y = robot_pose[1] + perp_y * off
-            if not occupied_fn(cand_x, cand_y):
-                return round(cand_x, 3), round(cand_y, 3)
-        return None
-
-    def plan_look_under(
-        self,
-        robot_pose: tuple[float, float, float],
-        anchor_xy: tuple[float, float],
-        anchor_radius: float,
-        occupied_fn: Callable[[float, float], bool],
-        standoff: float = 1.25,
-    ) -> tuple[float, float] | None:
-        """Finds a free vantage point at ~1.25m stand-off from anchor facing it to angle underneath furniture."""
-        dist = standoff + anchor_radius * 0.3
-        dx = robot_pose[0] - anchor_xy[0]
-        dy = robot_pose[1] - anchor_xy[1]
-        base_angle = math.atan2(dy, dx) if math.hypot(dx, dy) > 1e-4 else robot_pose[2]
-        for delta_deg in (0, 15, -15, 30, -30, 45, -45, 60, -60):
-            ang = base_angle + math.radians(delta_deg)
-            cand_x = anchor_xy[0] + dist * math.cos(ang)
-            cand_y = anchor_xy[1] + dist * math.sin(ang)
-            if not occupied_fn(cand_x, cand_y):
-                return round(cand_x, 3), round(cand_y, 3)
-        return None
-
     def check_proprioception(
         self,
         v_cmd: float,

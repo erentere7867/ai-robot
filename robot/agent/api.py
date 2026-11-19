@@ -203,26 +203,11 @@ class Robot(Protocol):
     ) -> None:
         """Stay distance m away from person."""
 
-    def pursue(self, target: Target, distance: float = 1.0, seconds: float | None = None) -> None:
-        """Dynamic pursuit of moving target."""
-
     def spot(self, target: Target, side: str, distance: float = 0.5) -> Point:
         """A free point next to target."""
 
-    def peek(self, target: Target) -> None:
-        """Lateral arc to peek past occlusions."""
-
-    def look_under(self, anchor: Target) -> None:
-        """Angle cameras underneath furniture."""
-
     def express(self, posture: str, chime_kind: str = "", seconds: float = 0.6) -> None:
         """Express posture and procedural chime."""
-
-    def wake_turn(self, doa_rad: float) -> None:
-        """Immediate wake-word turn reflex."""
-
-    def motion_sequence(self, steps: list[Any]) -> None:
-        """Execute smooth non-stop sequence of motion segments."""
 
     def wait_for(self, description: str, seconds: float | None = None) -> Object | None:
         """Stay still until description is in view."""
