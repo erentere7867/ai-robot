@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
 from robot.agent.agent import Agent
+from robot.agent.tools import Tools
 from robot.eval.suite import living_room, office
 from robot.mind.brain import Reply, ToolCall
-from robot.sim.world import SimRobot
+from robot.sim.world import Scene, SimRobot
 
 
 class Scripted:
@@ -111,3 +114,15 @@ def test_each_motion_says_what_the_request_has_done_so_far():
     second = tool_results(brain.seen[2])[-1]  # what the model reads after its second full turn
     assert "turned 360 degrees left; turned 360 degrees left; 720 degrees of turning in all" in second
     assert "facing the way it began" in second
+
+
+@pytest.mark.parametrize(("name", "args", "progress"), [
+    ("turn", {"degrees": "90 degrees", "direction": "left"}, "turned 90 degrees left; 90 degrees of turning in all"),
+    ("move", {"metres": "0.3 m", "direction": "forward"}, "moved 0.3 m forward"),
+    ("turn", {"degrees": 90, "direction": "Left"}, "turned 90 degrees left; 90 degrees of turning in all"),
+], ids=["turn-with-unit", "move-with-unit", "mixed-case-direction"])
+def test_motion_progress_uses_validated_arguments(name, args, progress):
+    tools = Tools(SimRobot(Scene(6, 6, [], {})))
+    result, ok = tools.run(name, args)
+    assert ok
+    assert f"\nThis request so far: {progress}." in result
