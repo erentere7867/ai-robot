@@ -29,6 +29,8 @@ RELATION = re.compile(r"\b(left of|right of|behind|in front of|front of|next to|
                       r"neath|under|far side of|close to)\b")
 USER_WORDS = {"user", "me", "you", "the user", "person(user)", "human", "speaker", "my owner", "owner"}
 NO_TARGET = {"", "none", "null", "nothing"}
+NUMBER = re.compile(r"\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*"
+                    r"(?:m|metres?|meters?|deg(?:rees?)?|°|s|sec(?:onds?)?)?\s*")
 
 
 def speakable(text: str) -> str:
@@ -90,10 +92,10 @@ def _num(value: Any) -> float:
         raise ValueError("a number, not true/false")
     if isinstance(value, (int, float)):
         return float(value)
-    m = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*(?:m|metres?|meters?|deg(?:rees?)?|°|s|sec(?:onds?)?)?\s*", str(value))
-    if not m:
+    m = NUMBER.fullmatch(str(value))
+    if not m or not math.isfinite(number := float(m.group(1))):
         raise ValueError(f"a number, not {value!r}")
-    return float(m.group(1))
+    return number
 
 
 def _check(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:

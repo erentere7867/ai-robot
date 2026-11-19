@@ -126,3 +126,12 @@ def test_motion_progress_uses_validated_arguments(name, args, progress):
     result, ok = tools.run(name, args)
     assert ok
     assert f"\nThis request so far: {progress}." in result
+
+
+def test_a_number_written_with_an_exponent_or_a_leading_dot_still_moves_the_robot():
+    sim = SimRobot(living_room())
+    brain = Scripted(call("turn", degrees="9e1", direction="left"), call("move", metres=".5", direction="forward"),
+                     say("Done."), say("Turned and moved."))
+    Agent(brain).do("Turn left a quarter turn, then go forward half a metre.", sim)
+    results = tool_results(brain.seen[2])
+    assert results[0].startswith("Turned 90 degrees left.") and "0.5" in results[1]
