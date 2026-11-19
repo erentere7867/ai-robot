@@ -1,8 +1,6 @@
 """Exercise the dashboard's microphone lifecycle in Chrome with a real fake-device stream."""
 
-import os
 import shutil
-from pathlib import Path
 
 import pytest
 
@@ -57,14 +55,6 @@ def test_mic_granted_after_release_is_stopped(mic_page, event):
     page.evaluate("new Promise(resolve => setTimeout(resolve, 100))")
     states = page.evaluate("window.micStream.getTracks().map(track => track.readyState)")
     label = page.locator("#talk").inner_text()
-    if evidence := os.environ.get("PTT_EVIDENCE"):
-        page.evaluate("""states => {
-            const overlay = document.createElement('div');
-            overlay.textContent = 'Delayed mic grant after release | tracks: ' + states.join(', ');
-            overlay.style = 'position:fixed;top:0;left:0;right:0;background:#fff;color:#111;padding:16px;z-index:9999';
-            document.body.append(overlay);
-        }""", states)
-        page.screenshot(path=str(Path(evidence) / f"{event}.png"))
     assert states and all(state == "ended" for state in states), (states, label)
     assert label == "Hold to talk"
     assert uploads == []
