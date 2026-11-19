@@ -127,8 +127,8 @@ def write(folder: Path, task: Any, row: dict, records: list, robot: Any, home: A
         order += 1
         items.append((t, order, f"<div class=asked>{t:.1f} s · {html.escape(str(question))}: "
                                 f"<b>{html.escape(str(answer))}</b></div>"))
-    legend = "".join(f"<li>{n}. {t:.1f} s {html.escape(name)}({html.escape(', '.join(f'{v}' for v in args.values()))})"
-                     f"</li>" for n, (t, name, args, _) in enumerate(events, 1))
+    legend = "".join(f"<li>{t:.1f} s {html.escape(name)}({html.escape(', '.join(f'{v}' for v in args.values()))})"
+                     f"</li>" for t, name, args, _ in events)
     def belief(t: Any) -> str:
         x, y = to_house(dock, t.x, t.y)
         real = real_match(t, x, y, home.truth["objects"])
