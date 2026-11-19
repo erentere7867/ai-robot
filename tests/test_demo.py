@@ -95,7 +95,7 @@ def test_the_room_picker_shows_the_room_loading_then_the_room_loaded(loads):
 def test_swapping_rooms_clears_reply_and_chime(monkeypatch, said, chime):
     live = Live()
     live.update(said=said, chime=chime)
-    robot = object()
+    robot = SimRobot(office())
     forgotten = []
     monkeypatch.setattr("sys.argv", ["demo", "--scene", "living room"])
     monkeypatch.setattr(demo, "Live", lambda: live)
