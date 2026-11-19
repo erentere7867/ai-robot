@@ -3,6 +3,23 @@
 How Sprocket is tested, and how to set up a Linux machine (a coding agent's own VM, or any Ubuntu) to test it the
 same way. Commands run from the repository folder.
 
+## From a bare machine
+
+On a fresh Ubuntu 26.04 (a VM, a cloud machine, WSL), three commands give the whole stack, checked:
+
+```bash
+bash tools/linux/setup.sh                                  # everything, about an hour: see what it installs below
+. tools/linux/env.sh
+python -m robot.eval.doctor --start --3d --rtf 0.1         # checks each piece, starts the servers, runs one 3D task
+```
+
+`setup.sh` installs the system packages, ROS 2 lyrical with Nav2 and slam_toolbox, the robot's Python environment
+(`~/sprocket-venv`), Habitat-Sim and the ReplicaCAD apartment, llama.cpp (built with CUDA when `nvcc` is there), and
+every model from its public source into `models/`; it is safe to run again. The doctor checks the Python packages,
+ROS, Habitat, the models, both servers (starting them with `--start`), that the model reads a picture and that YOLOE
+answers, and with `--3d` runs task M1 in the apartment end to end; each failure says how to fix it. The robot's own
+map of the apartment is in the repo (`maps/apt_0.*`), so the first 3D run does not have to explore it.
+
 ## Three levels
 
 | Level | Catches | Needs | Time |
@@ -91,8 +108,12 @@ The first run in a layout explores it for about 30 minutes and saves the map in 
    reasoning, its calls and their results, and the exact pictures it was given.
 2. **Name the cause** before changing anything: the harness (prompt, tool descriptions, results), perception (a false or
    missing detection), the body (Nav2 failing, "status 6", a goal it cannot reach), the check, or the model. For
-   perception, measure on pictures, not on one run: render views of a home with Habitat, run the detector or the model
-   over them, and compare with the true objects (how `docs/simulation_3d.md`'s tables were made).
+   perception, measure on pictures, not on one run (how `docs/simulation_3d.md`'s tables were made):
+   ```bash
+   python -m robot.eval.views render --scene apt_0 --count 40            # views from random spots, with the truth
+   python -m robot.eval.views yoloe runs/views/apt_0.npz chair sofa tv   # found and false, per word
+   python -m robot.eval.views model runs/views/apt_0.npz chair sofa tv   # the same for the model's yes/no
+   ```
 3. **Make the smallest general change** ([AGENTS.md](../AGENTS.md)): nothing written for that task, room or word.
 4. **Cover the logic with a unit test** where it is logic (a parser, a decision rule, a geometric step), with a fake
    robot or a scripted model like the existing tests.
