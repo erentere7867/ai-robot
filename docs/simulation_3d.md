@@ -147,8 +147,10 @@ in view at all ("false"); YOLOE at the robot's threshold, 0.22:
   collector ran. Streaming the upload from a buffer closed after each exchange reduced peak process memory from
   305-306 to 58-59 MiB in three paired 120-frame loopback runs (720p, no inference). On eight apartment pictures
   repeated three times, the DirectML client's detection arrays and depth pixels matched byte for byte in all 24
-  pairs. Median detector/depth exchanges were 113/72 ms before, 111/70 ms after. These are PC transport measurements,
-  not board latency or a bound on whole-robot memory.
+  pairs. Median detector/depth exchanges were 113/72 ms before, 111/70 ms after. In two bounded apartment searches,
+  the parent peaked at 4,340 MiB evaluator RSS with up to 2,509 MiB of cached uploads (2,791 frames sampled);
+  the change at 2,008 MiB with no cached uploads (4,756 frames). Both finished, on different routes. This is not
+  a task-speed comparison, board latency, or a bound on whole-robot memory.
 
 ## First time in a home
 
