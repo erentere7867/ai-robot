@@ -191,7 +191,7 @@ def main() -> None:
     def new_scene(name: str) -> None:
         holder.sim = make_robot(name, brain)
         agent.forget()  # a new room: earlier requests no longer apply
-        live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], seen=[], said=[], chime="")
+        live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], said=[], chime="")
 
     drive(live, agent, holder, new_scene)
 
