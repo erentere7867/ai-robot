@@ -15,7 +15,7 @@ from robot.sim.world import SimRobot
 from tests.test_agent import Scripted, call, say, tool_results
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("vision_server", ROOT / "tools" / "win" / "vision_server.py")
+spec = importlib.util.spec_from_file_location("vision_server", ROOT / "tools" / "vision_server.py")
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
 

@@ -169,7 +169,7 @@ def main() -> None:
     print(f"Open http://127.0.0.1:{args.port}", flush=True)
     brain = Brain(args.brain)
     if not brain.healthy():
-        print(f"llama-server is not answering on {args.brain}; start it first (tools/wsl/brain.sh)", flush=True)
+        print(f"llama-server is not answering on {args.brain}; start it first (tools/linux/brain.sh)", flush=True)
     agent = Agent(brain, live=live, cameras=args.cameras, think=args.think)
 
     if args.case:

@@ -6,9 +6,10 @@ For people and coding agents changing this repository.
 
 1. [README.md](README.md): what the robot is, **where each behaviour lives in the code** (a table), how to run it, and
    **how to debug a 3D run** (live page, per-task reports, logs).
-2. [docs/usage.md](docs/usage.md): setup and every command.
-3. [docs/architecture.md](docs/architecture.md): the design; section 6 is the agent as it is.
-4. [docs/simulation_3d.md](docs/simulation_3d.md): what has been measured, including what did not work and why (read
+2. [docs/testing.md](docs/testing.md): how to test, and how to set up your own Linux machine for it.
+3. [docs/usage.md](docs/usage.md): setup on the Windows + WSL development PC, and every command.
+4. [docs/architecture.md](docs/architecture.md): the design; section 6 is the agent as it is.
+5. [docs/simulation_3d.md](docs/simulation_3d.md): what has been measured, including what did not work and why (read
    it before trying an idea again: picking numbered dots, the fixed word list and the fridge task are there).
 
 When a 3D task fails, open its report (`runs/<tag>/<scene>/<task>/report.html`) first: it shows
@@ -75,9 +76,9 @@ Then the 3D tasks the change touches (`python -m robot.eval.home3d --only ...`, 
 
 - Run Python in WSL (`~/sprocket-venv`); Windows' own Python has no numpy. The language model and the vision server
   are Windows programs; WSL reaches them at `127.0.0.1`.
-- Source `tools/wsl/env.sh` before any ROS process: ROS 2 over UDP finds peers but delivers no data here; it uses shared
+- Source `tools/linux/env.sh` before any ROS process: ROS 2 over UDP finds peers but delivers no data here; it uses shared
   memory instead.
-- rclpy processes ignore SIGTERM: stop the stack with `tools/wsl/stop.sh`.
+- rclpy processes ignore SIGTERM: stop the stack with `tools/linux/stop.sh`.
 - Scripts that call ultralytics directly should run from `models/`: elsewhere it downloads its 242 MB text encoder
   again (the detector changes into `models/` itself when it loads it).
 - Through `wsl -- bash -lc '...'` shell variables can arrive empty: put longer commands in a script file.

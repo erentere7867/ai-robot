@@ -763,7 +763,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Sprocket's depth node: depth estimates and synthetic /scan")
     parser.add_argument("--depth", action="store_true", help="run the depth node")
     parser.add_argument("--on", choices=("gpu", "cpu"), default="gpu",
-                        help="gpu: the GPU vision server (tools/win/vision_server.py); cpu: here, with --threads")
+                        help="gpu: the GPU vision server (tools/vision_server.py); cpu: here, with --threads")
     parser.add_argument("--threads", type=int, default=2, help="CPU threads for the depth network")
     args = parser.parse_args()
     if not args.depth:

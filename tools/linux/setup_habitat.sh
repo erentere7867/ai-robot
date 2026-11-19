@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Set up the 3D apartment in WSL (robot/sim/habitat_server.py, run by robot/sim/stack.py): GPU rendering,
-# Habitat-Sim in its own Python, the free scenes.
-#   wsl -- bash tools/wsl/setup_habitat.sh
+# Set up the 3D apartment, in WSL or on any Ubuntu (robot/sim/habitat_server.py, run by robot/sim/stack.py): GPU
+# rendering in WSL, Habitat-Sim in its own Python, the free scenes.
+#   bash tools/linux/setup_habitat.sh
 # Habitat-Sim 0.3.3 is built only for Python 3.9, so it lives in its own micromamba env (~/micromamba/envs/habitat)
 # and the robot talks to it over a local socket. Downloads: micromamba (~15 MB), Habitat-Sim (~250 MB),
 # Habitat test scenes (~106 MB) and ReplicaCAD (~302 MB, CC BY 4.0).
 set -euo pipefail
 
-# 1. OpenGL on the GPU through Direct3D 12: WSL ships the driver, but Mesa picks the CPU unless asked.
-line='export GALLIUM_DRIVER=d3d12  # render OpenGL on the GPU through Direct3D 12 (WSL); Mesa picks the CPU otherwise'
-for f in ~/.profile ~/.bashrc; do grep -q "GALLIUM_DRIVER=d3d12" "$f" || printf '\n%s\n' "$line" >> "$f"; done
-export GALLIUM_DRIVER=d3d12
+# 1. In WSL, OpenGL on the GPU through Direct3D 12: WSL ships the driver, but Mesa picks the CPU unless asked. Elsewhere
+#    the machine's own OpenGL driver is used (on a machine without a GPU, Mesa's software renderer: slow but it works).
+if [ -e /dev/dxg ]; then
+  line='export GALLIUM_DRIVER=d3d12  # render OpenGL on the GPU through Direct3D 12 (WSL); Mesa picks the CPU otherwise'
+  for f in ~/.profile ~/.bashrc; do grep -q "GALLIUM_DRIVER=d3d12" "$f" || printf '\n%s\n' "$line" >> "$f"; done
+  export GALLIUM_DRIVER=d3d12
+fi
 glxinfo -B 2>/dev/null | grep -E "renderer string" || echo "(glxinfo not installed: sudo apt install mesa-utils to check)"
 
 # 2. micromamba and the habitat env (Python 3.9, Habitat-Sim with Bullet for furniture with doors, git-lfs).

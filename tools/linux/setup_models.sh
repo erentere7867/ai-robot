@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # The models Sprocket uses, in the repo's models/ (or $SPROCKET_MODELS_DIR): check what is there, fetch what can
 # be fetched, make the GPU vision server's ONNX files, and carry everything to another machine as one folder.
-#   bash tools/wsl/setup_models.sh                      # check and fetch
-#   bash tools/wsl/setup_models.sh --gpu-models         # also make the vision server's models in models/vision
-#   bash tools/wsl/setup_models.sh --export <dir>       # copy all models to <dir>/sprocket-models (links followed)
-#   bash tools/wsl/setup_models.sh --import <dir>       # copy them back from <dir>/sprocket-models
+#   bash tools/linux/setup_models.sh                      # check and fetch
+#   bash tools/linux/setup_models.sh --gpu-models         # also make the vision server's models in models/vision
+#   bash tools/linux/setup_models.sh --export <dir>       # copy all models to <dir>/sprocket-models (links followed)
+#   bash tools/linux/setup_models.sh --import <dir>       # copy them back from <dir>/sprocket-models
 # The language model (LFM3-VL-2B GGUF and its vision projector) is not fetched: put both in models/llm/, where
 # tools\brain.ps1 looks on Windows.
 set -euo pipefail

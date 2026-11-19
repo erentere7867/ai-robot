@@ -13,6 +13,8 @@ task, room, object or phrase, and the model's judgement, not keyword rules, deci
 small and maintainable: one place for each piece of logic, nothing duplicated, nothing kept that is not used. The
 rules for changing it are in [AGENTS.md](AGENTS.md).
 
+- [docs/testing.md](docs/testing.md): how Sprocket is tested, and how to set up any Linux machine to test it the
+  same way (unit tests, the 2D suite, the 3D apartment).
 - [docs/usage.md](docs/usage.md): set up, run the model and the vision server, run the tests, the 2D suite, the 3D
   apartment with its live page and task reports, and the demo.
 - [docs/architecture.md](docs/architecture.md): the design: body, perception, memory, the agent.
@@ -47,7 +49,7 @@ tools/        start the model (brain.ps1, wsl/brain.sh) and the GPU vision serve
 | What a tool does in the world: `search`, `go_to`, `follow`, ... | `robot/sim/world.py` (`SimRobot`), overridden on the real stack in `robot/ros/real.py` (`RealRobot`) |
 | Driving through Nav2 | `robot/ros/robot.py` (`RosRobot`) |
 | What YOLOE looks for, tracking, the model's check of each detection | `robot/perception/detector.py`, `robot/perception/tracker.py`, `robot/ros/perceive.py` |
-| YOLOE and depth on the GPU | `tools/win/vision_server.py` (Windows), `robot/perception/gpu.py` (its client) |
+| YOLOE and depth on the GPU | `tools/vision_server.py` (Windows), `robot/perception/gpu.py` (its client) |
 | The model's own calls (yes/no, room names) | `robot/mind/brain.py` |
 | The 3D tasks and how each is judged | `robot/eval/home3d.py` (`TASKS`); reports: `robot/eval/report.py` |
 
@@ -60,7 +62,7 @@ powershell -ExecutionPolicy Bypass -File tools\demo.ps1    # model + vision serv
 ```bash
 # in WSL, from the repo
 ~/sprocket-venv/bin/python -m pytest -q && ~/sprocket-venv/bin/python -m ruff check .
-. tools/wsl/env.sh && python -m robot.eval.home3d --tag mine --rtf 0.5 --live 8765 --only N1 S1
+. tools/linux/env.sh && python -m robot.eval.home3d --tag mine --rtf 0.5 --live 8765 --only N1 S1
 ```
 
 Models, maps and run output live in this folder too (`models/`, `maps/`, `runs/`, ignored by git), so the folder is
@@ -80,4 +82,4 @@ the whole workspace; first-time setup and everything else are in [docs/usage.md]
 4. **Rerun just that task** with `--only <id>`; one run is noisy, so repeat before calling a change better.
 5. **Logs**: `runs/<tag>.jsonl` (one line per task: steps, what it knew, model time),
    `runs/home_<scene>/robot.log` (ROS, Nav2, depth), `hardware.log` (the simulated body),
-   `%TEMP%\sprocket-vision.log` and `%TEMP%\sprocket-llama.log` on Windows. Stop a run with `bash tools/wsl/stop.sh`.
+   `%TEMP%\sprocket-vision.log` and `%TEMP%\sprocket-llama.log` on Windows. Stop a run with `bash tools/linux/stop.sh`.
