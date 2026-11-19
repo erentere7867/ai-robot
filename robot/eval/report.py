@@ -143,6 +143,8 @@ def write(folder: Path, task: Any, row: dict, records: list, robot: Any, home: A
     # what went wrong outside the model's turns (the model server timing out, a check that failed): without it a
     # task that failed before its first turn shows only its apology
     problems = "".join(f"<li>{html.escape(p)}</li>" for p in row["problems"])
+    # Without viewport, phones shrink a 980px page; below 720px the 3fr/2fr split leaves calls under ~270px, so stack.
+    # Measured in Chrome at 390px and 1280px: no sideways scrolling with this layout.
     page = f"""<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>{html.escape(task.id)}</title><style>
 body{{font:14px system-ui;background:#111;color:#ddd;margin:16px;overflow-wrap:anywhere}} img{{max-width:100%}}
