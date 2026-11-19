@@ -240,7 +240,8 @@ REFUSED = json.dumps({"ok": False, "error": 'Send a JSON object like {"text": "g
 
 
 def command_text(raw: bytes) -> str | None:
-    """The text of a posted command, or None when the body is not a JSON object whose text is a string."""
+    """The text of a posted command, or None to refuse it: a body that is not {"text": <string>} is the caller's
+    mistake, and guessing (str(None) became the instruction "None") would send the robot something nobody typed."""
     try:
         body = json.loads(raw or b"{}")
     except ValueError:  # malformed JSON, or bytes that are not UTF-8
