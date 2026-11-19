@@ -176,7 +176,7 @@ class Brain:
             p = math.exp(item["logprob"])
             for c in choices:
                 cl = c.lower()
-                if tok == cl or tok.startswith(cl) or (len(tok) >= 2 and cl.startswith(tok)):
+                if tok == cl:
                     probs[c] += p
                     break
         total = sum(probs.values())
