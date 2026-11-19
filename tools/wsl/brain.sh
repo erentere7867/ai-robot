@@ -4,7 +4,7 @@
 #   bash tools/wsl/brain.sh
 set -euo pipefail
 
-MODELS_DIR="${SPROCKET_MODELS_DIR:-$HOME/sprocket-models}"
+MODELS_DIR="${SPROCKET_MODELS_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/models}"
 MODEL="$MODELS_DIR/llm/LFM3-VL-2B-QAD-Q4_0.gguf"
 MMPROJ="$MODELS_DIR/llm/mmproj-LFM3-VL-2B-F16.gguf"
 

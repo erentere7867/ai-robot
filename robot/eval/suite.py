@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 
+from robot import paths
 from robot.agent.api import wrap
 from robot.sim.world import RADIUS, Scene, SimRobot, Thing
 
@@ -392,7 +393,7 @@ def run_suite(tag: str, only: list[str] | tuple[str, ...] = (), *, brain: Any = 
     turns = [r["model_s"][0] for r in rows if r["model_s"]]
     if turns:
         print(f"  first model turn: median {statistics.median(turns):.2f} s")
-    out = Path(out_dir).expanduser() if out_dir is not None else Path("~/robot-runtime/runs").expanduser()
+    out = Path(out_dir).expanduser() if out_dir is not None else paths.RUNS
     out.mkdir(parents=True, exist_ok=True)
     out_file = out / f"{tag}.jsonl"
     with out_file.open("w", encoding="utf-8") as f:

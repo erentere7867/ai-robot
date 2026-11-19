@@ -6,8 +6,9 @@ predictions 1x(4+SLOTS+32)x19320 (box centre and size, one score per word, mask 
 1x32x184x320. The word count is fixed: TorchScript export (opset 17) is the one DirectML runs ("The parameter is
 incorrect" for the dynamo export), and it bakes the count in; the server fills unused slots and ignores them.
 
-Run from ~/sprocket-models (elsewhere ultralytics downloads its 242 MB text encoder again):
-    cd ~/sprocket-models && ~/sprocket-venv/bin/python <repo>/tools/wsl/export_yoloe.py yoloe-26l-seg.pt out.onnx
+Run from the models folder (elsewhere ultralytics downloads its 242 MB text encoder again), or let
+tools/wsl/setup_models.sh --gpu-models run it:
+    cd models && ~/sprocket-venv/bin/python ../tools/wsl/export_yoloe.py yoloe-26l-seg.pt vision/yoloe26l_8.onnx
 """
 import sys
 

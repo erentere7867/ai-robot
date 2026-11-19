@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 
+from robot import paths
 from robot.perception.tracker import canonical
 
 ALWAYS = ("person",)  # looked for all the time: the user, and anyone the robot must not run into
@@ -152,9 +153,8 @@ def _foot(mask: np.ndarray | None, box: tuple[float, float, float, float], rows:
 @contextmanager
 def _in_models_dir() -> Iterator[None]:
     here = os.getcwd()
-    folder = Path(os.environ.get("SPROCKET_MODELS_DIR", "~/sprocket-models")).expanduser()
-    if folder.is_dir():
-        os.chdir(folder)
+    if paths.MODELS.is_dir():
+        os.chdir(paths.MODELS)
     try:
         yield
     finally:
@@ -168,8 +168,7 @@ def _resolve_weights(weights: str | None) -> str | None:
     if p.exists():
         return str(p)
     if not p.is_absolute():
-        models_dir = Path(os.environ.get("SPROCKET_MODELS_DIR", "~/sprocket-models")).expanduser()
-        candidate = models_dir / p
+        candidate = paths.MODELS / p
         if candidate.exists():
             return str(candidate)
     return weights

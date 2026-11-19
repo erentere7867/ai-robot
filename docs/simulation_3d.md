@@ -25,7 +25,7 @@ the agent waits for one.
 
 The robot has no depth camera and no lidar. Its obstacle scan comes from the colour cameras:
 
-1. **Depth Anything V2 small** (ONNX, `~/sprocket-models/depth-anything-v2-small-onnx/model.onnx`) estimates relative
+1. **Depth Anything V2 small** (ONNX, `models/depth-anything-v2-small-onnx/model.onnx`) estimates relative
    inverse depth for each frame (`robot/perception/depth.py`, `MonoDepth`).
 2. **Metres from the floor's geometry** (`fit_to_floor`): the camera's height and the IMU's tilt give the floor's
    true distance at every pixel; a robust line fit of the network's output to it in the lower picture gives the scale
@@ -146,7 +146,7 @@ in view at all ("false"); YOLOE at the robot's threshold, 0.22:
 
 ## First time in a home
 
-`robot/sim/stack.py` `Home(scene)`: if `~/sprocket-maps/<scene>.yaml` does not exist, the robot explores (frontier
+`robot/sim/stack.py` `Home(scene)`: if `maps/<scene>.yaml` does not exist, the robot explores (frontier
 exploration on Nav2, `robot/ros/explore.py`) while slam_toolbox builds the map, and saves it; its map's frame starts
 at its dock. Afterwards it localises in that map with AMCL from the dock. `Home.robot(detector, brain)` gives a
 RealRobot that knows only its own map: rooms are segmented from it and named by the furniture it sees.
