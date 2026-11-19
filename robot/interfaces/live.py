@@ -217,13 +217,12 @@ class Live:
                     self._send(b'{"ok":true}', "application/json")
                     return
                 raw = self._read_body(4096)
-                try:
-                    body = json.loads(raw or b"{}")
-                except json.JSONDecodeError:
-                    body = {}
                 kind = self.path.split("?")[0].strip("/")
                 if kind in ("instruct", "stop", "scene"):
-                    text = str(body.get("text", ""))[:300]
+                    text = command_text(raw)
+                    if text is None:
+                        self._send(REFUSED, "application/json", 400)
+                        return
                     if kind == "scene" and text in live.state.scenes:
                         live.update(scene_loading=text)  # before replying, so the page's next poll sees the pick
                     live.inbox.put((kind, text))
@@ -235,6 +234,20 @@ class Live:
         server = _LiveHTTPServer((host, port), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
+
+
+REFUSED = json.dumps({"ok": False, "error": 'Send a JSON object like {"text": "go to the kitchen"}.'}).encode()
+
+
+def command_text(raw: bytes) -> str | None:
+    """The text of a posted command, or None to refuse it: a body that is not {"text": <string>} is the caller's
+    mistake, and guessing (str(None) became the instruction "None") would send the robot something nobody typed."""
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:  # malformed JSON, or bytes that are not UTF-8
+        return None
+    text = body.get("text", "") if isinstance(body, dict) else None
+    return text[:300] if isinstance(text, str) else None
 
 
 PAGE = """<!doctype html>

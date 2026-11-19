@@ -14,7 +14,9 @@ if [ -e /dev/dxg ]; then
   for f in ~/.profile ~/.bashrc; do grep -q "GALLIUM_DRIVER=d3d12" "$f" || printf '\n%s\n' "$line" >> "$f"; done
   export GALLIUM_DRIVER=d3d12
 fi
-glxinfo -B 2>/dev/null | grep -E "renderer string" || echo "(glxinfo not installed: sudo apt install mesa-utils to check)"
+# Habitat draws through EGL, which needs no display (glxinfo does, so it says nothing on a headless machine).
+r=$(eglinfo -B 2>/dev/null | awk -F': ' '/core profile renderer/ && !n++ {print $2}') || true
+echo "OpenGL renderer: ${r:-unknown (sudo apt install mesa-utils to see it)}"
 
 # 2. micromamba and the habitat env (Python 3.9, Habitat-Sim with Bullet for furniture with doors, git-lfs).
 export MAMBA_ROOT_PREFIX=~/micromamba

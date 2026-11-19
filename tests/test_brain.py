@@ -8,7 +8,8 @@ from robot.mind.brain import Brain
 
 @pytest.mark.parametrize(("token", "expected_yes"), [
     ("yes", 1.0), ("no", 0.0), (" YES ", 1.0), (" No ", 0.0),
-    ("Not", 0.5), ("Nothing", 0.5), ("Yesterday", 0.5), ("Ye", 0.5), ("yes.", 0.5),
+    ("yes.", 1.0), ("Yes.", 1.0), ("no!", 0.0), ("YES", 1.0), (" “\u00a0No!\u00a0” ", 0.0),
+    ("Not", 0.5), ("Nothing", 0.5), ("Yesterday", 0.5), ("Ye", 0.5), ("y.es", 0.5),
 ])
 def test_decide_counts_only_exact_answers(token: str, expected_yes: float) -> None:
     def respond(request: httpx.Request) -> httpx.Response:

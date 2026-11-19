@@ -34,20 +34,21 @@ can time out.
    `$env:LLAMA_SERVER`. Put `LFM3-VL-2B-QAD-Q4_0.gguf` and `mmproj-LFM3-VL-2B-F16.gguf` in `llm\` under
    the repo's `models\` (or `$env:SPROCKET_MODELS_DIR`).
 2. **WSL environment.** ROS 2 lyrical with Nav2 and slam_toolbox in `/opt/ros/lyrical`, and the robot's venv at
-   `~/sprocket-venv` with this repo installed: `~/sprocket-venv/bin/pip install -e ".[eval,vision,dev]"` (ultralytics
-   brings torch, for the words' text features).
+   `~/sprocket-venv` (`python3 -m venv --system-site-packages ~/sprocket-venv`: rclpy needs the Python packages ROS
+   installs with apt) with this repo installed: `~/sprocket-venv/bin/pip install -e ".[eval,vision,dev]"`
+   (ultralytics brings torch, for the words' text features).
 3. **The 3D apartment.** `wsl -- bash tools/linux/setup_habitat.sh` (GPU rendering in WSL, Habitat-Sim in its own
    Python 3.9, ReplicaCAD; about 650 MB).
-4. **Models.** `bash tools/linux/setup_models.sh` checks `models/` and fetches YOLOE-26l, the pose model,
-   MobileCLIP's text encoder, the Piper voice and Whisper. `--export <dir>` and `--import <dir>` carry the whole folder
-   to another machine.
+4. **Models.** `bash tools/linux/setup_models.sh` fetches what is missing in `models/` (the language model, the
+   depth network, YOLOE-26l, the pose model, MobileCLIP's text encoder, the Piper voice and Whisper), makes the vision
+   server's models in `models/vision/` (YOLOE exported with 8 word slots by `tools/linux/export_yoloe.py`, and the
+   depth network), and checks them. `--export <dir>` and `--import <dir>` carry the whole folder to another machine.
 5. **Vision server.** A full Python 3.10 or newer on Windows (not the embeddable one, which has no `venv`):
    ```powershell
    python -m venv $env:USERPROFILE\sprocket-win
    & $env:USERPROFILE\sprocket-win\Scripts\pip install onnxruntime-directml numpy
    ```
-   then make its models in WSL: `bash tools/linux/setup_models.sh --gpu-models` (into `models/vision/`)
-   (YOLOE exported with 8 word slots by `tools/linux/export_yoloe.py`, and the depth network).
+   Its models are the ones step 4 made in `models/vision/`.
 
 ## Every day
 
@@ -91,10 +92,10 @@ omit `--vision-url` to skip YOLOE and optionally supply `--depth-weights` for CP
 dependencies and the model files from setup above.
 
 To compare model-server settings, restart the model server before each run and use `--only agent` with the same
-sample and warmup counts. On a CPU-only Linux setup, start with `bash tools/linux/brain.sh` for four threads or set
-`SPROCKET_BRAIN_THREADS=8` when the host has spare cores. On an idle 8-vCPU Xeon with llama.cpp b11960, that reduced
-agent p95 from 139 s to 105 s over 12 requests. The default and GPU launchers are unchanged. More threads can take
-CPU away from perception or ROS, so measure with the rest of the stack before using it on the robot.
+sample and warmup counts. The Linux launcher defaults to half the available cores, rounded up. On an idle CPU-only
+8-vCPU Xeon with llama.cpp b11960, setting `SPROCKET_BRAIN_THREADS=8` instead of four threads reduced agent p95 from
+139 s to 105 s over 12 requests. The override does not affect GPU launchers. More threads can take CPU away from
+perception or ROS, so measure with the rest of the stack before using it on the robot.
 
 ## The 3D apartment
 

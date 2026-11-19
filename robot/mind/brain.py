@@ -6,6 +6,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from typing import Any
+from unicodedata import category
 
 import httpx
 
@@ -170,7 +171,9 @@ class Brain:
         content = (r.json()["choices"][0].get("logprobs") or {}).get("content") or []
         probs = {c: 0.0 for c in choices}
         for item in content[0]["top_logprobs"] if content else []:
-            tok = item["token"].strip().lower()
+            token = item["token"]
+            trim_chars = "".join(ch for ch in token if ch.isspace() or category(ch).startswith("P"))
+            tok = token.strip(trim_chars).lower()
             if not tok:
                 continue
             p = math.exp(item["logprob"])

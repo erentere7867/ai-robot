@@ -29,7 +29,7 @@ def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):
     rec = TaskRecord("Go to the sofa.", steps=[Step("", calls=[("go_to", {"target": "sofa"}, "Arrived.", True)],
                                                     thought="The sofa is ahead.", t=1.0), Step("Done!", t=6.0)])
     task = SimpleNamespace(id="N1", says=("Go to the sofa.",))
-    row = {"scene": "apt_0", "id": "N1", "says": ("Go to the sofa.",), "passed": True,
+    row = {"scene": "apt_0", "id": "N1", "says": ("Go to the sofa.",), "passed": True, "problems": [],
            "simulated_s": 5.0, "bumps": 0}
     (tmp_path / "N1").mkdir()
     page = report.write(tmp_path / "N1", task, row, [rec], robot, home, 0, [(3.0, "001_front_camera.jpg")],
@@ -57,7 +57,7 @@ def test_same_mission_keeps_each_layout_report_and_photos(tmp_path):
         kept = keep_pictures(robot, folder)
         robot.camera_view()
         rows.append({"scene": scene, "id": task.id, "says": task.says, "passed": passed,
-                     "simulated_s": 1.0, "bumps": 0})
+                     "problems": [] if passed else ["ReadTimeout: timed out"], "simulated_s": 1.0, "bumps": 0})
         write_report(tmp_path, task, rows, [], robot, home, 0, kept, Referee(home))
 
     index = (tmp_path / "index.html").read_text()
@@ -65,6 +65,7 @@ def test_same_mission_keeps_each_layout_report_and_photos(tmp_path):
         folder = tmp_path / scene / task.id
         page = (folder / "report.html").read_text()
         assert f"{verdict}</span>" in page
+        assert ("ReadTimeout: timed out" in page) == (verdict == "FAILED")  # why it failed, on the failed one only
         assert f"ended at ({x}, 0.0)" in page
         assert "001_front_camera.jpg" in page
         assert abs(float(cv2.imread(str(folder / "001_front_camera.jpg")).mean()) - shade) < 2

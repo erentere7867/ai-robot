@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start the robot's model (LFM3-VL-2B) with llama.cpp built in WSL or on Linux (the board), on port 8081: on the GPU
 # when llama.cpp was built with CUDA (~/llama.cpp/build-cuda), else on the CPU. On Windows use tools\brain.ps1.
-#   bash tools/linux/brain.sh                        # 4 CPU threads by default
+#   bash tools/linux/brain.sh                        # half the available cores by default
 #   SPROCKET_BRAIN_THREADS=8 bash tools/linux/brain.sh  # CPU-only server with spare cores
 set -euo pipefail
 
@@ -18,11 +18,14 @@ cd ~/llama.cpp 2>/dev/null || {
   echo "  powershell -ExecutionPolicy Bypass -File tools\\brain.ps1"
   exit 1
 }
-threads=4
+# Half the cores: the robot's other software (YOLOE, depth, Habitat, Nav2) needs the rest, and llama.cpp slows down
+# badly when its threads wait for a core. On 4 cores without a GPU, task M1's model turns took 275, 124 and 201 s with
+# 4 threads (the client gives up at 180 s) and 176, 56 and 62 s with 2.
+threads=$((($(nproc) + 1) / 2))
 if [ -x build-cuda/bin/llama-server ]; then bin=build-cuda/bin/llama-server; gpu="-ngl 99 -fa on"; where=GPU
 else
   bin=build/bin/llama-server; gpu=""; where=CPU
-  threads="${SPROCKET_BRAIN_THREADS:-4}"
+  threads="${SPROCKET_BRAIN_THREADS:-$threads}"
   if ! [[ "$threads" =~ ^[1-9][0-9]*$ ]]; then
     echo "SPROCKET_BRAIN_THREADS must be a positive integer" >&2
     exit 2
