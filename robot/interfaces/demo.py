@@ -193,9 +193,8 @@ def main() -> None:
     def new_scene(name: str) -> None:
         previous = holder.sim
         holder.sim = make_robot(name, brain)
-        if hasattr(previous, "perception"):
+        if not isinstance(previous, SimRobot):
             previous.perception.stop()
-        if hasattr(previous, "shutdown"):
             previous.shutdown()
         agent.forget()  # a new room: earlier requests no longer apply
         live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], said=[], chime="")
