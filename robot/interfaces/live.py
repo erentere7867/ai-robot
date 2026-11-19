@@ -259,6 +259,7 @@ button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-colum
 .hint{font-size:13px;color:var(--muted);margin-top:6px}
 .reply{display:flex;align-items:center;gap:10px;margin-top:10px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;font-size:15px;color:var(--ink)}
 .reply-tag{display:inline-block;padding:2px 8px;border-radius:4px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;letter-spacing:.05em}
+.reply[hidden],.badge[hidden]{display:none}
 #reply-text{font-weight:500;line-height:1.4}
 </style></head><body><main>
 <section class="wide">
