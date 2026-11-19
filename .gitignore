@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -6,5 +7,22 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# Models and their exports: downloaded or made by tools/wsl/setup_models.sh and tools/wsl/export_yoloe.py, kept
+# outside the repo (~/sprocket-models, C:\Users\<you>\sprocket-win\models)
+*.pt
+*.onnx
+*.gguf
+*.ts
+*.npy
+*.npz
+
+# Run output: logs, eval results and reports go to ~/robot-runtime, maps to ~/sprocket-maps
+runs/
+*.jsonl
+*.log
+
+# Local tools
 .claude/worktrees/
+.claude/settings.local.json
 docs/review/
