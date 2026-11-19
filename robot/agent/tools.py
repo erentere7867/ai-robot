@@ -166,7 +166,8 @@ class Tools:
         if tool is None:
             return f"There is no tool {name!r}. Tools: {', '.join(self._tools)}.", False
         try:
-            result = tool.run(**_check(tool, args))
+            checked = _check(tool, args)
+            result = tool.run(**checked)
         except ToolError as exc:
             return f"Error: {exc}.", False
         except NotFound as exc:
@@ -184,7 +185,7 @@ class Tools:
                 self.moved = True
                 self.seen.clear()
         if tool.moves:
-            result += "\n" + self._progress(name, args, result)
+            result += "\n" + self._progress(name, checked, result)
         return result, True
 
     def _progress(self, name: str, args: dict[str, Any], result: str) -> str:
@@ -192,11 +193,11 @@ class Tools:
         loses count over a long conversation (it spun twice, then kept turning; it rocked left and right, and lost
         track of how often), but reads its progress right in the latest result."""
         if name == "turn":
-            degrees = float(args.get("degrees", 0))
+            degrees = args["degrees"]
             self.turned += abs(degrees)
-            self.done.append(f"turned {degrees:g} degrees {args.get('direction', '')}".strip())
+            self.done.append(f"turned {degrees:g} degrees {args['direction']}")
         elif name == "move":
-            self.done.append(f"moved {float(args.get('metres', 0)):g} m {args.get('direction', '')}".strip())
+            self.done.append(f"moved {args['metres']:g} m {args['direction']}")
         else:
             self.done.append(result.split(":")[0].split(",")[0].rstrip(".").lower())  # "arrived", "drove for 2 s"
         now = self.robot.pose()
