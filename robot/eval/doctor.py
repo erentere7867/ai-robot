@@ -44,8 +44,9 @@ def python_packages() -> str:
 def ros() -> str:
     try:
         import rclpy  # noqa: F401
-    except ImportError:
-        raise Problem("ROS 2 is not on the path", "source tools/linux/env.sh first (or run " + SETUP + ")") from None
+    except ImportError as exc:
+        raise Problem(f"ROS 2 does not import ({exc})",
+                      "source tools/linux/env.sh first (or run " + SETUP + ")") from None
     import os
 
     if "fastdds_shm.xml" not in os.environ.get("FASTDDS_DEFAULT_PROFILES_FILE", ""):

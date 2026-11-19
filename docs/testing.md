@@ -8,7 +8,7 @@ same way. Commands run from the repository folder.
 On a fresh Ubuntu 26.04 (a VM, a cloud machine, WSL), three commands give the whole stack, checked:
 
 ```bash
-bash tools/linux/setup.sh                                  # everything, about an hour: see what it installs below
+bash tools/linux/setup.sh                                  # everything, 15 min on a 4-core VM: what it installs below
 . tools/linux/env.sh
 python -m robot.eval.doctor --start --3d --rtf 0.1         # checks each piece, starts the servers, runs one 3D task
 ```
@@ -19,6 +19,18 @@ every model from its public source into `models/`; it is safe to run again. The 
 ROS, Habitat, the models, both servers (starting them with `--start`), that the model reads a picture and that YOLOE
 answers, and with `--3d` runs task M1 in the apartment end to end; each failure says how to fix it. The robot's own
 map of the apartment is in the repo (`maps/apt_0.*`), so the first 3D run does not have to explore it.
+
+ROS 2 lyrical is packaged for Ubuntu 26.04 only, so on another Linux (an Ubuntu 24.04 cloud VM, say) run the same
+three commands in an Ubuntu 26.04 container. It needs no GPU or display: Habitat draws with Mesa on the CPU.
+
+```bash
+docker run -d --name sprocket --network host --ipc host -v "$PWD":/root/ai-robot -w /root/ai-robot \
+  ubuntu:26.04 sleep infinity
+docker exec -it sprocket bash                              # then the three commands above, as root
+```
+
+`--network host` puts the servers' ports and the live page on the host, and `--ipc host` gives ROS's shared-memory
+transport the host's `/dev/shm`.
 
 ## Three levels
 
@@ -35,7 +47,7 @@ tools, perception, navigation) is judged at level 3, not only 1 and 2 ([AGENTS.m
 ## Level 1: lint and unit tests
 
 ```bash
-python3 -m venv ~/sprocket-venv
+python3 -m venv --system-site-packages ~/sprocket-venv
 ~/sprocket-venv/bin/pip install -e ".[eval,vision,dev]"
 ~/sprocket-venv/bin/python -m ruff check .
 ~/sprocket-venv/bin/python -m pytest -q
@@ -56,16 +68,15 @@ repository folder or the venv.
    sudo apt install ros-lyrical-ros-base ros-lyrical-nav2-bringup ros-lyrical-slam-toolbox \
      ros-lyrical-robot-localization ros-lyrical-robot-state-publisher
    ```
-2. **The robot's Python**: the venv from level 1, made with the same Python ROS uses (the system one), so `rclpy`
-   from ROS loads in it. `tools/linux/env.sh` puts ROS, the venv and the repo on the path; source it before anything
-   that uses ROS.
+2. **The robot's Python**: the venv from level 1, made with the same Python ROS uses (the system one) and with the
+   system's packages, so `rclpy` from ROS and the Python packages ROS installs with apt load in it.
+   `tools/linux/env.sh` puts ROS, the venv and the repo on the path; source it before anything that uses ROS.
 3. **The 3D apartment**: `bash tools/linux/setup_habitat.sh` (Habitat-Sim 0.3.3 in its own Python 3.9, the ReplicaCAD
    apartment; about 650 MB). On a machine without a GPU it renders with Mesa on the CPU: slower, but it works.
-4. **Models** in `models/` (ignored by git):
-   - the language model: `LFM3-VL-2B-QAD-Q4_0.gguf` and `mmproj-LFM3-VL-2B-F16.gguf` from LiquidAI's LFM3-VL-2B GGUF
-     release on Hugging Face, into `models/llm/`;
-   - the rest: `bash tools/linux/setup_models.sh --gpu-models` fetches YOLOE-26l, the pose model, MobileCLIP's text
-     encoder, the voice and Whisper, and makes the vision server's two ONNX files in `models/vision/`.
+4. **Models** in `models/` (ignored by git): `bash tools/linux/setup_models.sh` fetches the language model
+   (LiquidAI's LFM3-VL-2B GGUF and its vision projector, into `models/llm/`), YOLOE-26l, the pose model, MobileCLIP's
+   text encoder, the depth network, the voice and Whisper, and makes the vision server's two ONNX files in
+   `models/vision/`.
 5. **The language model's server**: llama.cpp build 11960 or newer, built in `~/llama.cpp` (`cmake -B build && cmake
    --build build -j`; with `-DGGML_CUDA=ON` into `build-cuda` for an NVIDIA GPU), then `bash tools/linux/brain.sh`
    (port 8081).
@@ -81,7 +92,11 @@ How fast the pieces are, so runs can be planned:
 | The language model reading one picture | 0.15 s | several seconds |
 
 On a CPU-only machine, run the 3D apartment slower (`--rtf 0.1`): the simulated world waits for the robot's software,
-so the results stay comparable, only the wall time grows.
+so the results stay comparable, only the wall time grows. The model's turns do not wait, though: its client gives up
+after 180 s (`robot/mind/brain.py`), and the report then lists `ReadTimeout` under Problems. 4 cores without a GPU is
+the least that passes: task M1's first turn (3,500 tokens with the three pictures) took 172 to 176 s there, at
+`--rtf 0.1` and at `0.05` alike, with the model on 2 of the cores (`brain.sh` gives it half; on all 4 it took over
+180 s).
 
 ## Level 2: the 2D suite
 
