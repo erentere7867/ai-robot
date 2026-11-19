@@ -89,6 +89,8 @@ bash "<repo>/tools/linux/stop.sh"                # stops everything the run star
 
 - `--live 8765` serves the live page while it runs: the request, each tool call and its result, the model's
   reasoning, the search's choices, the map and the three cameras.
+  If live updates fail, the page labels the last robot data as out of date. A send without server confirmation
+  keeps your draft; check the robot's activity before retrying, since a lost confirmation can mean it already arrived.
 - Each task leaves a report at `runs/<tag>/<scene>/<task>/report.html` (also at
   `http://127.0.0.1:8765/runs/<tag>/index.html` while the run is live): the house's map with the real objects, what the
   robot believed was where (false ones in red), where it really went and where it thought it was; then every model turn
