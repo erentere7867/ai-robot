@@ -7,7 +7,7 @@ import numpy as np
 from robot.perception import colour
 from robot.perception.locate import locate
 from robot.perception.rig import RIG, to_map, to_robot
-from robot.perception.tracker import Detection, Track, Tracker
+from robot.perception.tracker import GONE_AFTER, Detection, Track, Tracker
 
 
 def test_a_pixel_and_its_depth_give_back_the_point():
@@ -66,7 +66,7 @@ def test_the_tracker_keeps_ids_merges_views_and_forgets_on_evidence():
     objects = tr.objects()
     assert [t.label for t in objects] == ["sofa"] and objects[0].hits == 2  # the chair needs a second sighting
     sofa = objects[0]
-    for _ in range(3):
+    for _ in range(GONE_AFTER):
         tr.missed(sofa)
     assert not sofa.present
     tr.update([Detection("sofa", 1.05, 1.0, 0.5)], 2.0)
@@ -265,6 +265,13 @@ def test_twins_of_one_name_are_merged_into_the_older():
     assert [(t.id, t.label) for t in tr.objects()] == [(first.id, "ball")]
 
 
+def test_an_id_merged_into_another_still_finds_the_thing():
+    tr = Tracker()
+    tr.update([Detection("sofa", 0.0, 0.0, 0.5, sigma=0.3), Detection("sofa", 0.45, 0.0, 0.5, sigma=0.3)], 0.0)
+    (kept,) = tr.tracks  # two sightings of one sofa: two tracks, merged into the older
+    assert tr.current(kept + 1) == kept and tr.current(kept) == kept
+
+
 def test_a_standing_person_stops_jumping_and_a_walking_one_is_followed():
     tr = Tracker()
     for k in range(30):  # standing still; sightings scatter by 0.4 m, ten a second
@@ -426,55 +433,74 @@ def test_classify_tof_grid_hazards():
     assert h_obs.kind == "obstacle" and h_obs.delta_z >= 0.04
 
 
-def test_calibrate_depth_floor_plane_recovery():
-    from robot.perception.depth import calibrate_depth
+def _floor_with_box(cam, box_at=None, box_top=0.2, box_bottom=0.0, cols=None):  # noqa: ANN001, ANN202
+    """True depth (along the lens axis) of a level floor seen by `cam` at 640x360, far wall at 6 m, and optionally a
+    flat face `box_at` metres ahead spanning box_bottom..box_top above the floor in columns `cols`."""
+    c = cam.at(640, 360)
+    v = (np.arange(360, dtype=np.float32)[:, None] + 0.5 - 180) / c.focal * np.ones((1, 640), np.float32)
+    depth = np.where(v > 1e-3, c.z / np.maximum(v, 1e-3), np.inf).astype(np.float32)
+    depth = np.minimum(depth, 6.0)
+    if box_at is not None:
+        z = c.z - v * box_at  # height of the face's point in each row
+        face = (z >= box_bottom) & (z <= box_top)
+        face[:, :] &= np.isin(np.arange(640), cols)[None, :]
+        depth[face & (depth > box_at)] = box_at
+    return depth
+
+
+def test_fit_to_floor_recovers_metres_from_relative_inverse_depth():
+    from robot.perception.depth import fit_to_floor
 
     cam = RIG["front_camera"]
-    h, w = cam.height, cam.width
-    rows = np.arange(h, dtype=np.float32)[:, None]
-    down = np.maximum((rows - h / 2) / cam.focal, 1e-3)
-    true_floor = (cam.z / down).astype(np.float32)
-    true_depth = np.broadcast_to(true_floor, (h, w)).copy()
-
-    # Apply synthetic linear scale & shift: raw = 0.5 * true - 0.1
-    raw_depth = 0.5 * true_depth - 0.1
-
-    calibrated = calibrate_depth(raw_depth, cam, pitch_rad=0.0, roll_rad=0.0)
-    floor_region = slice(int(0.65 * h), int(0.95 * h))
-    diff = np.abs(calibrated[floor_region] - true_depth[floor_region])
-    assert float(np.median(diff)) < 0.05
+    true = _floor_with_box(cam, box_at=1.0, box_top=0.3, cols=np.arange(300, 340))
+    relative = 0.37 / true + 0.05  # a network's output: inverse depth, up to scale and shift
+    metres = fit_to_floor(relative.astype(np.float32), cam)
+    near = true < 3
+    assert np.median(np.abs(metres[near] - true[near]) / true[near]) < 0.02
+    assert abs(float(metres[200, 320]) - 1.0) < 0.05  # the box's face, not only the floor
 
 
-def test_calibrate_depth_tof_anchoring_when_floor_occluded():
-    from robot.perception.depth import calibrate_depth
-
-    cam = RIG["front_camera"]
-    h, w = cam.height, cam.width
-    raw_depth = np.full((h, w), 0.5, dtype=np.float32)  # raw says 0.5 everywhere
-    tof_grid = np.full((8, 8), 1.5, dtype=np.float32)  # ToF laser grid anchors metric distance 1.5m
-
-    calibrated = calibrate_depth(raw_depth, cam, tof_grid=tof_grid)
-    assert abs(float(np.median(calibrated)) - 1.5) < 0.1
-
-
-def test_synthetic_scan_catches_low_obstacle():
+def test_scan_ranges_the_foot_of_a_thing_on_the_floor_and_sees_clear_floor_elsewhere():
     from robot.perception.depth import synthetic_scan
 
-    cam_f = RIG["front_camera"]
-    h, w = cam_f.height, cam_f.width
-    depth_f = np.full((h, w), 5.0, dtype=np.float32)
+    cam = RIG["front_camera"]
+    depth = _floor_with_box(cam, box_at=1.5, cols=np.arange(300, 340))
+    ranges, angle_min, step = synthetic_scan({"front_camera": depth})
+    ahead = int(round(-angle_min / step))
+    assert abs(float(np.nanmin(ranges[ahead - 2:ahead + 3])) - (1.5 + cam.x)) < 0.05  # from the robot's middle
+    assert ranges[ahead + 30] > 5 and ranges[ahead - 30] > 5  # beside the box: clear floor up to the far wall
 
-    # Place a low 8 cm obstacle (z = 0.08 m) at distance 1.5 m forward
-    v_obs = int(round(cam_f.height / 2 + (0.14 / 1.5) * cam_f.focal))
-    u_obs = int(cam_f.width / 2)
-    depth_f[v_obs - 10:v_obs + 10, u_obs - 20:u_obs + 20] = 1.5
 
-    depths = {"front_camera": depth_f}
-    ranges, angle_min, step = synthetic_scan(depths, num_beams=360)
+def test_scan_finds_the_foot_of_a_face_whose_depth_is_misjudged_and_ignores_a_rug_edge():
+    from robot.perception.depth import synthetic_scan
 
-    beam_fwd = int(round((-angle_min) / step))
-    min_near = float(np.min(ranges[beam_fwd - 5:beam_fwd + 6]))
-    assert abs(min_near - 1.5) < 0.15
+    cam = RIG["front_camera"]
+    cols = np.arange(300, 340)
+    true = _floor_with_box(cam, box_at=1.5, box_top=0.3, cols=cols)
+    face = np.zeros_like(true, bool)
+    face[:, cols] = np.abs(true[:, cols] - 1.5) < 1e-6
+    for scale in (0.7, 2.0):  # a network that puts the whole face nearer, or twice as far, than it is
+        ranges, angle_min, step = synthetic_scan({"front_camera": np.where(face, true * scale, true)})
+        ahead = int(round(-angle_min / step))
+        # within two rows (0.09 m each at 1.5 m): the rate is measured over two
+        assert abs(float(np.nanmin(ranges[ahead - 2:ahead + 3])) - (1.5 + cam.x)) < 0.2
+    rug = _floor_with_box(cam, box_at=1.0, box_top=0.02, cols=cols)  # 2 cm: the wheels roll over it
+    ranges, _, _ = synthetic_scan({"front_camera": rug})
+    assert ranges[ahead] > 5
+
+
+def test_scan_sees_under_a_table_top_and_ranges_a_low_shelf_by_its_depth():
+    from robot.perception.depth import synthetic_scan
+
+    cam = RIG["front_camera"]
+    ahead_cols = np.arange(300, 340)
+    table = _floor_with_box(cam, box_at=1.0, box_bottom=0.35, box_top=0.6, cols=ahead_cols)
+    ranges, angle_min, step = synthetic_scan({"front_camera": table})
+    ahead = int(round(-angle_min / step))
+    assert ranges[ahead] > 5  # a table top 35 cm up: the robot passes under it, and sees the wall beyond
+    shelf = _floor_with_box(cam, box_at=1.0, box_bottom=0.12, box_top=0.25, cols=ahead_cols)
+    ranges, _, _ = synthetic_scan({"front_camera": shelf})
+    assert abs(float(ranges[ahead]) - (1.0 + cam.x)) < 0.05  # a shelf's edge 12 cm up: its depth, not the floor's
 
 
 def test_estimate_pose_and_resolve_ray():
@@ -538,24 +564,21 @@ def test_estimate_pose_and_resolve_ray():
     assert pose_crouch.posture == "crouching"
 
 
-def test_draw_set_of_mark_badges_and_paths():
+def test_draw_set_of_mark_badges():
     from robot.perception.overlay import draw_set_of_mark
 
     cam = RIG["front_camera"]
     rgb = np.zeros((cam.height, cam.width, 3), dtype=np.uint8)
 
     boxes_and_ids = [((100, 100, 250, 300), 1), ((500, 200, 700, 450), 2)]
-    candidate_paths = [("A", [(1.0, 0.0), (2.0, 0.2), (3.0, 0.4)]), ("B", [(1.0, 0.0), (2.0, -0.3)])]
 
-    annotated = draw_set_of_mark(rgb, boxes_and_ids, candidate_paths, cam)
+    annotated = draw_set_of_mark(rgb, boxes_and_ids, cam=cam)
     assert annotated.shape == (cam.height, cam.width, 3)
     assert (annotated > 0).any()
     assert (annotated[100:120, 100:150] > 0).any()
 
 
-def test_track_predict_and_active_vision():
-    from robot.perception.tracker import needs_active_vision
-
+def test_a_moving_track_predicts_ahead():
     tr = Tracker()
     tr.update([Detection("person", 1.0, 0.0, 0.3)], 0.0)
     tr.update([Detection("person", 1.1, 0.0, 0.3)], 0.1)
@@ -563,16 +586,6 @@ def test_track_predict_and_active_vision():
     assert person.vx > 0.2
     pred_x, pred_y = person.predict(1.0)
     assert pred_x > person.x
-
-    sofa = Track(10, "sofa", 1.0, 0.0, 0.5, 0.0, 0.0)
-    assert needs_active_vision(None, target_anchor=sofa, robot_xy=(0.5, 0.0)) == "step_back_under"
-    assert needs_active_vision(None, target_anchor=sofa, robot_xy=(3.0, 0.0)) is None
-
-    assert needs_active_vision(None, decision_prob=0.5) == "peek"
-    unsized_track = Track(11, "chair", 2.0, 0.0, 0.3, 0.0, 0.0, sized=False)
-    assert needs_active_vision(unsized_track) == "step_closer"
-    clear_track = Track(12, "chair", 2.0, 0.0, 0.3, 0.0, 0.0, hits=5, sized=True, noise=0.1)
-    assert needs_active_vision(clear_track, decision_prob=0.95) is None
 
 
 def test_locate_mask_guided_localization():
@@ -649,7 +662,7 @@ def test_tracker_person_merge_distance_and_cut():
     assert len(persons2) == 1
 
 
-def test_verify_loop_inspect_gate_rejects_on_none_name():
+def test_the_vision_models_no_drops_a_detection():
     import threading
     from unittest.mock import MagicMock
 
@@ -670,18 +683,13 @@ def test_verify_loop_inspect_gate_rejects_on_none_name():
     crop = np.zeros((50, 50, 3), dtype=np.uint8)
     perc.crops[1] = crop
 
-    # Mock brain with yes_probability -> 0.50 (gate == 'inspect') and name -> None (not a thing / wall)
-    brain = MagicMock()
-    brain.yes_probability.return_value = 0.50
-    brain.name.return_value = None
-    perc.brain = brain
-
-    # Stop verify loop after first iteration
-    def stop_and_none(*args, **kwargs):
+    def says_no_then_stop(*args, **kwargs):  # "Is there a chair in the middle of this picture?" mostly no
         perc._stop = True
-        return None
+        return 0.3
 
-    brain.name.side_effect = stop_and_none
+    brain = MagicMock()
+    brain.yes_probability.side_effect = says_no_then_stop
+    perc.brain = brain
 
     perc._verify_loop()
 
@@ -803,5 +811,22 @@ def test_tracker_cut_sighting_downweighting_and_furniture_merge():
     assert len(furniture) == 1
 
 
+def test_tof_sees_a_low_box_the_cameras_take_for_floor():
+    import math
 
+    from robot.perception.depth import tof_scan
+    from robot.ros.model import TOF
 
+    x0, _, z0, pitch, hfov, _ = TOF["front"]
+    t = math.tan(hfov / 2)
+    grid = np.zeros((8, 8), np.float32)
+    for row in range(8):  # a level floor in every zone
+        down = ((row + 0.5) - 4) / 4 * t
+        fall = math.sin(pitch) + down * math.cos(pitch)
+        grid[row, :] = z0 / fall if fall > 1e-3 else np.inf
+    assert np.all(np.isnan(tof_scan(grid, "front")))  # floor only: nothing to report
+    grid[2, 3:5] = 0.30  # something 5 cm tall, about 0.45 m ahead, in the zones that looked past it
+    ranges = tof_scan(grid, "front")
+    ahead = 180
+    assert np.isfinite(ranges[ahead - 3:ahead + 4]).any()
+    assert 0.35 < float(np.nanmin(ranges)) < 0.5

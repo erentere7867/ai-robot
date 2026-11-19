@@ -59,7 +59,8 @@ What the 3D apartment taught the harness (18 November 2026):
   round it. Id marks are now plain black badges with white numbers and thin black-and-white outlines.
 - **Colours belong in the object list,** as the real tracker gives them (perception/colour.py, now naming a bike by
   its frame when some of its pixels are clearly coloured).
-- **Each request carries the last one whole** (its calls and their results; older requests as one line each with
+- **Each request carries the last one** (now told step by step inside the new request, not replayed: see "Following
+  the model card" below; older requests as one line each with
   their actions), and the robot keeps "where you were before" as a place listed with distance and direction.
 - **The stop hook runs on every request:** the model said "I'll head back to the starting point" without calling a
   tool; the check now says plainly when no tool was called.
@@ -120,6 +121,28 @@ What still fails (audit5, 6 of 54) is the model's, with what it needs in front o
 - "Rock left and right three times": left twice in a row. "The table closest to the sofa": takes the one table in view
   instead of looking near the sofa. "How many chairs?": two, with a third in the picture and in the list.
 
+## Following the model card (18 November 2026)
+
+Read against LFM3-VL-2B's card, chat template and docs, the harness differed in four ways, now changed:
+- **Sampling:** the card's top_p 1, min_p 0 and repeat penalty 1.1 (llama-server's defaults are 0.95, 0.05, 1.0).
+  An A/B on the motion and "come back" tasks: 7/10 with the penalty, 6/10 without; kept.
+- **One tool-use turn per task.** Pictures from `look` came back as a new user message; the template keeps reasoning
+  only after the latest user message, so every look threw away the task's reasoning so far. They now come back inside
+  the tool result (the template renders images there; llama.cpp accepts them), and the task's reasoning is kept,
+  with 16k tokens per server slot instead of 8k.
+- **No replayed chat between requests.** The card says the model is "not recommended for coding, multi-turn
+  conversations, or complex reasoning". The last request is now told step by step inside the new one.
+- **Pictures at native resolution** were tested (768 against 1024 px, with and without id badges, thinking on and
+  off) on "how many chairs?": the same answer every time. The "missed" chair was legs behind a table and a bike; the
+  check now accepts the count of chairs plainly in view.
+
+audit6, with all of these: 47/54 (apt_0 23/27, v3 24/27), against audit5's 48/54: no change beyond run-to-run noise
+(about two tasks either way). "Come back" improved (one failure in six instead of three); the failures that remain
+are the model not knowing when it is done: it spins twice correctly and keeps turning, or says the same sentence
+until it runs out of turns. That is the card's weakest area too: "Agentic" 42.5, against 56 for GPT-5.6 Luna, while
+its perception scores (visual grounding 77, embodied reasoning 64) beat models six times its size. Untested yet: a
+larger thinking budget (the docs say hard tasks can reason for thousands of tokens; ours stops at 512).
+
 The three camera variants above ran on identical code; a difference of two cases is within run-to-run noise at this temperature. All cameras cost about 0.5 s more per turn here, and more on the board (three vision-encoder passes).
 
 Two harness lessons from the transcripts:
@@ -127,6 +150,58 @@ Two harness lessons from the transcripts:
 - **Restating the task in updates matters.** When camera updates arrived as plain user messages, the model read them as the request again and turned 90 degrees sixteen times. Updates now say what the request was, what is done, and that they are not a new request.
 
 The new harness has no patches tuned to suite cases. What still fails is mostly the untrained 2B model's planning: it picks `drive` for a square, stops after "go to the ball" without coming back, fills optional arguments it was not asked for, and rarely writes a to-do list unprompted. That is what post-training is for.
+
+## The simulator becomes the real robot (19 November 2026)
+
+The scores above (41 to 48 of 54) came from a 3D sim that was not the robot: objects were "detected" from the
+simulator's own labels, it drove with its own path follower, its cameras sat 12 cm too high, and the body could drive
+through most furniture. Now Habitat stands in only for the world, the body and the raw sensors; the robot's own
+software runs on top (docs/simulation_3d.md): its own map from exploring, Nav2, depth and YOLOE from its colour
+cameras, the agent. Its scores are not comparable with the ones above, and will be lower: the model now gets what the
+real robot's perception gives it, misses and wrong labels included.
+
+Harness changes made with it, from the earlier audits' records (220 requests):
+- **Progress in every motion result.** Out-of-turns loops were all repetition tasks: "spin around twice" (two full
+  turns, then more), "rock left and right three times" (lost count). A 2B model counts badly across a long
+  conversation, so each motion's result now ends with what this request has done so far and where that left the
+  robot ("turned 360 degrees left; turned 360 degrees left; 720 degrees of turning in all ... facing the way it
+  began"). State, not rules.
+- **The review before finishing** led to more tool calls in 34 of 220 requests and changed nothing in 186 (a whole
+  model call each, about 3.4 s). The 34 were mostly needless re-checks, but a few were real catches ("I'm heading back
+  now" with no move; stopping after 2 of 6 turns). Kept for now; to be decided by an A/B on the new eval.
+- **Direct motion goes through Nav2's safety chain.** `drive` and expressions used to publish straight to the wheels;
+  they now enter where Nav2's controller does (velocity smoother, then collision monitor), so every motion has the
+  same safety stop. The robot no longer falls back to its own path follower when Nav2 gives up: it reports why.
+- **Where the model's time goes.** In the three last 3D audits (682 model calls), every call took about 4 s whatever
+  it was for: the request's first call 27% of model time, calls after a tool call that worked 44%, after one that
+  failed 2%, the review 26%. With thinking off a call took 1.4 s, not 4.6 (2D suite, same 50 tasks), so thinking is
+  about three quarters of it; it bought 32 passes against 26. Most of it goes on turns with least to decide: after
+  "Arrived at the ball." the model still reasons for hundreds of tokens. `Agent(think_when="news")` (`--think-when
+  news` on the eval) reasons only after something the model did not ask for: the request, the user's words, a call
+  that failed; after calls that worked, and for the review, it carries on without. To be decided by an A/B in 3D.
+
+### First baseline on the real stack (`real1`, apt_0, 27 tasks)
+
+19 of 27 passed. 169 model calls, 751 s of model time (median 4.1 s a call: 1.9 s to read the prompt and picture,
+then 117 tokens a second; a call writes 271 tokens at the median, most of it thinking). The 8 failures, labelled:
+
+| task | what happened | label |
+| :--- | :--- | :--- |
+| M5 spin twice | turned 90 + 360 + 270, tried `orbit` and `search`, then after the review two more full turns | model; harness (ids) |
+| N2 fridge | `search` said "fridge 110", `go_to("fridge 110")` said there was no object 110; went to a "fridge" YOLOE saw 0.8 m from the dock (the real one is 5 m away) | harness (ids); perception |
+| N4 table nearest the sofa | YOLOE finds no table from 22 cm; the model searched "here" only | perception |
+| N5 TV | every `go_to` to the TV ended "could not finish": at the room's far end, against the wall | body (navigation) |
+| N6 sofa, fridge, back | ids from `search` gone by the next call (8 calls lost), then navigation | harness (ids); body |
+| Q1 what is in front | named only the stairs | model |
+| Q3 how many chairs | said one | model / perception |
+| R2 fridge, come back | ids gone again; then "I'll head back toward where we started" with no move, twice | harness (ids); model |
+
+**Ids that vanish.** In 4 of the 8 failures an id the robot had just given the model was gone by the next call: the
+tracker merges two tracks of one thing into the older id, or marks a thing absent, and `obj` only said "there is no
+object 35". Now a merged id finds the thing it became (`Tracker.current`), and an absent or rejected one says why
+(`RealRobot.obj`). **Rooms changing names.** Rooms were named afresh every 5 s from the furniture tracked then, and the
+model was told "Now in the kitchen", "Now in the office" about the same spot as detections came and went; a room now
+keeps its name until another kind leads by two pieces of furniture (`rooms.MARGIN`).
 
 ## Key Assumptions to Validate
 - [ ] Post-training on this exact tool format lifts the suite to 80%. → Build SFT data in this format: a large model writes tool-call transcripts in random rooms, keep only those that pass the simulator's checks, train, then reinforce on the checks.

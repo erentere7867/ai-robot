@@ -37,7 +37,7 @@ Brain board: **Arduino VENTUNO Q** (Qualcomm Dragonwing IQ-8275: 8-core Kryo CPU
 | Processor | Workloads | Rate / Latency |
 | :--- | :--- | :--- |
 | **40 TOPS Hexagon NPU** | `LFM3-VL-2B` (Q4_0, closed-loop planner & describe), `d1-2B` (calibrated scorer), `YOLOE-26s-seg` (open-vocab masks) | `LFM3-VL-2B` ~0.8 s/intent, `d1-2B` ~200 ms, `YOLOE` ~12 ms/frame |
-| **Adreno 623 GPU** | `Depth Anything V3 Metric-Indoor Small`, `RTMPose` / `YOLO-Pose` (keypoints/gaze/pointing), `MobileCLIP2` (crop embeddings) | 10–30 Hz total |
+| **Adreno 623 GPU** | `Depth Anything V2 small` (relative depth, scaled by the floor), `RTMPose` / `YOLO-Pose` (keypoints/gaze/pointing), `MobileCLIP2` (crop embeddings) | 10–30 Hz total |
 | **8-core Kryo CPU** | 30–50 Hz Living Body Engine, `slam_toolbox` / Nav2 costmap, `WeSpeaker` voiceprint embedding, `Whisper`, `Piper` TTS, `ChimeSynthesizer`, SQLite + Vector Memory | 30–50 Hz body, <2 ms memory lookup |
 | **STM32H5 MCU** | 200 Hz wheel PID + gyro odometry, `VL53L5CX` 8×8 step/cliff governor, IMU+current anti-cable snag reflex, 300 ms command watchdog | 200 Hz–1 kHz |
 
@@ -81,13 +81,26 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
 
 ---
 
-## 4. Layer 1.5: Pure-Vision 360° Perception & Active Vision (`robot/perception/`)
+## 4. Layer 1.5: Pure-Vision 360° Perception (`robot/perception/`)
 
-1. **Metric Depth Calibration (`depth.py`):**
-   - `Depth Anything V3 Metric-Indoor Small` runs on all 3 CSI streams.
-   - `calibrate_depth()` locks scale and offset $(a, b)$ per frame using known camera mounting height (`CAMERA_Z = 0.22 m`), live IMU `pitch_rad`/`roll_rad` floor-plane trigonometry, and `VL53L5CX` 8×8 laser distance anchors (crucial when clutter hides the floor).
-2. **Synthetic 360° `/scan` (`synthetic_scan`):**
-   - Back-projects all 3 calibrated depth images into robot-frame 3D points, slices obstacle heights $z \in [0.03\text{ m}, 0.38\text{ m}]$, and projects minimum ranges into a 360-beam `LaserScan` for SLAM and the 30 Hz obstacle field.
+0. **Who sees what.** The vision model gets the pictures and answers about them itself ("what do you see", "what
+   room is this"). YOLOE-26 (large) looks only for people and for the words a tool asks for (`search("keys")`,
+   `follow("the cat")`, `go_to("ball")`), and gives their boxes and masks to ranging and tracking, so the fast loops
+   run without the model. There is no fixed household list: in the apartment one added about 1.4 wrong names a
+   picture, and big furniture was found under 8% of the time from 22 cm anyway. In the simulator YOLOE and depth run on
+   the Windows GPU (`tools/win/vision_server.py`, DirectML: 75 and 82 ms a frame); on the board, on its NPU.
+1. **Metric depth from the floor (`depth.py`, the depth node in `robot/ros/perceive.py`):**
+   - `Depth Anything V2 small` (ONNX) estimates relative inverse depth for each camera's newest frame.
+   - `fit_to_floor()` turns it into metres: the camera's height and the IMU's tilt give the floor's true distance at
+     every pixel, and a robust (RANSAC) line fit in the lower picture gives the network's scale and shift.
+2. **Synthetic 360° `/scan` from where the floor ends (`synthetic_scan`, `combine`):**
+   - In each image column, the first rows rising off the floor are the foot of something; it is ranged where the ray
+     meets the floor (exact for anything standing on it, whatever the depth's error), an overhang's edge by its depth;
+     things above the 0.30 m clearance are passed under. Each camera's sector is made at its own moment and carried
+     to the newest by the odometry before the three are joined.
+   - Measured in the simulator against true depth: 64% of obstacles within 1 m ranged to 15% (true depth: 92%), fake
+     returns on 17% of open beams (true depth: 1%). The monocular depth, not the method, is the limit
+     (docs/simulation_3d.md).
 3. **3D Object & Moving Person Tracking (`locate.py`, `tracker.py`):**
    - Extracts oriented 3D bounding dimensions (`width`, `depth_extent`, `orientation_yaw`) from segmentation masks + depth clusters.
    - Tracks 2D map velocity $(v_x, v_y)$ via $\alpha$-$\beta$ filtering so `Track.predict(dt)` supports dynamic pursuit and social hallway yielding.
@@ -95,13 +108,12 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
 4. **Human Pose, Gaze & Pointing (`pose.py`):**
    - `estimate_pose_from_keypoints()` turns 2D skeleton keypoints + depth into 3D `HumanPose` (`facing_yaw`, `head_yaw`, `posture`: `standing`/`sitting`/`crouching`/`waving`/`pointing`, `pointing_ray`, `gaze_ray`).
    - `resolve_ray_target()` resolves *"that"*, *"over there"*, or joint-attention *"look at that"* by finding the nearest tracked object inside the ray cone or intersecting the ray with the floor ($z = 0$).
-5. **Active Vision (`needs_active_vision` & `BodyController`):**
-   - Triggered when `d1-2B` returns uncertain confidence ($0.30 \le P \le 0.80$), an object is edge-cut/occluded, or small lost items are sought near furniture:
-     - `peek`: Arcs $0.35\text{ m}$ laterally to see past an occlusion.
-     - `step_closer`: Closes distance for higher pixel density.
-     - `step_back_under`: Steps back to a $1.25\text{ m}$ stand-off from a furniture anchor (`sofa`, `bed`, `desk`) so cameras angle *underneath* it.
-6. **Visual Grounding Overlay (`overlay.py`):**
-   - Draws high-contrast Set-of-Mark object IDs (`[1]`, `[2]`) and projects *PIVOT*-style 3D floor candidate trajectories (`(A)`, `(B)`, `(C)`) directly onto the camera image sent to `LFM3-VL-2B` and `d1-2B`.
+5. **Places that are not one thing (`go_toward`):** the model says the direction of the picture the place is in and
+   about how far ("behind-left, 2 m"); Nav2 drives there, stopping before anything in the way. Numbered dots on the
+   floor for the model to pick were tried and dropped: the 2B model took the last number nearly every time.
+6. **Rooms named by the model (`RealRobot._ask_rooms`, `rooms.py`):** every few seconds, until it has five answers
+   for the room it stands in, the model is asked what kind of room the front picture shows; a tour's place names win.
+7. **Visual Grounding Overlay (`overlay.py`):** the tracker's ids are drawn on the pictures the agent gets.
 
 ---
 
@@ -139,5 +151,6 @@ An agentic loop, as in coding agents, around the robot's vision-language model. 
 6. **Ending a task**: a reply with no tool call is spoken and ends the task. The first time the model tries to finish after acting, a stop hook shows it the request, what it did and any open to-do steps, and asks it to check; its next plain reply ends the task.
 7. **Loops**: the same call with the same arguments a third time in a row is not run; the model is told to do something different or finish. Updates during a task restate the request and what is done so far, and say they are not a new request.
 8. **Real time**: `stop` and `wait` act at once without the model. Anything else the user says while a task runs interrupts the current step and joins the conversation (`Agent.interject`), so the model can change course. Posture and chime come from events (listening at the start, uh-oh on a failure, happy on success), not from the model.
-9. **Between tasks** the next request carries the last one whole (its calls and results), older ones as one line each with their actions, and the robot keeps the place "where you were before".
-10. **Thinking**: before each turn the model may reason, capped per request (`thinking_budget_tokens`): `off`, `low` (128 tokens), `medium` (512, the default) or `high` (2048). Its reasoning stays with its tool calls within a task and shows on the live page as grey "thought:" lines.
+9. **Between tasks** the next request is one user turn that tells the last one step by step (each call and its result, and the reply) and older ones as one line each with their actions; the last task is not replayed as chat turns (the model card advises against multi-turn conversation). The robot keeps the place "where you were before".
+10. **Within a task** it stays one tool-use turn, as LFM3-VL is trained: pictures from `look` come back inside the tool result, so the chat template keeps the task's reasoning (a new user message would drop it). Only the user speaking mid-task adds a user turn. Sampling follows the model card (temperature 0.1, top_k 50, top_p 1, min_p 0, repeat penalty 1.1).
+11. **Thinking**: before each turn the model may reason, capped per request (`thinking_budget_tokens`): `off`, `low` (128 tokens), `medium` (512, the default) or `high` (2048). Its reasoning stays with its tool calls within a task and shows on the live page as grey "thought:" lines.

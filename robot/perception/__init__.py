@@ -1,11 +1,11 @@
 """3-CSI Pure-Vision perception, multi-zone ToF depth/step hazards, human pose, and tracking."""
 
-from robot.perception.depth import StepHazard, calibrate_depth, classify_tof_grid, synthetic_scan
+from robot.perception.depth import StepHazard, classify_tof_grid, fit_to_floor, synthetic_scan
 from robot.perception.locate import Place, lidar_near, lidar_range, locate, near_face
 from robot.perception.overlay import draw_set_of_mark
 from robot.perception.pose import HumanPose, estimate_pose_from_keypoints, resolve_ray_target
 from robot.perception.rig import RIG, Camera, to_map, to_robot
-from robot.perception.tracker import Detection, Track, Tracker, canonical, look, needs_active_vision
+from robot.perception.tracker import Detection, Track, Tracker, canonical, look
 
 __all__ = [
     "RIG",
@@ -16,7 +16,7 @@ __all__ = [
     "StepHazard",
     "Track",
     "Tracker",
-    "calibrate_depth",
+    "fit_to_floor",
     "canonical",
     "classify_tof_grid",
     "draw_set_of_mark",
@@ -26,7 +26,6 @@ __all__ = [
     "locate",
     "look",
     "near_face",
-    "needs_active_vision",
     "resolve_ray_target",
     "synthetic_scan",
     "to_map",

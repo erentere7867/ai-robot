@@ -1,6 +1,7 @@
-"""Try Sprocket: a simulated home in real time behind the live page, with a box to talk to it.
+"""Try Sprocket: a simulated home behind the live page, with a box to talk to it.
 
-    python -m robot.interfaces.demo                     # the 3D apartment; needs llama-server on 8081 and Habitat
+    python -m robot.interfaces.demo                     # the 3D apartment on the robot's real software (WSL, ROS,
+                                                        # Habitat; llama-server on 8081): slower than real time
     python -m robot.interfaces.demo --scene "two rooms" # a fast 2D room instead
     python -m robot.interfaces.demo --case O3           # watch one 2D suite case
     python -m robot.interfaces.demo --cameras all       # send all three cameras with each request
@@ -30,12 +31,20 @@ from robot.sim.world import SimRobot
 SCENES = ("3D apartment", "living room", "two rooms", "office", "random room")
 
 
-def make_robot(name: str) -> Any:
-    """The 3D apartment (Habitat, robot/sim/home3d.py) or one of the 2D rooms, running in real time."""
-    if name == "3D apartment":
-        from robot.sim.home3d import Home3D
+HOMES: dict[str, Any] = {}  # the running 3D home: its simulator, drivers and robot software stay up
 
-        return Home3D(realtime=True)
+
+def make_robot(name: str, brain: Any = None) -> Any:
+    """The 3D apartment, run as the real robot (robot/sim/stack.py: its own map, Nav2, YOLOE, camera depth), or one
+    of the 2D rooms in real time."""
+    if name == "3D apartment":
+        from robot.perception.detector import Detector
+        from robot.sim.stack import Home
+
+        if "home" not in HOMES:
+            HOMES["home"], HOMES["detector"] = Home("apt_0"), Detector()
+        HOMES["home"].reset()
+        return HOMES["home"].robot(HOMES["detector"], brain)
     return SimRobot(make_scene(name), realtime=True)
 
 
@@ -69,7 +78,8 @@ def show_cameras(live: Live, holder: Holder) -> None:
     def frame(name: str) -> bytes | None:
         if holder.sim is None or name not in CAMERAS:
             return None
-        return encode_png(holder.sim.camera_view(name))
+        view = getattr(holder.sim, "live_view", holder.sim.camera_view)  # the newest frame, where the robot has one
+        return encode_png(view(name))
 
     live.camera = frame
     live.update(cameras=list(CAMERAS))
@@ -141,7 +151,7 @@ def main() -> None:
     parser.add_argument("--scene", choices=SCENES, default="3D apartment")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--brain", default="http://127.0.0.1:8081", help="llama-server URL")
-    parser.add_argument("--cameras", choices=("front", "all"), default="front")
+    parser.add_argument("--cameras", choices=("front", "all"), default="all")
     parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="medium", help="how long the model may reason before each turn")
     args = parser.parse_args()
 
@@ -169,13 +179,13 @@ def main() -> None:
         while True:
             time.sleep(1)
 
-    holder = Holder(make_robot(args.scene))
+    holder = Holder(make_robot(args.scene, brain))
     live.update(scene=args.scene, scenes=list(SCENES))
     show_cameras(live, holder)
     threading.Thread(target=refresh, args=(live, holder), daemon=True).start()
 
     def new_scene(name: str) -> None:
-        holder.sim = make_robot(name)
+        holder.sim = make_robot(name, brain)
         agent.forget()  # a new room: earlier requests no longer apply
         live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], seen=[])
 

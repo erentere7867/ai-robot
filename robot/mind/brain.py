@@ -47,15 +47,6 @@ def _with_image(url: str, text: str) -> list[dict[str, Any]]:
     ]
 
 
-def active_vision_action(prob: float) -> str:
-    """Returns 'confirm' if prob > 0.80, 'inspect' if 0.30 <= prob <= 0.80, else 'reject'."""
-    if prob > 0.80:
-        return "confirm"
-    if prob >= 0.30:
-        return "inspect"
-    return "reject"
-
-
 class Brain:
     def __init__(self, url: str = "http://127.0.0.1:8081", timeout_s: float = 180.0,
                  decision_url: str | None = None) -> None:
@@ -63,8 +54,6 @@ class Brain:
         self.decision_http = (
             httpx.Client(base_url=decision_url, timeout=timeout_s, trust_env=False) if decision_url else self.http
         )
-
-    active_vision_action = staticmethod(active_vision_action)
 
     def healthy(self) -> bool:
         try:
@@ -205,52 +194,10 @@ class Brain:
         res = self.decide(messages, choices=("yes", "no"))
         return res["yes"]
 
-    def score_paths(
-        self,
-        image_url: str,
-        goal: str,
-        labels: tuple[str, ...] = ("A", "B", "C"),
-    ) -> dict[str, float]:
-        """Asks d1-2B which drawn floor path leads cleanly toward goal, returning calibrated probabilities."""
-        prompt = (
-            f"The image shows candidate paths labeled {', '.join(labels)} on the floor toward '{goal}'. "
-            f"Which path is best? Answer with one letter from: {', '.join(labels)}."
-        )
-        return self.decide(_with_image(image_url, prompt), choices=labels)
-
-    def score_frontiers(
-        self,
-        image_url: str,
-        target: str,
-        labels: tuple[str, ...] = ("A", "B", "C"),
-    ) -> dict[str, float]:
-        """Scores which visible doorway/frontier direction is most likely to contain target (VLFM)."""
-        prompt = (
-            f"The image shows candidate frontiers or doorways labeled {', '.join(labels)}. "
-            f"Which direction is most likely to lead to '{target}'? Answer with one letter from: {', '.join(labels)}."
-        )
-        return self.decide(_with_image(image_url, prompt), choices=labels)
-
     def check(self, image_url: str, question: str) -> tuple[bool, Reply]:
         """A yes or no question about one image."""
         reply = self.complete(_with_image(image_url, f"{question} Answer yes or no."), 'root ::= "yes" | "no"', 2)
         return reply.text.strip() == "yes", reply
-
-    def name(self, image_url: str, words: list[str]) -> str | None:
-        """What the object in the middle of a crop is, chosen from `words`; None when the model sees no object."""
-        words = sorted(set(words) - set(NOT_A_THING)) + list(NOT_A_THING)
-        reply = self.complete(
-            _with_image(
-                image_url,
-                "What is the object in the middle of this picture? Answer with one word from: "
-                + ", ".join(words)
-                + ".",
-            ),
-            "root ::= " + " | ".join(f'"{w}"' for w in words),
-            8,
-        )
-        answer = reply.text.strip()
-        return None if answer in NOT_A_THING else answer
 
     def ground(self, image_url: str, marked_url: str, description: str, marks: int) -> tuple[int | None, Reply]:
         """Which numbered box is this? None when it is not there."""
@@ -268,6 +215,14 @@ class Brain:
         reply.read_ms += first.read_ms
         reply.write_ms += first.write_ms
         return int(reply.text), reply
+
+    def room_kind(self, image_url: str) -> str:
+        """What kind of room a picture from inside it shows, in one or two words ("kitchen", "living room")."""
+        reply = self.complete(
+            _with_image(image_url, "This picture is from a small robot's camera inside a home. What kind of room is "
+                                   "it? Answer with the room's usual name, in one or two words."),
+            'root ::= [a-z]+ (" " [a-z]+)?', 6)
+        return reply.text.strip()
 
     def describe(self, image_url: str, question: str) -> Reply:
         """A short answer in words about one image."""

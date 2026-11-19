@@ -1,9 +1,9 @@
-"""Sprocket's simulated body: the robot description Gazebo and robot_state_publisher load (architecture section 4).
+"""Sprocket's body: the numbers every other part takes its geometry from, and the robot description
+robot_state_publisher loads (architecture section 2).
 
-A 30 cm round base on two wheels with front and rear casters; 3 wide-angle MIPI-CSI cameras at 120-degree separation
-providing 360-degree pure vision; front and rear multi-zone ToF sensors; an IMU.
-Gazebo topic names match Nav2's TurtleBot 4 simulation (/cmd_vel, /odom, tf, imu, rgbd_camera), so its bridge,
-Nav2 parameters and launch files drive this body unchanged; only the rear cameras need bridges of their own.
+A 30 cm round base on two wheels with front and rear casters; three wide-angle colour cameras (MIPI-CSI, no depth) at
+120-degree separation for 360-degree vision; front and rear 8x8 multi-zone ToF sensors tipped down at the floor; an
+IMU. The simulator (robot/sim/habitat_server.py) builds its sensors from these same numbers.
 
     python3 -m robot.ros.model > sprocket.urdf
 """
@@ -15,12 +15,19 @@ import math
 BODY_R, BODY_H, BODY_Z = 0.15, 0.10, 0.04  # base cylinder: radius, height, bottom above the floor
 WHEEL_R, WHEEL_W, TRACK = 0.05, 0.03, 0.24
 DECK_Z, CAMERA_Z, CAMERA_R = 0.20, 0.22, 0.11
+CLEARANCE = 0.30  # the body's top is at 0.235 m (deck and cameras): it fits under anything higher than this
 REAR_YAW = 2 * math.pi / 3  # 120 deg
-CAMERAS = {  # name: (yaw, horizontal field of view, width, height, rate, depth)
-    "front_camera": (0.0, 2.44, 1280, 720, 10, True),
-    "rear_left_camera": (REAR_YAW, 2.44, 1280, 720, 10, True),
-    "rear_right_camera": (-REAR_YAW, 2.44, 1280, 720, 10, True),
+CAMERAS = {  # name: (yaw on the body, horizontal field of view, width, height, frames per second)
+    "front_camera": (0.0, 2.44, 1280, 720, 5),
+    "rear_left_camera": (REAR_YAW, 2.44, 1280, 720, 5),
+    "rear_right_camera": (-REAR_YAW, 2.44, 1280, 720, 5),
 }
+TOF = {  # side: (x on the body, yaw, height, pitch down, field of view, range) for a VL53L5CX in 8x8 mode
+    "front": (BODY_R, 0.0, 0.08, 0.28, 0.7854, 4.0),
+    "rear": (-BODY_R, math.pi, 0.08, 0.28, 0.7854, 4.0),
+}
+MAX_V, MAX_W = 0.5, 2.0  # wheel limits: m/s, rad/s
+MAX_DV, MAX_DW = 1.0, 3.0  # the motor controller's acceleration limits: m/s^2, rad/s^2
 ORANGE, DARK, GREY = "0.95 0.55 0.12 1", "0.08 0.08 0.08 1", "0.5 0.5 0.5 1"
 
 
@@ -34,44 +41,28 @@ def _cylinder_inertial(mass: float, r: float, h: float, z: float = 0.0) -> str:
     return _inertial(mass, side, side, mass * r * r / 2, z)
 
 
-def _link(name: str, geometry: str, color: str, mass: float, inertial: str, z: float = 0.0, rpy: str = "0 0 0",
-          collide: bool = True) -> str:
+def _link(name: str, geometry: str, color: str, mass: float, inertial: str, z: float = 0.0,
+          rpy: str = "0 0 0") -> str:
     origin = f'<origin xyz="0 0 {z}" rpy="{rpy}"/>'
-    collision = f"<collision>{origin}<geometry>{geometry}</geometry></collision>" if collide else ""
     return (f'<link name="{name}"><visual>{origin}<geometry>{geometry}</geometry>'
-            f'<material name="{name}_m"><color rgba="{color}"/></material></visual>{collision}{inertial}</link>'
-            f'<gazebo reference="{name}"><visual><material><diffuse>{color}</diffuse><ambient>{color}</ambient>'
-            f'</material></visual></gazebo>')
+            f'<material name="{name}_m"><color rgba="{color}"/></material></visual>'
+            f"<collision>{origin}<geometry>{geometry}</geometry></collision>{inertial}</link>")
 
 
 def _fixed(parent: str, child: str, xyz: str, rpy: str = "0 0 0") -> str:
     return (f'<joint name="{child}_joint" type="fixed"><parent link="{parent}"/><child link="{child}"/>'
-            f'<origin xyz="{xyz}" rpy="{rpy}"/></joint><gazebo reference="{child}_joint">'
-            f'<preserveFixedJoint>true</preserveFixedJoint></gazebo>')
+            f'<origin xyz="{xyz}" rpy="{rpy}"/></joint>')
 
 
-def _camera(name: str, yaw: float, fov: float, width: int, height: int, rate: int, depth: bool) -> str:
-    x, y = CAMERA_R * math.cos(yaw), CAMERA_R * math.sin(yaw)
-    link = name + "_link"
-    optical = name + "_optical_frame"
-    parts = [_link(link, '<box size="0.025 0.09 0.03"/>', DARK, 0.05, _inertial(0.05, 1e-5, 1e-5, 1e-5)),
-             _fixed("base_link", link, f"{x:.4f} {y:.4f} {CAMERA_Z}", f"0 0 {yaw:.4f}"),
-             f'<link name="{optical}">{_inertial(0.001, 1e-7, 1e-7, 1e-7)}</link>',
-             _fixed(link, optical, "0 0 0", f"{-math.pi / 2:.4f} 0 {-math.pi / 2:.4f}")]
-    camera = (f"<camera><horizontal_fov>{fov}</horizontal_fov><image><width>{width}</width><height>{height}</height>"
-              f"<anti_aliasing>4</anti_aliasing></image><clip><near>0.1</near><far>20</far></clip><optical_frame_id>{optical}</optical_frame_id>"
-              "</camera>")
-    sensor_name = "rgbd_camera" if name == "front_camera" else name
-    topic = "rgbd_camera" if name == "front_camera" else name
-    if depth:
-        sensor = (f'<sensor name="{sensor_name}" type="rgbd_camera"><always_on>1</always_on>{camera}'
-                  f"<update_rate>{rate}</update_rate><visualize>true</visualize><topic>{topic}</topic></sensor>")
-    else:
-        sensor = (f'<sensor name="{name}" type="camera"><always_on>1</always_on>{camera}'
-                  f"<update_rate>{rate}</update_rate><visualize>true</visualize><topic>{name}/image</topic>"
-                  f"<camera_info_topic>{name}/camera_info</camera_info_topic></sensor>")
-    parts.append(f'<gazebo reference="{link}">{sensor}</gazebo>')
-    return "".join(parts)
+def _sensor(name: str, xyz: str, rpy: str) -> str:
+    """A sensor's mount on the base and its optical frame (z forward, x right, y down), as camera drivers stamp."""
+    link, optical = f"{name}_link", f"{name}_optical_frame"
+    return "".join([
+        _link(link, '<box size="0.025 0.09 0.03"/>', DARK, 0.05, _inertial(0.05, 1e-5, 1e-5, 1e-5)),
+        _fixed("base_link", link, xyz, rpy),
+        f'<link name="{optical}">{_inertial(0.001, 1e-7, 1e-7, 1e-7)}</link>',
+        _fixed(link, optical, "0 0 0", f"{-math.pi / 2:.4f} 0 {-math.pi / 2:.4f}"),
+    ])
 
 
 def _wheel(side: str, y: float) -> str:
@@ -79,34 +70,13 @@ def _wheel(side: str, y: float) -> str:
     geometry = f'<cylinder radius="{WHEEL_R}" length="{WHEEL_W}"/>'
     return (_link(name, geometry, DARK, 0.2, _cylinder_inertial(0.2, WHEEL_R, WHEEL_W), rpy=f"{-math.pi / 2:.4f} 0 0")
             + f'<joint name="{name}_joint" type="continuous"><parent link="base_link"/><child link="{name}"/>'
-              f'<origin xyz="0 {y} {WHEEL_R}"/><axis xyz="0 1 0"/></joint>'
-            + f'<gazebo reference="{name}"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>')
+              f'<origin xyz="0 {y} {WHEEL_R}"/><axis xyz="0 1 0"/></joint>')
 
 
 def _caster(name: str, x: float) -> str:
     r = 0.025
     return (_link(name, f'<sphere radius="{r}"/>', GREY, 0.05, _inertial(0.05, 1e-5, 1e-5, 1e-5))
-            + _fixed("base_link", name, f"{x} 0 {r}")
-            + f'<gazebo reference="{name}"><mu1>0.0</mu1><mu2>0.0</mu2></gazebo>')
-
-
-def _tof_sensor(name: str, x: float, yaw: float, pitch: float = 0.28) -> str:
-    """8x8 VL53L5CX-like ToF array in Gazebo: angled down at `pitch` rad to sense floor, steps, and cliffs."""
-    link = f"{name}_link"
-    optical = f"{name}_optical_frame"
-    sensor = (
-        f'<sensor name="{name}" type="rgbd_camera"><always_on>1</always_on>'
-        f"<camera><horizontal_fov>0.7854</horizontal_fov><image><width>8</width><height>8</height></image>"
-        f"<clip><near>0.02</near><far>4.0</far></clip><optical_frame_id>{optical}</optical_frame_id></camera>"
-        f"<update_rate>15</update_rate><visualize>false</visualize><topic>{name}</topic></sensor>"
-    )
-    return "".join([
-        _link(link, '<box size="0.02 0.02 0.01"/>', DARK, 0.01, _inertial(0.01, 1e-6, 1e-6, 1e-6)),
-        _fixed("base_link", link, f"{x:.4f} 0 0.08", f"0 {pitch:.4f} {yaw:.4f}"),
-        f'<link name="{optical}">{_inertial(0.001, 1e-7, 1e-7, 1e-7)}</link>',
-        _fixed(link, optical, "0 0 0", "-1.5708 0 -1.5708"),
-        f'<gazebo reference="{link}">{sensor}</gazebo>',
-    ])
+            + _fixed("base_link", name, f"{x} 0 {r}"))
 
 
 def urdf() -> str:
@@ -121,72 +91,19 @@ def urdf() -> str:
         _fixed("base_link", "deck", f"0 0 {DECK_Z}"),
         _wheel("left", TRACK / 2), _wheel("right", -TRACK / 2),
         _caster("front_caster", 0.11), _caster("rear_caster", -0.11),
-        _tof_sensor("front_tof", BODY_R, 0.0),
-        _tof_sensor("rear_tof", -BODY_R, math.pi),
         f'<link name="imu_link">{_inertial(0.01, 1e-6, 1e-6, 1e-6)}</link>',
         _fixed("base_link", "imu_link", "0 0 0.1"),
-        '<gazebo reference="imu_link"><sensor type="imu" name="imu"><always_on>true</always_on>'
-        "<update_rate>100</update_rate><frame_id>imu_link</frame_id><topic>imu</topic></sensor></gazebo>",
-        *(_camera(name, *spec) for name, spec in CAMERAS.items()),
-        f"""<gazebo>
-  <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
-    <left_joint>left_wheel_joint</left_joint><right_joint>right_wheel_joint</right_joint>
-    <wheel_separation>{TRACK}</wheel_separation><wheel_radius>{WHEEL_R}</wheel_radius>
-    <max_linear_acceleration>2</max_linear_acceleration><min_linear_acceleration>-2</min_linear_acceleration>
-    <max_angular_acceleration>3</max_angular_acceleration><min_angular_acceleration>-3</min_angular_acceleration>
-    <max_linear_velocity>0.6</max_linear_velocity><min_linear_velocity>-0.6</min_linear_velocity>
-    <max_angular_velocity>2.0</max_angular_velocity><min_angular_velocity>-2.0</min_angular_velocity>
-    <topic>/cmd_vel</topic><odom_topic>/odom</odom_topic><tf_topic>/model/sprocket/wheel_tf</tf_topic>
-    <frame_id>odom</frame_id><child_frame_id>base_link</child_frame_id>
-    <odom_publish_frequency>50</odom_publish_frequency>
-  </plugin>
-  <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
-    <joint_name>left_wheel_joint</joint_name><joint_name>right_wheel_joint</joint_name>
-    <topic>joint_states</topic><update_rate>30</update_rate>
-  </plugin>
-  <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
-    <odom_frame>world</odom_frame><robot_base_frame>base_link</robot_base_frame><dimensions>2</dimensions>
-    <odom_topic>/ground_truth</odom_topic><odom_publish_frequency>20</odom_publish_frequency>
-  </plugin>
-</gazebo>""",
+        *(_sensor(name, f"{CAMERA_R * math.cos(yaw):.4f} {CAMERA_R * math.sin(yaw):.4f} {CAMERA_Z}", f"0 0 {yaw:.4f}")
+          for name, (yaw, *_) in CAMERAS.items()),
+        *(_sensor(f"{side}_tof", f"{x:.4f} 0 {z}", f"0 {pitch:.4f} {yaw:.4f}")
+          for side, (x, yaw, z, pitch, *_) in TOF.items()),
     ]
     return '<?xml version="1.0"?>\n<robot name="sprocket">\n' + "\n".join(parts) + "\n</robot>\n"
 
 
-TOF_BRIDGES = ["/front_tof/depth_image", "/rear_tof/depth_image"]
-TOF_INFO = [
-    f"/{name}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo"
-    for name in ("front_tof", "rear_tof")
-]
-REAR_BRIDGES = [
-    *[
-        f"/{name}/{part}"
-        for name, (*_, depth) in CAMERAS.items()
-        if name != "front_camera"
-        for part in (("image", "depth_image") if depth else ("image",))
-    ],
-    *TOF_BRIDGES,
-]
-REAR_INFO = [
-    *[
-        f"/{name}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo"
-        for name in CAMERAS
-        if name != "front_camera"
-    ],
-    *TOF_INFO,
-]
-# Where the robot really is, from the simulator: for measuring localisation, never used by the robot itself.
-GROUND_TRUTH = "/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry"
-
-if __name__ == "__main__":
-    print(urdf())
-
-
 # The odometry the robot drives on: wheels for forward speed (sideways speed held at zero, as on any two-wheeled
-# base), the gyro for turning. Wheels slip when the robot turns on the spot (Nav2's 360-degree spin came up about 12
-# degrees short on wheel odometry alone); the gyro does not. robot_localization's EKF publishes odom -> base_link in
-# place of the wheels (whose transform goes to an unused topic above). An indoor compass heading is not trusted, so
-# no absolute yaw is fused.
+# base), the gyro for turning. Wheels slip when the robot turns on the spot; the gyro does not. robot_localization's
+# EKF publishes odom -> base_link. An indoor compass heading is not trusted, so no absolute yaw is fused.
 EKF = """ekf_filter_node:
   ros__parameters:
     use_sim_time: true
@@ -204,3 +121,5 @@ EKF = """ekf_filter_node:
     imu0_remove_gravitational_acceleration: true
 """
 
+if __name__ == "__main__":
+    print(urdf())

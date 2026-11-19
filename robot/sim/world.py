@@ -38,6 +38,9 @@ from robot.agent.api import (
 from robot.body.controller import BodyController
 
 RES = 0.05  # occupancy cell, m
+SEARCH_STOPS = 20  # most places one search drives to before it gives up
+BEARINGS = {"front": 0.0, "front-left": 45.0, "left": 90.0, "behind-left": 135.0, "behind": 180.0,
+            "behind-right": -135.0, "right": -90.0, "front-right": -45.0}  # degrees from the robot's heading, + left
 PLAN = 2  # planning cell = PLAN * RES
 DT = 0.05  # simulation step, s
 RADIUS = 0.15  # the robot
@@ -670,6 +673,35 @@ class SimRobot:
         raise NotFound(f"object {id} has not been seen")
 
     # ---- motion -------------------------------------------------------------------------------------------------
+    def toward(self, direction: str, metres: float) -> Point:
+        """A floor point the planner can reach, `metres` away in a direction from the robot's own (front, front-left,
+        left, behind-left, behind, behind-right, right, front-right): that point itself, the path going round what is
+        between; where it is inside something or cut off, the reachable floor nearest it, within a metre; else the
+        farthest reachable floor on the way there. A point merely free on the map was often one the planner could
+        not reach (beyond a table, in a pocket), and the robot answered "blocked" to most of these calls."""
+        self._call()
+        heading = self.yaw + math.radians(BEARINGS[choose(direction, tuple(BEARINGS), "direction")])
+        far = max(0.1, abs(float(metres)))
+        target = (self.x + far * math.cos(heading), self.y + far * math.sin(heading))
+
+        def reachable(p: Point) -> bool:
+            return not self._occ(*p, self.inflated) and self._plan(p, 0.25) is not None
+
+        if reachable(target):
+            return target
+        for r in (0.25, 0.5, 0.75, 1.0):
+            ring = [(target[0] + r * math.cos(a), target[1] + r * math.sin(a))
+                    for a in (heading + math.pi + k * math.pi / 4 for k in range(8))]  # the near side first
+            for p in ring:
+                if reachable(p):
+                    return p
+        steps = max(1, int(far / 0.25))
+        for k in range(steps - 1, 0, -1):
+            p = (self.x + far * k / steps * math.cos(heading), self.y + far * k / steps * math.sin(heading))
+            if reachable(p):
+                return p
+        return (self.x, self.y)
+
     def move(self, metres: float, direction: str = "forward") -> None:
         if isinstance(metres, str) and isinstance(direction, (int, float)):  # move("forward", 1.0): the types tell
             metres, direction = direction, metres
@@ -795,12 +827,12 @@ class SimRobot:
         """In view now: done, without moving. Otherwise memory first, checked in person; then camera coverage,
         viewpoint by viewpoint, until it is in view."""
         self._call("search", description=description, area=area)
-        self._watch(description)
         region, started = self._area(area), self.t
-        in_view = [t for t in self._matching(description, self._in_view())
-                   if not region or self._room_at(*self._where(t)) == region]
+        # looked for with its own words before anything moves: checking at once found nothing, as no camera had been
+        # looked at with a new word yet, and the robot drove off exploring with the sofa right behind it
+        in_view = [o for o in self.detect(description) if not region or self._room_at(*o.position) == region]
         if in_view:
-            found = self._object(in_view[0])
+            found = in_view[0]
             self._result(f"found {found.label} {found.id} in view")
             return found
         for o in self._remembered(description):
@@ -815,41 +847,28 @@ class SimRobot:
                 self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
                 return found
             self.memory.pop(o.id, None)  # looked at its place with a clear view and it is not there
-        skipped: list[Point] = []
-        for _ in range(20):
+        tried: list[Point] = []  # where it drove to look, or could not reach
+        for _ in range(SEARCH_STOPS):
             found = self._found(description, started)
             if found:
                 self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
                 return found
-            views = [v for v in self._unseen(region or "all") if all(math.dist((v.x, v.y), s) > 0.5 for s in skipped)]
-            if not views:
+            stop = self._next_stop(description, region, tried)
+            if stop is None:
                 break
-            brain = getattr(self, "brain", None)
-            if len(views) > 1 and brain is not None and hasattr(brain, "score_frontiers") and hasattr(self, "render_view"):
-                frame = self.render_view()
-                if frame is not None and getattr(frame, "size", 0) > 0:
-                    try:
-                        from robot.perception.camera import data_url
-
-                        labels = tuple("ABC"[:min(3, len(views))])
-                        probs = brain.score_frontiers(data_url(frame), description, labels=labels)
-                        ranked = [
-                            v for _, v in sorted(
-                                zip(labels, views[:len(labels)], strict=True),
-                                key=lambda item: probs.get(item[0], 0.0),
-                                reverse=True,
-                            )
-                        ]
-                        views = ranked + views[len(labels):]
-                    except Exception:  # noqa: BLE001 - fall back to nearest frontier order
-                        pass
+            tried.append(xy(stop))
             try:
-                self._go(views[0], 0.0)
+                self._go(stop, 0.0)
             except PathBlocked:
-                skipped.append((views[0].x, views[0].y))
+                pass
         found = self._found(description, started)
         self._result(f"found {found.label} {found.id}" if found else "not found")
         return found
+
+    def _next_stop(self, description: str, region: str | None, tried: list[Point]) -> Any:
+        """Where a search looks next: the nearest viewpoint the cameras have not covered yet."""
+        views = [v for v in self._unseen(region or "all") if all(math.dist((v.x, v.y), s) > 0.5 for s in tried)]
+        return views[0] if views else None
 
     def _area(self, area: str) -> str | None:
         """A room id, or None for everywhere. People say "the living room", "this room", "anywhere"."""
@@ -1109,10 +1128,6 @@ class SimRobot:
             if (owner == tid).sum() >= 0.3 * area:
                 marks.append(((x0, y0, x1, y1), tid))
         return draw_set_of_mark(img, marks) if marks else img
-
-    def render_view(self, width: int = 512, height: int = 288) -> np.ndarray:
-        """The front camera, for the live page and the frontier scorer."""
-        return self.camera_view("front_camera", width, height)
 
     def wait_for(self, description: str, seconds: float | None = None) -> Object | None:
         self._call("wait_for", description=description, seconds=seconds)

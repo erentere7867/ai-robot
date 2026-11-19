@@ -32,7 +32,8 @@ import numpy as np
 SAME = {"couch": "sofa", "refrigerator": "fridge", "trash can": "bin", "garbage can": "bin", "potted plant": "plant",
         "houseplant": "plant", "cardboard box": "box", "mug": "cup", "television": "tv", "monitor": "tv",
         "rucksack": "backpack", "bag": "backpack", "sports ball": "ball", "dining table": "table",
-        "coffee table": "table", "office chair": "chair", "armchair": "chair", "man": "person", "woman": "person"}
+        "coffee table": "table", "office chair": "chair", "armchair": "chair", "man": "person", "woman": "person",
+        "bicycle": "bike", "bean bag": "beanbag"}
 LIKE = 0.7  # how alike two looks must be (histogram intersection, 0 to 1) to know a lost person again
 UNLIKE = 0.15  # below this, two looks are two people however close they stand (0.4 split one person across cameras)
 MOVED = 0.001  # square metres per second a thing's place may drift unseen (someone may move it; misses handle more)
@@ -116,11 +117,24 @@ class Track:
         return self.label == "person"
 
 
+GONE_AFTER = 6  # clear views in a row without it before a thing counts as gone: YOLOE-26l finds a TV in about 73% of
+# frames, so three misses in a row came often with the TV right there ("tv 1 was not there when the cameras last
+# looked"); six in a row at that rate is about 1 in 2,600
+GONE_S = 3.0  # and seconds since it was last seen
+
+
 class Tracker:
     def __init__(self, gate: float = 0.6, smoothing: float = 0.35) -> None:
         self.gate, self.smoothing = gate, smoothing
         self.tracks: dict[int, Track] = {}
         self._next = 1
+        self.became: dict[int, int] = {}  # merged id -> the id it was merged into: ids already given out keep working
+
+    def current(self, track_id: int) -> int:
+        """The id a thing has now, given any id it has had."""
+        while track_id in self.became:
+            track_id = self.became[track_id]
+        return track_id
 
     def update(self, detections: list[Detection], now: float) -> list[tuple[Detection, Track]]:
         """Fold one camera frame's detections in; returns each detection with the track it matched or created."""
@@ -278,14 +292,17 @@ class Tracker:
                 t.last_seen = max(t.last_seen, o.last_seen)
                 t.score = max(t.score, o.score)
                 del self.tracks[o.id]
+                self.became[o.id] = t.id
                 for k, (d, track) in enumerate(pairs):
                     if track is o:
                         pairs[k] = (d, t)
 
-    def missed(self, track: Track) -> None:
-        """A camera looked clearly at where `track` should be and did not see it."""
+    def missed(self, track: Track, now: float | None = None) -> None:
+        """A camera looked clearly at where `track` should be and did not see it. Gone after GONE_AFTER such misses
+        in a row, and, given `now`, GONE_S since anything last saw it: misses come from all three cameras, and two of
+        them each missing a flickering plant for a few frames took it off the map a second after a search found it."""
         track.misses += 1
-        if track.misses >= 3:
+        if track.misses >= GONE_AFTER and (now is None or now - track.last_seen >= GONE_S):
             track.present = False
 
     def verify(self, track: Track, label: str | None, pixels: int = 0, sure: bool = False) -> None:
@@ -336,18 +353,4 @@ def look(pixels: Any, bins: int = 8) -> Any:
     hist, _, _ = np.histogram2d(hue, saturation, bins=bins, range=((0, 1), (0, 1)))
     return hist / hist.sum()
 
-
-def needs_active_vision(track: Track | None, decision_prob: float | None = None,
-                        target_anchor: Track | None = None,
-                        robot_xy: tuple[float, float] = (0.0, 0.0)) -> str | None:
-    """Determine if active vision behavior (peek, step_closer, step_back_under) is triggered."""
-    if target_anchor is not None and math.dist(robot_xy, (target_anchor.x, target_anchor.y)) < 1.0:
-        return "step_back_under"
-    if decision_prob is not None and 0.30 <= decision_prob <= 0.80:
-        is_cut = getattr(track, "cut", False) if track is not None else False
-        hits = getattr(track, "hits", 0) if track is not None else 0
-        return "peek" if (track is None or is_cut or hits < 3) else "step_closer"
-    if track is not None and (not track.sized or track.noise > 0.25):
-        return "step_closer"
-    return None
 

@@ -31,21 +31,22 @@ EARLIER = 4  # earlier tasks summarised at the start of a new one
 REPEATS = 2  # the same call (same arguments) this many times in a row runs; the next is refused with a note
 
 SYSTEM = """You are Sprocket, a small wheeled robot who lives with people, like a friendly pet that can also help.
-You have three cameras (front, rear-left, rear-right) and act only by calling tools. You drive on flat floors only:
-you cannot climb stairs or steps, fly, or pick things up.
+You have three cameras: front, rear-left (behind you on the left) and rear-right (behind you on the right). You act
+only by calling tools. You drive on flat floors only: you cannot climb stairs or steps, fly, or pick things up.
 
 How you work:
-- The pictures are what you see right now. The numbers drawn on them are object ids, the same as in the object list.
-- Use ids from the object list as targets whenever you can. Left and right are your own.
-- Call one or more tools in a turn. You get each result back, then decide what to do next.
+- The pictures are what you see right now. Answer questions about them yourself (call look for other directions).
+- The object list holds people and the things tools have looked for; the numbers on the pictures are its ids. Use
+  ids as targets when you have them, else name the thing ("red ball"): tools look for it with the cameras.
+- To go to a thing (the sofa, sofa 4, the user), use go_to. For a place you can see that is not one thing, use
+  go_toward with the direction of the picture it is in and about how far. Left and right are your own.
+- Call tools to act. You get each result back, then decide what to do next. If one fails, read why and try another
+  way, or ask the user.
+- If something is not in view, search for it where it most likely is before you say it is not there: give search
+  the room, and with near a thing it is usually beside.
 - For a request with several parts, first write a to-do list with todo, then tick each step off with todo_done.
-- If a tool fails, read why and try another way, or ask the user.
-- To answer a question about what you see, look at the pictures (call look for other directions) and answer.
-- If something the user mentions is not in the object list or the pictures, it may be elsewhere: search for it
-  before you say it is not there. To see what is on, in or next to something, go to it first, then look.
-- When the request is done, reply with one or two short spoken sentences and no tool call. That reply ends the task.
-- If a request is impossible or unsafe for you, say so kindly instead.
-- Speak warmly and briefly, like a friend."""
+- When the request is done, reply with one or two short, warm spoken sentences and no tool call. That ends the task.
+- If a request is impossible or unsafe for you, say so kindly instead."""
 
 
 @dataclass
@@ -90,25 +91,29 @@ def _image_part(url: str) -> dict[str, Any]:
 
 
 class Agent:
-    def __init__(self, brain: Any, *, memory: Any = None, live: Any = None, cameras: str = "front",
+    def __init__(self, brain: Any, *, memory: Any = None, live: Any = None, cameras: str = "all",
                  see_after_moves: bool = False, max_turns: int = MAX_TURNS, think: str = "medium",
-                 image_width: int = IMAGE_WIDTH) -> None:
-        """`cameras`: the pictures sent with each request, "front" or "all" three; the model asks for others with
-        look. `see_after_moves`: also send fresh pictures after every move, not only when the model looks.
+                 image_width: int = IMAGE_WIDTH, review: bool = True, think_when: str = "always") -> None:
+        """`cameras`: the pictures sent with each request, "front", "all" three, or "none" (the object list only);
+        the model asks for others with look. `see_after_moves`: also send fresh pictures after every move, not only when the model looks.
         `think`: how long the model may reason before each turn: off, low, medium or high (see THINK).
-        `image_width`: pixels across each picture the model gets (16:9)."""
+        `image_width`: pixels across each picture the model gets (16:9). `review`: before a task ends, show the
+        model the request and what it did once, for a last check (it costs a model turn on every task).
+        `think_when`: "always", or "news": reason only before a call that follows something the model did not ask
+        for (the request, the user's words, a call that failed); after calls that went as asked, and for the
+        review, it carries on without."""
         self.brain, self.memory, self.live = brain, memory, live
-        self.cameras = ("front_camera", "rear_left_camera", "rear_right_camera") if cameras == "all" else \
-            ("front_camera",)
+        self.cameras = {"all": ("front_camera", "rear_left_camera", "rear_right_camera"), "front": ("front_camera",),
+                        "none": ()}[cameras]
         self.see_after_moves = see_after_moves
-        self.max_turns, self.think, self.image_width = max_turns, THINK[think], image_width
+        self.max_turns, self.think, self.image_width, self.review = max_turns, THINK[think], image_width, review
+        self.think_when = think_when
         self.earlier: list[str] = []  # one line per task before the last one
         self.last = ""  # the last task step by step: each call with its result, and the reply
         self._heard: queue.Queue[str] = queue.Queue()
         self._acting = threading.Event()
         self._robot: Any = None
         self._stopped = threading.Event()
-        self._seen_id = 0
 
     # ---- from other threads (the live page, the microphone) ------------------------------------------------------
     def interject(self, text: str) -> None:
@@ -166,8 +171,7 @@ class Agent:
             here.append(f"{name} ({about[name]}, {where})" if name in about else f"{name} ({where})")
         return "Places you can go_to by name: " + "; ".join(here) if here else ""
 
-    def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str,
-                     when: str = "") -> dict[str, Any]:
+    def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str) -> dict[str, Any]:
         parts: list[dict[str, Any]] = [{"type": "text", "text": f"{header}\n{self._scene_text(robot)}"}]
         if tools.todo.steps:
             parts[0]["text"] += f"\nTo-do list:\n{tools.todo.text()}"
@@ -181,13 +185,17 @@ class Agent:
             url = data_url(frame, max_width=width)
             name = CAMERA_NAMES.get(cam, cam)
             parts += [{"type": "text", "text": f"{name} camera:"}, _image_part(url)]
-            shown.append({"camera": name, "url": url})
+            shown.append(name)
             tools.seen.add(cam)
-        if shown:  # the live page shows exactly the pictures the model was given, and when
-            self._seen_id += 1
-            self._push(seen=shown, seen_when=when, seen_id=self._seen_id)
-        else:
+        for ago, rgb in tools.past:  # look_back: what the front camera saw before, oldest first
+            url = data_url(rgb, max_width=width)
+            parts += [{"type": "text", "text": f"front camera {ago:.0f} s ago:"}, _image_part(url)]
+            shown.append(f"front, {ago:.0f} s ago")
+        tools.past = []
+        if not shown and cameras:
             parts[0]["text"] += "\n(No camera pictures right now.)"
+        elif not shown:
+            parts[0]["text"] += "\n(No pictures with this message: call look to see.)"
         return {"role": "user", "content": parts}
 
     @staticmethod
@@ -232,8 +240,7 @@ class Agent:
             context.append("Earlier requests (oldest first):\n" + "\n".join(f"- {e}" for e in older))
         if self.last:
             context.append(f"The last request, step by step:\n{self.last}")
-        first = self._observation(robot, tools, list(self.cameras), "What you sense now:",
-                                  when="when the task started")
+        first = self._observation(robot, tools, list(self.cameras), "What you sense now:")
         if context:
             first["content"].insert(0, {"type": "text", "text": "\n".join(context) + "\n"})
         first["content"].append({"type": "text", "text": f'The user says: "{instruction}"'})
@@ -241,18 +248,20 @@ class Agent:
         reviewed = False
         last_said = ""
         last_call, repeats = None, 0
+        think = self.think  # the request is news
 
         try:
             for _ in range(self.max_turns):
                 if self._stopped.is_set():
                     return self._finish(robot, record, "preempted", last_said)
                 self._trim_images(messages)
+                self._push(thought="(thinking...)")
                 t0 = time.perf_counter()
-                reply = self.brain.chat(messages, tools.schemas(), think=self.think)
+                reply = self.brain.chat(messages, tools.schemas(), think=think)
                 step = Step(reply.text, model_s=round(time.perf_counter() - t0, 3), tokens=reply.write_tokens,
                             thought=reply.thought.strip())
                 record.steps.append(step)
-                self._push(steps=record.lines(thoughts=True))
+                self._push(steps=record.lines(thoughts=True), thought=step.thought or "(no reasoning this turn)")
                 assistant: dict[str, Any] = {"role": "assistant", "content": reply.text}
                 if step.thought:  # kept with its tool calls, as LFM3's template expects within a task
                     assistant["reasoning_content"] = step.thought
@@ -268,10 +277,12 @@ class Agent:
                             robot.say(speakable(reply.text))
                         messages.append({"role": "user", "content": "".join(f'The user says: "{h}"\n'
                                                                             for h in heard).strip()})
+                        think = self.think
                         continue
-                    if not reviewed:  # a stop hook: check once, then finish (it catches "I'll head back" with no move)
+                    if self.review and not reviewed:  # a stop hook: check once, then finish ("I'll head back", no move)
                         reviewed = True
                         messages.append({"role": "user", "content": self._review(instruction, record, tools)})
+                        think = self._budget(news=False)
                         continue
                     if reply.text and speak:
                         robot.say(speakable(reply.text))
@@ -310,16 +321,15 @@ class Agent:
                     tools.moved = False
 
                 heard = self._drain()
+                think = self._budget(news=failed or bool(heard))
                 moved = self.see_after_moves and tools.moved
                 cameras = list(dict.fromkeys([*(self.cameras if moved else ()), *tools.looked]))
                 if heard:  # the user spoke mid-task: a new user turn with their words and what the robot senses now
                     header = "".join(f'The user says: "{h}"\n' for h in heard) + "What you sense now:"
-                    messages.append(self._observation(robot, tools, cameras, header, when="when the user spoke"))
-                elif cameras:  # pictures come back inside the turn's last tool result, as the model was trained:
-                    asked = [f"{c.name}({', '.join(f'{v}' for v in c.args.values())})" for c in reply.tool_calls
-                             if c.name == "look"]  # a new user message would end its tool-use turn and drop the
-                    when = f"after {', '.join(asked)}" if asked else "after moving"  # reasoning so far
-                    seen = self._observation(robot, tools, cameras, "What you sense now:", when=when)
+                    messages.append(self._observation(robot, tools, cameras, header))
+                elif cameras or tools.past:  # pictures come back inside the turn's last tool result, as trained: a
+                    # new user message would end its tool-use turn and drop the reasoning so far
+                    seen = self._observation(robot, tools, cameras, "What you sense now:")
                     messages[-1]["content"] = [{"type": "text", "text": messages[-1]["content"]}, *seen["content"]]
                 tools.moved, tools.looked = False, []
             record.problems.append(f"no answer after {self.max_turns} turns")
@@ -337,6 +347,10 @@ class Agent:
             except Preempted:
                 return self._finish(robot, record, "preempted", last_said)
         return self._finish(robot, record, "failed", last_said)
+
+    def _budget(self, news: bool) -> int:
+        """Tokens the model may reason for before its next call."""
+        return self.think if news or self.think_when == "always" else 0
 
     def _drain(self) -> list[str]:
         heard = []

@@ -12,7 +12,7 @@ The specification is in [docs/architecture.md](docs/architecture.md); the agent'
 firmware/  STM32H5 sketch: 200 Hz wheel control, VL53L5CX step/cliff reflex, IMU + anti-snag
 robot/
   body/       30–50 Hz Living Body Engine: trajectory rollout, social yielding, aliveness, active vision
-  perception/ 3-CSI camera rig, metric floor/ToF depth calibration, synthetic /scan, pose/gaze, SoM+PIVOT overlay
+  perception/ 3-CSI camera rig, metric floor/ToF depth calibration, synthetic /scan, pose/gaze, id overlay; YOLOE + depth on the GPU vision server
   mind/       model client (native tool calls, d1-2B scoring), long-term memory (SQLite)
   agent/      the agent loop, its tools (checked, with errors that teach), to-do list, instant stop/wait
   sim/        2D simulator behind the robot API, with drawn perspective cameras
@@ -34,18 +34,16 @@ powershell -ExecutionPolicy Bypass -File tools\demo.ps1           # the model (i
 powershell -ExecutionPolicy Bypass -File tools\brain.ps1 -Stop    # stop the model when done
 ```
 
-The demo starts in the **3D apartment**: a real-looking home (ReplicaCAD, 119 objects) rendered by Habitat-Sim on the
-GPU, behind the same robot API as the fast 2D rooms (which the room picker still offers). Everything else runs in
-Python with numpy (the WSL venv `~/sprocket-venv` on this machine):
+The demo starts in the **3D apartment**: a real-looking home (ReplicaCAD) in Habitat-Sim that stands in only for the
+world, the body and the raw sensors; the robot's own software runs on top unchanged (ROS 2, Nav2, its own map, depth
+and YOLOE from its colour cameras, the agent), slower than real time on a PC
+([docs/simulation_3d.md](docs/simulation_3d.md)). The 2D rooms in the room picker are a fast smoke test.
 
 ```bash
 python -m pip install -e ".[eval,dev]"
 python -m pytest -q
 python -m ruff check .
 python -m robot.eval.suite --tag mine         # the 50-task suite in the fast 2D world
-python -m robot.eval.home3d --tag mine        # 10 3D reasoning tasks in the 3D apartment
+python -m robot.eval.home3d --tag mine        # 27 tasks in the 3D apartment on the real stack (WSL: . tools/wsl/env.sh)
 python -m robot.interfaces.demo               # talk to it at http://127.0.0.1:8765
 ```
-
-Gazebo with ROS 2 and Nav2 (`robot/ros/`, [docs/simulation_3d.md](docs/simulation_3d.md)) is for testing the ROS
-integration before the real robot, not for day-to-day work on the agent.

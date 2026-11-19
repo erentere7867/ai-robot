@@ -8,7 +8,7 @@ of view. The numbers come from robot/ros/model.py, the body the simulator loads,
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from robot.ros.model import CAMERA_R, CAMERA_Z, CAMERAS
 
@@ -23,11 +23,14 @@ class Camera:
     x: float
     y: float
     z: float
-    depth: bool  # an RGB-D camera
 
     @property
     def focal(self) -> float:
         return (self.width / 2) / math.tan(self.hfov / 2)
+
+    def at(self, width: int, height: int) -> Camera:
+        """The same camera for a picture scaled to width x height (a depth estimate made smaller, say)."""
+        return self if (width, height) == (self.width, self.height) else replace(self, width=width, height=height)
 
     def _local(self, u: float, v: float) -> tuple[float, float]:
         """Right and down per metre forward for pixel (u, v)."""
@@ -77,8 +80,8 @@ class Camera:
         return float(u), float(v)
 
 
-RIG = {name: Camera(name, yaw, fov, w, h, CAMERA_R * math.cos(yaw), CAMERA_R * math.sin(yaw), CAMERA_Z, depth)
-       for name, (yaw, fov, w, h, _, depth) in CAMERAS.items()}
+RIG = {name: Camera(name, yaw, fov, w, h, CAMERA_R * math.cos(yaw), CAMERA_R * math.sin(yaw), CAMERA_Z)
+       for name, (yaw, fov, w, h, _) in CAMERAS.items()}
 
 
 def to_map(pose: tuple[float, float, float], bx: float, by: float) -> tuple[float, float]:

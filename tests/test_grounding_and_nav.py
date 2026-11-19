@@ -9,7 +9,6 @@ import pytest
 
 from robot.agent.api import NotFound, Object, PathBlocked, Pose
 from robot.interfaces.live import PAGE
-from robot.ros.real import NAMES
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
 
@@ -99,24 +98,6 @@ def test_exact_match_prioritized_over_synonyms():
 
 
 # ---------------------------------------------------------------------------
-# 2. RealRobot.NAMES bidirectional synonyms
-# ---------------------------------------------------------------------------
-
-
-def test_real_robot_names_aliases():
-    assert "desk" in NAMES["table"]
-    assert "table" in NAMES["desk"]
-    assert "coffee table" in NAMES["desk"]
-    assert "coffee table" in NAMES["table"]
-    assert "couch" in NAMES["sofa"]
-    assert "seat" in NAMES["chair"]
-    assert "human" in NAMES["person"]
-    assert "mug" in NAMES["cup"]
-    assert "bag" in NAMES["backpack"]
-    assert "trash can" in NAMES["bin"]
-
-
-# ---------------------------------------------------------------------------
 # 3. RosRobot._goal_point & _go tolerance and retry
 # ---------------------------------------------------------------------------
 
@@ -202,79 +183,24 @@ def test_ros_robot_go_arrival_tolerance_absorbs_nav2_abort():
     assert robot.sync_calls >= 1
 
 
-def test_ros_robot_go_retries_with_larger_distance():
-    scene = _make_scene()
-    robot = MockRosRobot(scene)
-    target = Object(
-        id=1,
-        label="table",
-        position=(3.0, 0.0),
-        distance=3.0,
-        bearing=0.0,
-        side="ahead",
-        radius=0.4,
-        color="brown",
-        last_seen=0.0,
-    )
+def test_nav2_and_slam_parameters_fit_this_robot(tmp_path):
+    from pathlib import Path
 
-    robot.x = 0.0
-    robot.y = 0.0
-    # First attempt fails; second attempt (retry with standoff +0.25) succeeds
-    robot.fail_nav_counts = 1
-    robot._go(target, distance=0.4)
-    # navigate_to_pose called twice (initial + retry)
-    assert len(robot.nav_calls) == 2
-
-
-def test_ros_robot_go_falls_back_to_a_star_cmd_vel_when_nav2_fails():
-    table = Thing("table", 3.0, 0.0, radius=0.4, color="brown", id=1)
-    scene = _make_scene([table])
-    robot = MockRosRobot(scene)
-    target = Object(
-        id=1,
-        label="table",
-        position=(3.0, 0.0),
-        distance=3.0,
-        bearing=0.0,
-        side="ahead",
-        radius=0.4,
-        color="brown",
-        last_seen=0.0,
-    )
-
-    robot.x = 0.0
-    robot.y = 0.0
-    robot.yaw = 0.0
-    # Both initial and retry fail Nav2
-    robot.fail_nav_counts = 5
-    robot._go(target, distance=0.5)
-
-    desired_reach = 0.4 + max(0.5, 0.35)
-    actual_dist = math.dist((3.0, 0.0), (robot.x, robot.y))
-    assert actual_dist <= desired_reach + 0.1
-    assert robot.nav_calls  # Nav2 was attempted first
-
-
-def test_nav2_params_and_amcl_tuning(tmp_path):
+    import pytest
     import yaml
 
-    from robot.ros.stage import AMCL, _nav2_params
+    from robot.ros import bringup
+    from robot.ros.model import BODY_R
 
-    assert AMCL["transform_tolerance"] == 1.0
-
-    out_file = _nav2_params(tmp_path)
-    assert out_file.exists()
-
-    cfg = yaml.safe_load(out_file.read_text())
-    assert cfg["amcl"]["ros__parameters"]["transform_tolerance"] == 1.0
-    assert cfg["controller_server"]["ros__parameters"]["transform_tolerance"] == 1.0
-    assert cfg["controller_server"]["ros__parameters"]["FollowPath"]["transform_tolerance"] == 1.0
-    assert cfg["controller_server"]["ros__parameters"]["FollowPath"]["batch_size"] == 800
-    assert cfg["local_costmap"]["local_costmap"]["ros__parameters"]["transform_tolerance"] == 1.0
-    assert cfg["global_costmap"]["global_costmap"]["ros__parameters"]["transform_tolerance"] == 1.0
-    assert cfg["behavior_server"]["ros__parameters"]["transform_tolerance"] == 1.0
-    assert cfg["collision_monitor"]["ros__parameters"]["transform_tolerance"] == 1.0
-    assert cfg["collision_monitor"]["ros__parameters"]["source_timeout"] == 5.0
+    if not (bringup.NAV2 / "params" / "nav2_params.yaml").exists() or not Path(bringup.SLAM_DEFAULTS).exists():
+        pytest.skip("Nav2 and slam_toolbox are not installed here")
+    cfg = yaml.safe_load(bringup.params(tmp_path).read_text())
+    for name in ("local_costmap", "global_costmap"):
+        assert cfg[name][name]["ros__parameters"]["robot_radius"] == BODY_R
+    assert cfg["amcl"]["ros__parameters"]["max_beams"] == bringup.AMCL["max_beams"]
+    assert cfg["controller_server"]["ros__parameters"]["FollowPath"]["vx_max"] == bringup.CRUISE
+    slam = cfg["slam_toolbox"]["ros__parameters"]
+    assert slam["use_sim_time"] and slam["base_frame"] == "base_link" and slam["max_laser_range"] <= 5.0
 
 
 def test_ros_robot_shutdown_cleans_up_action_node_and_executor():
@@ -456,68 +382,45 @@ def test_ros_robot_begin_and_sync_bounds_poses():
     assert len(robot.trace.poses) == 1500  # bounded to last 1500 by _sync
 
 
-def test_synthetic_scan_publisher_external_scan_skips_duplicate_raycasting():
-    from types import SimpleNamespace
-    from unittest.mock import patch
+def test_scan_sectors_made_earlier_are_moved_to_where_the_robot_is_now():
+    import math
 
     import numpy as np
 
+    from robot.ros.perceive import combine
+
+    ranges = np.full(360, np.nan, np.float32)
+    ranges[180] = 2.0  # something 2 m dead ahead, seen when the robot faced along +x
+    scan, angle_min, step = combine([(0.0, (0.0, 0.0, 0.0), ranges)], (0.0, 0.0, math.pi / 2))
+    k = int(np.nanargmin(scan))
+    assert abs(math.degrees(angle_min + (k + 0.5) * step) + 90) < 1.5  # now it is on the right
+    assert abs(float(scan[k]) - 2.0) < 0.01
+    scan, _, _ = combine([(0.0, (0.0, 0.0, 0.0), ranges)], (1.0, 0.0, 0.0))
+    assert abs(float(np.nanmin(scan)) - 1.0) < 0.01  # driven 1 m toward it
+
+
+def test_wheels_that_do_not_follow_the_drive_put_the_touched_spot_in_the_scan():
+    import numpy as np
+
+    from robot.ros.model import BODY_R
     from robot.ros.perceive import SyntheticScanPublisher
 
-    pub = SyntheticScanPublisher(node=None, publish=False)
-    assert not pub._external_scan
-
-    raw = np.ones((60, 80), dtype=np.float32)
-    stamp = SimpleNamespace(sec=10, nanosec=0)
-
-    # When _external_scan is False, synthetic_scan runs
-    dummy_scan = (np.zeros(360, dtype=np.float32), 0.0, 0.01)
-    with patch("robot.ros.perceive.synthetic_scan", return_value=dummy_scan) as mock_scan:
-        pub.ingest_depth("front_camera", stamp, raw)
-        assert mock_scan.called
-        assert pub.scan is not None
-
-    # When _external_scan is True and publish is False, synthetic_scan is skipped
-    pub._external_scan = True
-    with patch("robot.ros.perceive.synthetic_scan") as mock_scan:
-        pub.ingest_depth("front_camera", SimpleNamespace(sec=11, nanosec=0), raw)
-        assert not mock_scan.called
-
-
-def test_page_refresh_survives_preemption():
-    import time
-    from types import SimpleNamespace
-    from unittest.mock import patch
-
-    from robot.agent.api import Preempted
-    from robot.interfaces.live import Live
-    from robot.ros.run3d import page
-
-    class FlakyRobot:
-        def __init__(self):
-            self.calls = 0
-            self.perception = object()
-            self.posture = "neutral"
-
-        def _perceive_objects(self):
-            self.calls += 1
-            if self.calls == 1:
-                raise Preempted("stopped during cancel")
-
-    robot = FlakyRobot()
-    holder = SimpleNamespace(sim=robot)
-
-    with patch.object(Live, "serve"), patch("robot.ros.run3d.scan_points", return_value=[]):
-        live = page(holder, port=9999)
-        deadline = time.monotonic() + 2.0
-        while robot.calls < 2 and time.monotonic() < deadline:
-            time.sleep(0.05)
-
-        assert robot.calls >= 2, "refresh() thread died after Preempted exception!"
-
-        # Also test camera() fallback catches Preempted / Exception
-        with patch("robot.ros.run3d.annotated", side_effect=Preempted("cancelled")):
-            assert live.camera("front_camera") is None
+    scan = SyntheticScanPublisher(publish=True)
+    t = 0.0
+    for _ in range(50):  # driving, the wheels following: nothing touched
+        scan.drive(t, 0.3)
+        assert not scan.wheels(t, 0.3, (0.0, 0.0, 0.0))
+        t += 0.02
+    new = []
+    for _ in range(25):  # held: the motors driven, the wheels still
+        scan.drive(t, 0.3)
+        new.append(scan.wheels(t, 0.0, (0.0, 0.0, 0.0)))
+        t += 0.02
+    assert sum(new) == 1 and new.index(True) >= 14  # once, after STALL_S
+    _, _, ranges = scan._contact_part(t + 60.0, (-0.3, 0.0, 0.0))  # a minute later, backed off 0.3 m
+    k = int(np.nanargmin(ranges))
+    assert abs(float(ranges[k]) - (BODY_R + 0.03 + 0.3)) < 0.02 and abs(k + 0.5 - 180) < 2  # still there, ahead
+    assert np.all(np.isnan(scan._contact_part(t + 200.0, (0.0, 0.0, 0.0))[2]))  # forgotten after CONTACT_KEEP
 
 
 def test_real_robot_wall_bounds_rejection():
@@ -556,7 +459,7 @@ def test_real_robot_wall_bounds_rejection():
 def test_resize_rgb_bilinear():
     import numpy as np
 
-    from robot.ros.robot import _resize_rgb
+    from robot.perception.camera import resize_rgb as _resize_rgb
 
     # 100x100 input image with a horizontal gradient
     img = np.zeros((100, 100, 3), dtype=np.uint8)

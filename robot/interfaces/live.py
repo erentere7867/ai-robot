@@ -1,7 +1,7 @@
 """The live page: what Sprocket v2 is thinking and doing, and a box to command it.
 
 One small web page (standard library only) shows the instruction, the agent's to-do list and every tool call
-with its result, the latest camera picture the model saw, a 2D map with the robot's pose, trail, objects and rooms,
+with its result, the model's reasoning, a 2D map with the robot's pose, trail, objects and rooms,
 what the robot has said, and the history of instructions. Commands typed on the
 page, the Stop button, and the room picker arrive in `Live.inbox` for whoever drives the robot
 (`robot/interfaces/demo.py`).
@@ -31,6 +31,8 @@ class State:
     posture: str = "neutral"
     chime: str = ""
     steps: list[str] = field(default_factory=list)  # every tool call and its result, in order
+    thought: str = ""  # the model's latest reasoning, in full
+    searching: list[str] = field(default_factory=list)  # the last search's stops: where the model thought it was
     todo: str = ""  # the model's to-do list
     problems: list[str] = field(default_factory=list)
     said: list[str] = field(default_factory=list)
@@ -47,9 +49,6 @@ class State:
     history: list[dict[str, Any]] = field(default_factory=list)
     cameras: list[str] = field(default_factory=list)
     scan: list[tuple[float, float]] = field(default_factory=list)
-    seen: list[dict[str, str]] = field(default_factory=list)  # the pictures the model was last given: camera, url
-    seen_when: str = ""  # when it was given them
-    seen_id: int = 0  # changes whenever it is given new ones
     voice: bool = False
     heard: str = ""
     said_total: int = 0
@@ -130,6 +129,8 @@ class Live:
         }
         if hasattr(sim, "posture"):
             changes["posture"] = sim.posture
+        if hasattr(sim, "search_log"):  # a search running now: where the model thinks the thing is, stop by stop
+            changes["searching"] = list(sim.search_log)
         self.update(**changes)
 
     def hear(self, audio: bytes) -> None:
@@ -289,6 +290,10 @@ Pink dots show 360° 3-CSI depth contours (no LiDAR). Faded objects are remember
 <pre id="todo" class="muted">(no to-do list)</pre>
 <h3>Tool calls</h3>
 <ol id="steps" class="steps"></ol>
+<h3>Latest reasoning</h3>
+<pre id="thought" class="muted" style="white-space:pre-wrap">(none)</pre>
+<h3>Last search: where the model looked</h3>
+<ol id="searching" class="steps"></ol>
 </section>
 
 <section>
@@ -296,11 +301,6 @@ Pink dots show 360° 3-CSI depth contours (no LiDAR). Faded objects are remember
 <canvas id="map" width="800" height="600"></canvas>
 </section>
 
-<section class="wide" id="seensec" hidden>
-<h2>What the model saw <span id="seenwhen" class="muted"></span></h2>
-<div class="hint">Snapshots, not video: the model is given pictures when a task starts and when it calls look.</div>
-<div id="seen" class="cams"></div>
-</section>
 
 <section>
 <h2>Said</h2>
@@ -430,7 +430,7 @@ g.beginPath();g.moveTo(X(x),Y(y));g.lineTo(X(x+.35*Math.cos(a)),Y(y+.35*Math.sin
 g.strokeStyle=ink;g.lineWidth=3;g.stroke();
 }
 
-let scenesKey='',seenId=-1;
+let scenesKey='';
 function render(s){
 $('instruction').textContent=s.instruction||'Tell the robot what to do';
 $('status').textContent=s.status||'idle';
@@ -440,11 +440,10 @@ if(s.chime){$('chime').hidden=false;$('chime').textContent='chime: '+s.chime}els
 $('rooms').textContent=(s.rooms&&s.rooms.length)?'rooms: '+s.rooms.join(', '):'';
 $('todo').textContent=s.todo||'(no to-do list)';
 $('todo').className=s.todo?'':'muted';
+$('thought').textContent=s.thought||'(none)';
+$('searching').innerHTML=(s.searching||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">no search yet</li>';
 const steps=s.steps||[];
 $('steps').innerHTML=steps.map((it,idx)=>`<li class="${idx===steps.length-1?'now':''}${String(it).startsWith('thought:')?' thought':''}">${esc(it)}</li>`).join('')||'<li class="muted">none yet</li>';
-if(s.seen&&s.seen.length){$('seensec').hidden=false;$('seenwhen').textContent=s.seen_when?'('+s.seen_when+')':'';
-if(s.seen_id!==seenId){seenId=s.seen_id;$('seen').innerHTML=s.seen.map(v=>`<figure><img src="${v.url}" alt="${esc(v.camera)}"><figcaption>${esc(v.camera)} camera</figcaption></figure>`).join('')}}
-else{$('seensec').hidden=true}
 $('said').innerHTML=(s.said||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">nothing yet</li>';
 const saidArr=s.said||[];
 if(saidArr.length>0){
@@ -481,7 +480,7 @@ img.onerror=()=>{img.dataset.loading='';img.dataset.loadingAt='0'};
 lastCamAt=0;
 }
 const now=Date.now();
-if(now-lastCamAt<500)return;
+if(now-lastCamAt<200)return;
 lastCamAt=now;
 $('cams').querySelectorAll('img[data-cam]').forEach(img=>{
 const started=Number(img.dataset.loadingAt||0);

@@ -1,4 +1,4 @@
-"""Visual grounding overlay: pure-NumPy Set-of-Mark box badges and projected 3D floor path ribbons."""
+"""Visual grounding overlay: pure-NumPy id badges on the boxes the model sees."""
 
 from __future__ import annotations
 
@@ -112,41 +112,12 @@ def _draw_rect(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, color: tuple
 
 def draw_set_of_mark(rgb: np.ndarray,
                      boxes_and_ids: list[tuple[tuple[int, int, int, int], int] | tuple[tuple[int, int, int, int], int, str]],
-                     candidate_paths: list[tuple[str, list[tuple[float, float]]]] = (),
                      cam: Camera | None = None) -> np.ndarray:
-    """Draw Set-of-Mark ID badges on detected objects and projected 3D floor path ribbons."""
+    """Draw the tracker's id badges on the boxes of what was detected."""
     out = np.array(rgb, copy=True)
     h, w = out.shape[:2]
 
-    # 1. Draw candidate floor trajectory ribbons if camera and paths provided
-    if cam is not None and candidate_paths:
-        for idx, (path_label, waypoints) in enumerate(candidate_paths):
-            path_color = PATH_PALETTE[idx % len(PATH_PALETTE)]
-            proj_pts: list[tuple[int, int]] = []
-            for bx, by in waypoints:
-                uv = cam.project(bx, by, 0.0)
-                if uv is not None:
-                    proj_pts.append((int(round(uv[0])), int(round(uv[1]))))
-
-            if len(proj_pts) >= 2:
-                for k in range(len(proj_pts) - 1):
-                    _draw_line(out, proj_pts[k][0], proj_pts[k][1], proj_pts[k + 1][0], proj_pts[k + 1][1],
-                               path_color, thickness=3)
-
-                # Badge (A), (B), (C) near middle or far point of path
-                badge_idx = len(proj_pts) // 2
-                bu, bv = proj_pts[badge_idx]
-                tag = f"({path_label})"
-                scale = 2
-                tag_w = len(tag) * 6 * scale + 4
-                tag_h = 7 * scale + 4
-                bx0 = max(0, min(w - tag_w, bu - tag_w // 2))
-                by0 = max(0, min(h - tag_h, bv - tag_h // 2))
-                out[by0:by0 + tag_h, bx0:bx0 + tag_w] = (20, 20, 20)
-                _draw_rect(out, bx0, by0, bx0 + tag_w, by0 + tag_h, path_color, thickness=1)
-                _draw_text(out, tag, bx0 + 2, by0 + 2, path_color, scale=scale)
-
-    # 2. Thin black-and-white outlines and plain black badges with white numbers. The marks have no colour of their
+    # Thin black-and-white outlines and plain black badges with white numbers. The marks have no colour of their
     #    own: coloured boxes made the vision model call a red bike "blue", the colour of the box drawn round it.
     for item in boxes_and_ids:
         if len(item) == 3:

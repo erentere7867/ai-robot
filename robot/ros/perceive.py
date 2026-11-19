@@ -1,14 +1,18 @@
-"""Perception on ROS: Sprocket's 3-CSI pure-vision + ToF rig, calibrated synthetic /scan, and YOLOE-26 tracker.
+"""Perception on ROS: Sprocket's three colour cameras + ToF, depth from a monocular network, synthetic /scan, and the
+YOLOE-26 tracker.
 
-Depth maps from the 120-degree 3-CSI cameras are metric-calibrated with IMU tilt and front/rear ToF grids to publish
-a synthetic 360-degree LaserScan on /scan for Nav2/AMCL without a hardware lidar. A worker thread takes the newest
-colour frame from each camera in turn, runs the detector, places each detection on the map (calibrated depth + floor +
-synthetic/external /scan; robot pose from TF at the frame's time), and folds them into the tracker.
+The cameras give colour only. The depth node (`python -m robot.ros.perceive --depth`, on the board's GPU) estimates a
+depth picture for each camera's newest frame, publishes it, and turns the three, metric-calibrated against the floor
+and the ToF grids with the IMU's tilt, into a synthetic 360-degree LaserScan on /scan for Nav2 and SLAM: there is no
+lidar. In the robot's own process a worker thread takes the newest colour frame from each camera in turn, runs the
+detector, places each detection on the map (depth + floor + /scan; robot pose from TF at the frame's time), and folds
+them into the tracker.
 """
 
 from __future__ import annotations
 
 import argparse
+import array
 import math
 import threading
 import time
@@ -18,26 +22,23 @@ from typing import Any
 
 import numpy as np
 
-from robot.mind.brain import _with_image, active_vision_action
+from robot.mind.brain import _with_image
 from robot.perception import colour
 from robot.perception.camera import data_url
-from robot.perception.depth import StepHazard, calibrate_depth, classify_tof_grid, synthetic_scan
+from robot.perception.depth import StepHazard, classify_tof_grid, synthetic_scan, tof_scan
 from robot.perception.locate import lidar_range, locate
 from robot.perception.overlay import draw_set_of_mark
 from robot.perception.pose import estimate_pose_from_keypoints
 from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import Detection, Track, Tracker, canonical, look, pixels
+from robot.ros.model import BODY_R, TOF
 
-TOPICS = {"front_camera": "/rgbd_camera/image", "rear_left_camera": "/rear_left_camera/image",
-          "rear_right_camera": "/rear_right_camera/image"}
-DEPTH_TOPICS = {name: "/rgbd_camera/depth_image" if name == "front_camera" else f"/{name}/depth_image"
-                for name in RIG}
-TOF_TOPICS = {"front": "/tof/front", "rear": "/tof/rear"}
-TOF_DEPTH_TOPICS = {"front": "/front_tof/depth_image", "rear": "/rear_tof/depth_image"}
+TOPICS = {name: f"/{name}/image" for name in RIG}  # the camera drivers' colour pictures
+DEPTH_TOPICS = {name: f"/{name}/depth" for name in RIG}  # the depth node's estimates, at a smaller size
+TOF_TOPICS = {"front": "/tof/front", "rear": "/tof/rear"}  # 8x8 grids from the MCU, metres
 SEE_FAR = 3.5  # beyond this a miss is not evidence: the detector may simply not resolve it
-_TOF_HEIGHT = 0.08
-_TOF_PITCH = 0.28
-_TOF_HFOV = 0.7854
+PAST_EVERY, PAST_KEPT = 0.5, 60  # seconds between kept front pictures, and how many: the last 30 s, to look back on
+_, _, _TOF_HEIGHT, _TOF_PITCH, _TOF_HFOV, _ = TOF["front"]
 
 
 def _image(msg: Any) -> np.ndarray:
@@ -155,11 +156,69 @@ def _expected_tof_floor(grid: np.ndarray, pitch_rad: float = 0.0, roll_rad: floa
     return expected_flat
 
 
-class SyntheticScanPublisher:
-    """Calibrates 3-CSI depth frames with IMU + ToF and publishes 360-degree LaserScan on /scan."""
+SECTOR_AGE = 1.0  # seconds: a camera's sector older than this is left out of /scan
+# Touching what no sensor saw (a table's tube frame, a chair leg): the motors are driven and the wheels do not turn.
+STALL_V = 0.05  # m/s: a drive command at least this fast...
+STALL_S = 0.3  # ...while the wheels turn at under a quarter of it for this long: something holds the body
+CONTACT_KEEP = 120.0  # seconds a touched spot stays in /scan: the cameras will go on seeing clear floor there
 
-    def __init__(self, node: Any = None, publish_topic: str = "/scan", publish_tof: bool = True,
-                 publish: bool = True) -> None:
+
+def combine(parts: list[tuple[float, tuple[float, float, float], np.ndarray]], now: tuple[float, float, float],
+            num_beams: int = 360) -> tuple[np.ndarray, float, float]:
+    """One 360-degree scan from the cameras' sectors, each made from where the robot was then (its odometry pose),
+    seen from where it is `now`: the nearest return per beam; inf where some sector saw clear floor; nan where none
+    saw anything."""
+    step = 2 * math.pi / num_beams
+    out = np.full(num_beams, np.nan, np.float32)
+    clear = np.zeros(num_beams, bool)
+    angles = -math.pi + (np.arange(num_beams) + 0.5) * step
+    for _, (px, py, pyaw), ranges in parts:
+        dx, dy = px - now[0], py - now[1]  # then -> now, in the odometry frame, then into the robot's frame now
+        c0, s0 = math.cos(-now[2]), math.sin(-now[2])
+        ox, oy = dx * c0 - dy * s0, dx * s0 + dy * c0
+        turn = pyaw - now[2]
+        hit = np.isfinite(ranges)
+        a = angles[hit] + turn
+        x = ox + ranges[hit] * np.cos(a)
+        y = oy + ranges[hit] * np.sin(a)
+        k = (np.floor((np.arctan2(y, x) + math.pi) / step).astype(int)) % num_beams
+        r = np.hypot(x, y).astype(np.float32)
+        for kk, rr in zip(k, r, strict=True):
+            if not rr >= out[kk]:
+                out[kk] = rr
+        free = np.isinf(ranges)
+        k = (np.floor((angles[free] + turn + math.pi) / step).astype(int)) % num_beams
+        clear[k] = True
+    out[np.isnan(out) & clear] = np.inf
+    return out, -math.pi, step
+
+
+def _odometry_lookup(node: Any) -> Any:
+    """stamp -> the robot's (x, y, yaw) in the odometry frame at that moment (the latest when not known yet)."""
+    from rclpy.time import Time
+    from tf2_ros import Buffer, TransformListener
+
+    buffer = Buffer()
+    node._sprocket_tf = TransformListener(buffer, node)  # kept alive with the node
+
+    def at(stamp: Any) -> tuple[float, float, float]:
+        for when in (Time.from_msg(stamp), Time()):
+            try:
+                tr = buffer.lookup_transform("odom", "base_link", when).transform
+            except Exception:  # noqa: BLE001 - not at that moment (yet)
+                continue
+            q = tr.rotation
+            return tr.translation.x, tr.translation.y, math.atan2(2 * (q.w * q.z + q.x * q.y),
+                                                                   1 - 2 * (q.y * q.y + q.z * q.z))
+        return 0.0, 0.0, 0.0
+
+    return at
+
+
+class SyntheticScanPublisher:
+    """Calibrates the cameras' depth estimates with IMU + ToF and publishes a 360-degree LaserScan on /scan."""
+
+    def __init__(self, node: Any = None, publish_topic: str = "/scan", publish: bool = True) -> None:
         self.publish = publish
         self.cam_depths: dict[str, deque[tuple[float, tuple[Any, np.ndarray]]]] = {n: deque(maxlen=12) for n in RIG}
         self.depths = self.cam_depths["front_camera"]
@@ -170,14 +229,20 @@ class SyntheticScanPublisher:
         self.turn_rate = 0.0
         self.scans: deque[tuple[float, tuple[np.ndarray, float, float]]] = deque(maxlen=12)
         self.scan: tuple[np.ndarray, float, float] | None = None
+        self.parts: dict[str, tuple[float, tuple[float, float, float], np.ndarray]] = {}  # camera -> t, pose, sector
+        self.odom_at: Any = None  # stamp -> the robot's (x, y, yaw) in the odometry frame then
         self._external_scan: bool = False
         self._lock = threading.Lock()
         self._pub: Any = None
-        self._tof_pubs: dict[str, Any] = {}
-        self._float32_array_cls: Any = None
         self._laser_scan_cls: Any = None
         self._last_pub_s: float = -1.0
+        self._drive = (-1e9, 0.0)  # when, and the forward speed the motors were last told
+        self._wheels_t: float | None = None
+        self._stalled = 0.0  # seconds the wheels have not followed the drive
+        self.contacts: deque[tuple[float, float, float]] = deque(maxlen=200)  # when, x, y in the odometry frame
         if node is not None:
+            from geometry_msgs.msg import TwistStamped
+            from nav_msgs.msg import Odometry
             from rclpy.qos import qos_profile_sensor_data
             from sensor_msgs.msg import Image, Imu, LaserScan
             from std_msgs.msg import Float32MultiArray
@@ -185,22 +250,76 @@ class SyntheticScanPublisher:
             if self.publish and publish_topic:
                 self._laser_scan_cls = LaserScan
                 self._pub = node.create_publisher(LaserScan, publish_topic, 10)
-            for name, topic in DEPTH_TOPICS.items():
-                node.create_subscription(Image, topic, lambda m, n=name: self._depth(n, m), qos_profile_sensor_data)
+                self.odom_at = _odometry_lookup(node)
+                self._clock = node.get_clock
+                now = lambda: _seconds(node.get_clock().now().to_msg())  # noqa: E731
+                node.create_subscription(TwistStamped, "/cmd_vel",  # what reaches the motors, after every check
+                                         lambda m: self.drive(now(), m.twist.linear.x), 10)
+                node.create_subscription(Odometry, "/odom", lambda m: self.wheels(now(), m.twist.twist.linear.x),
+                                         qos_profile_sensor_data)
+            else:  # the depth node feeds its publisher directly; everyone else reads its depth pictures
+                for name, topic in DEPTH_TOPICS.items():
+                    node.create_subscription(Image, topic, lambda m, n=name: self._depth(n, m),
+                                             qos_profile_sensor_data)
             for side, topic in TOF_TOPICS.items():
                 node.create_subscription(Float32MultiArray, topic, lambda m, s=side: self._tof(s, m),
                                          qos_profile_sensor_data)
-            if self.publish and publish_tof:
-                self._float32_array_cls = Float32MultiArray
-                for side, topic in TOF_TOPICS.items():
-                    self._tof_pubs[side] = node.create_publisher(Float32MultiArray, topic, 10)
-                for side, topic in TOF_DEPTH_TOPICS.items():
-                    node.create_subscription(Image, topic, lambda m, s=side: self._tof_depth(s, m),
-                                             qos_profile_sensor_data)
             node.create_subscription(Imu, "/imu", self._imu, qos_profile_sensor_data)
 
     def tilt_at(self, stamp: Any) -> tuple[float, float]:
         return _tilt_at(self.tilts, stamp)
+
+    # ---- touching what nothing saw ------------------------------------------------------------------------------
+    def drive(self, t: float, v: float) -> None:
+        self._drive = (t, v)
+
+    def wheels(self, t: float, v: float, pose: tuple[float, float, float] | None = None) -> bool:
+        """The wheels' speed at time t. When they have not followed a drive command for STALL_S, the body is held by
+        something at its edge the way it was driving: that spot joins /scan for CONTACT_KEEP seconds, and a scan
+        goes out at once. Returns True on a new contact."""
+        dt = 0.0 if self._wheels_t is None else max(0.0, t - self._wheels_t)
+        self._wheels_t = t
+        when, want = self._drive
+        if t - when < 0.5 and abs(want) >= STALL_V and abs(v) < 0.25 * abs(want):
+            self._stalled += dt
+        else:
+            self._stalled = 0.0
+            return False
+        if self._stalled < STALL_S or self._stalled - dt >= STALL_S:
+            return False
+        if pose is None:
+            pose = self.odom_at(self._clock().now().to_msg()) if self.odom_at is not None else (0.0, 0.0, 0.0)
+        x, y, yaw = pose
+        ahead = math.copysign(BODY_R + 0.03, want)
+        c, s = math.cos(yaw), math.sin(yaw)
+        with self._lock:
+            for side in np.linspace(-0.8 * BODY_R, 0.8 * BODY_R, 5):  # across the body's front (or back) edge
+                self.contacts.append((t, x + ahead * c - side * s, y + ahead * s + side * c))
+        if self._pub is not None:
+            stamp = self._clock().now().to_msg()
+            with self._lock:
+                parts = [p for p in self.parts.values() if t - p[0] <= SECTOR_AGE]
+                scan = combine([*parts, self._contact_part(t, pose)], pose)
+                self._last_pub_s = max(self._last_pub_s, t)
+            self._publish_scan(stamp, scan)
+        return True
+
+    def _contact_part(self, t: float, pose: tuple[float, float, float],
+                      num_beams: int = 360) -> tuple[float, tuple[float, float, float], np.ndarray]:
+        """The spots touched lately, as a scan sector from `pose` (odometry frame)."""
+        ranges = np.full(num_beams, np.nan, np.float32)
+        step = 2 * math.pi / num_beams
+        c, s = math.cos(-pose[2]), math.sin(-pose[2])
+        for when, px, py in self.contacts:
+            if t - when > CONTACT_KEEP:
+                continue
+            dx, dy = px - pose[0], py - pose[1]
+            bx, by = dx * c - dy * s, dx * s + dy * c
+            r = math.hypot(bx, by)
+            k = int((math.atan2(by, bx) + math.pi) / step) % num_beams
+            if not r >= ranges[k]:
+                ranges[k] = r
+        return t, pose, ranges
 
     def _update_tof(self, side: str, grid: np.ndarray) -> StepHazard:
         _, roll, pitch = self.tilts[-1] if self.tilts else (0.0, 0.0, 0.0)
@@ -208,6 +327,11 @@ class SyntheticScanPublisher:
         hazard = classify_tof_grid(grid, expected)
         self.tof_grids[side] = grid
         self.hazards[side] = hazard
+        if self.publish and self.odom_at is not None:  # low things the cameras take for floor join the scan
+            stamp = self._clock().now().to_msg()
+            with self._lock:
+                self.parts[f"tof_{side}"] = (_seconds(stamp), self.odom_at(stamp),
+                                              tof_scan(grid, side, pitch_rad=pitch, roll_rad=roll))
         return hazard
 
     def _tof(self, side: str, msg: Any) -> None:
@@ -217,21 +341,6 @@ class SyntheticScanPublisher:
         grid = _normalize_tof_grid(raw)
         if grid is not None:
             self._update_tof(side, grid)
-
-    def _tof_depth(self, side: str, msg: Any) -> None:
-        self.ingest_tof_depth(side, _image(msg))
-
-    def ingest_tof_depth(self, side: str, raw_grid: np.ndarray) -> StepHazard | None:
-        grid = _normalize_tof_grid(raw_grid)
-        if grid is None:
-            return None
-        hazard = self._update_tof(side, grid)
-        pub = self._tof_pubs.get(side)
-        if self.publish and pub is not None and self._float32_array_cls is not None:
-            msg = self._float32_array_cls()
-            msg.data = [float(v) for v in grid.ravel()]
-            pub.publish(msg)
-        return hazard
 
     def _imu(self, msg: Any) -> None:
         self.turn_rate = msg.angular_velocity.z
@@ -245,27 +354,30 @@ class SyntheticScanPublisher:
     def _depth(self, name: str, msg: Any) -> None:
         self.ingest_depth(name, msg.header.stamp, _image(msg))
 
-    def ingest_depth(self, name: str, stamp: Any, raw_depth: np.ndarray) -> tuple[np.ndarray, float, float] | None:
+    def ingest_depth(self, name: str, stamp: Any, depth: np.ndarray) -> tuple[np.ndarray, float, float] | None:
+        """Keep a camera's metric depth (for ranging what the detector finds); when publishing, add its sector to
+        /scan. Each sector is made at its own picture's moment and carried to the newest one by the odometry: the
+        cameras' pictures are taken at different moments, and while turning an old sector lies elsewhere now."""
         if name not in self.cam_depths:
             return None
-        roll, pitch = self.tilt_at(stamp)
-        tof_grid = self.tof_grids.get("front") if name == "front_camera" else None
-        calibrated = calibrate_depth(raw_depth, RIG[name], pitch_rad=pitch, roll_rad=roll, tof_grid=tof_grid)
         t = _seconds(stamp)
-        scan = None
         with self._lock:
-            self.cam_depths[name].append((t, (stamp, calibrated)))
-            if self.publish or not self._external_scan:
-                latest = {n: q[-1][1][1] for n, q in self.cam_depths.items() if len(q) > 0}
-                scan = synthetic_scan(latest, pitch_rad=pitch, roll_rad=roll)
-                self.scan = scan
-                self.scans.append((t, scan))
-            else:
-                scan = self.scan
-            should_pub = self.publish and self._pub is not None and (t != self._last_pub_s) and scan is not None
+            self.cam_depths[name].append((t, (stamp, depth)))
+        if not self.publish:
+            return None
+        roll, pitch = self.tilt_at(stamp)
+        part = synthetic_scan({name: depth}, pitch_rad=pitch, roll_rad=roll)[0]  # this camera's sector
+        pose = self.odom_at(stamp) if self.odom_at is not None else (0.0, 0.0, 0.0)
+        with self._lock:
+            self.parts[name] = (t, pose, part)
+            parts = [p for p in self.parts.values() if t - p[0] <= SECTOR_AGE]
+            scan = combine([*parts, self._contact_part(t, pose)], pose)
+            self.scan = scan
+            self.scans.append((t, scan))
+            should_pub = self._pub is not None and t > self._last_pub_s
             if should_pub:
                 self._last_pub_s = t
-        if should_pub and scan is not None:
+        if should_pub:
             self._publish_scan(stamp, scan)
         return scan
 
@@ -279,14 +391,13 @@ class SyntheticScanPublisher:
         msg.angle_increment = float(step)
         msg.range_min = 0.12
         msg.range_max = 8.0
-        msg.ranges = [float(r) if math.isfinite(r) else float("inf") for r in ranges]
+        msg.ranges = array.array("f", np.asarray(ranges, np.float32).tobytes())  # inf: clear floor; nan: unseen
         self._pub.publish(msg)
 
 
 class Perception:
     def __init__(self, node: Any, detector: Any, pose_at: Any, brain: Any = None,
-                 scan_bridge: SyntheticScanPublisher | None = None,
-                 mono_depth: bool | None = None) -> None:
+                 scan_bridge: SyntheticScanPublisher | None = None) -> None:
         """`pose_at(stamp)` gives the robot's (x, y, yaw) in the map at a ROS time, or None; `brain` names new
         objects when given."""
         from geometry_msgs.msg import PoseWithCovarianceStamped
@@ -294,8 +405,7 @@ class Perception:
         from sensor_msgs.msg import Image, LaserScan
 
         self.detector, self.pose_at, self.brain = detector, pose_at, brain
-        self.mono_depth = bool(getattr(detector, "mono_depth", False) if mono_depth is None else mono_depth)
-        self.scan_bridge = scan_bridge if scan_bridge is not None else SyntheticScanPublisher(node)
+        self.scan_bridge = scan_bridge if scan_bridge is not None else SyntheticScanPublisher(node, publish=False)
         self.tracker = Tracker()
         self.lock = threading.Lock()
         self.frames: dict[str, tuple[Any, np.ndarray]] = {}
@@ -307,6 +417,7 @@ class Perception:
         self.scans = self.scan_bridge.scans
         self.depth_pairs: deque[float] = deque(maxlen=500)  # 0 when a frame found its depth image, else how far off
         self.crops: dict[int, np.ndarray] = {}
+        self.past: deque[tuple[float, np.ndarray]] = deque(maxlen=PAST_KEPT)  # front pictures, 2 a second
         self.boxes: dict[str, list[tuple[tuple[int, int, int, int], int]]] = {}  # camera -> latest (box, track id)
         self.timings: list[float] = []
         self.counts: dict[str, int] = {}  # frames processed per camera
@@ -344,8 +455,15 @@ class Perception:
         self.scan_bridge.turn_rate = value
 
     def _frame(self, name: str, msg: Any) -> None:
-        self.frames[name] = (msg.header.stamp, _image(msg))
+        rgb = _image(msg)
+        self.frames[name] = (msg.header.stamp, rgb)
         self.fresh.add(name)
+        t = _seconds(msg.header.stamp)
+        if name == "front_camera" and (not self.past or t - self.past[-1][0] >= PAST_EVERY):  # for looking back
+            import cv2
+
+            self.past.append((t, cv2.resize(rgb, (768, round(rgb.shape[0] * 768 / rgb.shape[1])),
+                                            interpolation=cv2.INTER_AREA)))
 
     def _depth(self, name_or_msg: Any, msg: Any = None) -> None:
         if msg is None:
@@ -400,38 +518,18 @@ class Perception:
                 time.sleep(0.2)
                 continue
             guess = track.votes.most_common(1)[0][0] if track.votes else track.label
-            words = sorted({canonical(w) for w in self.detector.vocabulary} | {canonical(guess)})
-            try:  # confirm the detector's name first: calibrated logprob yes/no gates active-vision uncertain range
-                url = data_url(crop)
-                if hasattr(self.brain, "yes_probability"):
-                    prob = self.brain.yes_probability(
-                        _with_image(url, f"Is there a {guess} in the middle of this picture? Answer yes or no.")
-                    )
-                    gate = active_vision_action(prob)
-                    yes = gate == "confirm"
-                else:
-                    yes, _ = self.brain.check(url, f"Is there a {guess} in the middle of this picture?")
-                    gate = "confirm" if yes else "reject"
-                if gate == "confirm":
-                    label = guess
-                    sure = True
-                elif gate == "inspect":
-                    named = self.brain.name(url, words)
-                    if named is not None and canonical(named) == canonical(guess):
-                        label = guess
-                        sure = True
-                    else:
-                        label = named
-                        sure = False
-                else:  # reject
-                    alts = [w for w in words if w != canonical(guess)]
-                    label = self.brain.name(url, alts)
-                    sure = False
-            except Exception as exc:  # noqa: BLE001 - the detector's label stands when the model is unreachable
-                print(f"perception: naming {track.label} {track.id}: {exc}", flush=True)
-                label, sure = track.label, False
+            # the vision model checks the detector's word on the crop: yes keeps it, no drops the thing. YOLOE fires
+            # on an asked word too easily (black panels as "tv", 12% of ball-free pictures as "ball"); renaming a
+            # no to another of the few asked words instead turned a false "tv" into a "sofa"
+            try:
+                question = f"Is there a {guess} in the middle of this picture? Answer yes or no."
+                yes = self.brain.yes_probability(_with_image(data_url(crop), question)) >= 0.5
+            except Exception as exc:  # noqa: BLE001 - unchecked when the model is unreachable: asked again later
+                print(f"perception: checking {track.label} {track.id}: {exc}", flush=True)
+                time.sleep(1.0)
+                continue
             with self.lock:
-                self.tracker.verify(track, label, pixels(crop), sure)
+                self.tracker.verify(track, guess if yes else None, pixels(crop), sure=yes)
 
     def _depth_for(self, name_or_stamp: Any, stamp_or_pose: Any = None,
                    maybe_pose: tuple[float, float, float] | None = None) -> tuple[np.ndarray | None, float]:
@@ -477,30 +575,12 @@ class Perception:
         self.counts[name] = self.counts.get(name, 0) + 1
         t = _seconds(stamp)
         roll, pitch = self.tilt_at(stamp)
-        depth, gap = None, 0.0  # gap: how much later than the colour frame the depth image was taken
-        if cam.depth:
-            depth, gap = self._depth_for(name, stamp, pose)
-            self.depth_pairs.append(gap if depth is None else 0.0)  # for the report: misses and how far off
-        has_hardware_depth = cam.depth and len(self.cam_depths.get(name, ())) > 0
-        if (
-            depth is None
-            and not has_hardware_depth
-            and (self.mono_depth or getattr(self.detector, "mono_depth", False))
-            and hasattr(self.detector, "estimate_depth")
-        ):
-            raw_d = self.detector.estimate_depth(rgb)
-            if raw_d is not None:
-                if not cam.depth:
-                    self.scan_bridge.ingest_depth(name, stamp, raw_d)
-                    depth, gap = self._depth_for(name, stamp, pose)
-                if depth is None:
-                    tof_grid = self.tof_grids.get("front") if name == "front_camera" else None
-                    depth = calibrate_depth(raw_d, cam, pitch_rad=pitch, roll_rad=roll, tof_grid=tof_grid)
-        scan, _ = taken_with(self.scans, t, 0.06)
-        if scan is None and any(len(q) > 0 for q in self.cam_depths.values()):
-            latest_depths = {n: q[-1][1][1] for n, q in self.cam_depths.items() if len(q) > 0}
-            scan = synthetic_scan(latest_depths, pitch_rad=pitch, roll_rad=roll)
-            self.scan = scan
+        depth, gap = self._depth_for(name, stamp, pose)  # gap: how much later the depth estimate's frame was taken
+        self.depth_pairs.append(gap if depth is None else 0.0)  # for the report: misses and how far off
+        if depth is not None and depth.shape != rgb.shape[:2]:  # estimated smaller: one value per block of pixels
+            ky, kx = rgb.shape[0] // depth.shape[0], rgb.shape[1] // depth.shape[1]
+            depth = np.repeat(np.repeat(depth, ky, axis=0), kx, axis=1)
+        scan, _ = taken_with(self.scans, t, 0.3)  # /scan from the depth node, near this frame's moment
         detections, boxes, hows = [], {}, {}
         for s in seen:
             x1, y1, x2, y2 = (int(v) for v in s.box)
@@ -556,9 +636,10 @@ class Perception:
                     continue  # a part of the thing makes a poor picture of it; keep the whole one
                 x1, y1, x2, y2 = boxes[id(det)]
                 self.crops[track.id] = _only(rgb, (x1, y1, x2, y2), [boxes[id(d)] for d, _ in pairs if d is not det])
-            for track in self.tracker.objects():  # negative evidence: viewed clearly, not seen
-                if id(track) in matched or not track.present or track.person:
-                    continue
+            watched = {canonical(w) for w in getattr(self.detector, "vocabulary", ())}
+            for track in self.tracker.objects():  # negative evidence: viewed clearly, not seen, while looked for
+                if id(track) in matched or not track.present or track.person or canonical(track.label) not in watched:
+                    continue  # (a ball seen while asked for is not gone because the detector stopped looking)
                 bx, by = to_robot(pose, track.x, track.y)
                 dist = math.hypot(bx, by)
                 # a clear view: near enough to be detected, and far enough to fit in the picture (beside a chair the
@@ -569,30 +650,28 @@ class Perception:
                 scan_r = lidar_range(self.scan, math.atan2(by, bx))
                 if scan_r is not None and scan_r < dist - track.radius - 0.3:  # something nearer hides it
                     continue
-                self.tracker.missed(track)
+                self.tracker.missed(track, now)
 
-    def render_annotated_view(
-        self,
-        candidate_paths: list[tuple[str, list[tuple[float, float]]]] | tuple = (),
-        camera: str = "front_camera",
-        width: int = 0,
-        height: int = 0,
-    ) -> np.ndarray | None:
-        """Latest RGB frame from `camera` with Set-of-Mark box IDs and *PIVOT* floor trajectory ribbons."""
+    def render_annotated_view(self, camera: str = "front_camera", width: int = 0, height: int = 0,
+                              newest: bool = False) -> np.ndarray | None:
+        """A frame from `camera` with the tracker's ids on its boxes: the frame the detector last ran on, so the boxes
+        fit it (what the model gets), or with `newest` the newest frame (for people watching: the boxes may trail
+        a little while the robot turns)."""
         with self.lock:
-            rgb = self.detected.get(camera)
+            rgb = None if newest else self.detected.get(camera)
             if rgb is None:
                 frame = self.frames.get(camera)
                 rgb = frame[1] if frame is not None else None
             raw_boxes = list(self.boxes.get(camera, ()))
             labels_by_id = {t.id: t.label for t in self.tracker.tracks.values()}
+            rejected = {t.id for t in self.tracker.tracks.values() if t.rejected}
         if rgb is None:
             return None
 
         orig_h, orig_w = rgb.shape[:2]
         target_w = width if width > 0 else orig_w
         target_h = height if height > 0 else (int(round(target_w * 9 / 16)) if width > 0 else orig_h)
-        from robot.ros.robot import _resize_rgb
+        from robot.perception.camera import resize_rgb as _resize_rgb
 
         if target_w != orig_w or target_h != orig_h:
             img = _resize_rgb(rgb, target_w, target_h)
@@ -604,6 +683,8 @@ class Perception:
 
         boxes_with_labels: list[tuple[tuple[int, int, int, int], int, str]] = []
         for b, tid in raw_boxes:
+            if tid in rejected:  # the vision model said it is not what the detector called it
+                continue
             scaled_box = (
                 int(round(b[0] * sx)),
                 int(round(b[1] * sy)),
@@ -617,31 +698,103 @@ class Perception:
         if cam is not None and (target_w != orig_w or target_h != orig_h):
             cam = replace(cam, width=target_w, height=target_h)
 
-        return draw_set_of_mark(img, boxes_with_labels, candidate_paths=list(candidate_paths), cam=cam)
+        return draw_set_of_mark(img, boxes_with_labels, cam=cam)
 
     def objects(self) -> list[Track]:
         with self.lock:
             return [replace(t, colors=t.colors.copy(), votes=t.votes.copy()) for t in self.tracker.objects()]
 
 
+class DepthNode:
+    """Each camera's newest frame in turn becomes a depth estimate, published on DEPTH_TOPICS with that frame's stamp
+    (for the detector to range what it finds) and fed straight to the /scan publisher."""
+
+    def __init__(self, node: Any, model: Any) -> None:
+        from rclpy.qos import qos_profile_sensor_data
+        from sensor_msgs.msg import Image
+
+        self.model, self.image_cls = model, Image
+        self.scan = SyntheticScanPublisher(node, publish=True)
+        self.frames: dict[str, Any] = {}
+        self.fresh: set[str] = set()
+        self.served: dict[str, float] = {}
+        self.timings: deque[float] = deque(maxlen=50)
+        self.failures = 0  # frames the depth network failed on
+        self.pubs = {name: node.create_publisher(Image, topic, 10) for name, topic in DEPTH_TOPICS.items()}
+        for name, topic in TOPICS.items():
+            node.create_subscription(Image, topic, lambda m, n=name: self._frame(n, m), qos_profile_sensor_data)
+
+    def _frame(self, name: str, msg: Any) -> None:
+        self.frames[name] = msg
+        self.fresh.add(name)
+
+    def once(self) -> bool:
+        """Estimate one camera's newest frame (the one served longest ago goes first); False when none is new."""
+        waiting = [n for n in RIG if n in self.fresh]
+        if not waiting:
+            return False
+        name = min(waiting, key=lambda n: self.served.get(n, 0.0))
+        self.fresh.discard(name)
+        self.served[name] = time.monotonic()
+        msg = self.frames[name]
+        started = time.perf_counter()
+        roll, pitch = self.scan.tilt_at(msg.header.stamp)
+        try:
+            depth = self.model(_image(msg), RIG[name], pitch, roll)
+        except Exception as exc:  # noqa: BLE001 - one failed frame (a GPU hiccup) must not end depth for good
+            self.failures += 1
+            print(f"depth: {name}: {exc}", flush=True)
+            return True
+        self.timings.append(time.perf_counter() - started)
+        if depth is None:  # too little floor in sight to scale it
+            return True
+        out = self.image_cls()
+        out.header = msg.header
+        out.height, out.width = depth.shape
+        out.encoding, out.step = "32FC1", depth.shape[1] * 4
+        out.data = array.array("B", depth.tobytes())
+        self.pubs[name].publish(out)
+        self.scan.ingest_depth(name, msg.header.stamp, depth)
+        return True
+
+
 def main() -> None:
-    """Run Sprocket's ROS sensor bridge (`SyntheticScanPublisher`) for synthetic /scan and /tof/{front,rear}."""
-    parser = argparse.ArgumentParser(description="Sprocket ROS perception and synthetic sensor bridge")
-    parser.add_argument("--bridge-only", action="store_true",
-                        help="Publish calibrated synthetic /scan and /tof/{front,rear} without running detection")
+    """The depth node: monocular depth for the three cameras, and the synthetic /scan made from it."""
+    parser = argparse.ArgumentParser(description="Sprocket's depth node: depth estimates and synthetic /scan")
+    parser.add_argument("--depth", action="store_true", help="run the depth node")
+    parser.add_argument("--on", choices=("gpu", "cpu"), default="gpu",
+                        help="gpu: the GPU vision server (tools/win/vision_server.py); cpu: here, with --threads")
+    parser.add_argument("--threads", type=int, default=2, help="CPU threads for the depth network")
     args = parser.parse_args()
-    if not args.bridge_only:
-        parser.error("pass --bridge-only to run the standalone sensor bridge")
+    if not args.depth:
+        parser.error("pass --depth to run the depth node")
 
     import rclpy
-    from rclpy.executors import ExternalShutdownException
+    from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
     from rclpy.parameter import Parameter
 
+    from robot.perception.depth import MonoDepth
+
     rclpy.init()
-    node = rclpy.create_node("sprocket_sensor_bridge", parameter_overrides=[Parameter("use_sim_time", value=True)])
-    _bridge = SyntheticScanPublisher(node, publish_tof=True)
+    node = rclpy.create_node("sprocket_depth", parameter_overrides=[Parameter("use_sim_time", value=True)])
+    if args.on == "gpu":
+        from robot.perception.gpu import VisionServer
+
+        depth = DepthNode(node, MonoDepth(server=VisionServer()))
+    else:
+        depth = DepthNode(node, MonoDepth(threads=args.threads))
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    threading.Thread(target=executor.spin, daemon=True).start()
+    reported = time.monotonic()
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            if not depth.once():
+                time.sleep(0.005)
+            if time.monotonic() - reported > 30 and depth.timings:
+                reported = time.monotonic()
+                print(f"depth: median {1000 * sorted(depth.timings)[len(depth.timings) // 2]:.0f} ms per frame",
+                      flush=True)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:

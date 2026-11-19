@@ -15,7 +15,7 @@ from robot.mind.memory import (
     embed_text,
     freshness,
 )
-from robot.perception.tracker import Detection, Tracker
+from robot.perception.tracker import GONE_AFTER, Detection, Tracker
 
 
 def _seen(tracker: Tracker, label: str, x: float, y: float, color: str = "", **kw) -> None:
@@ -50,8 +50,8 @@ def test_what_was_seen_told_and_shown_comes_back_after_a_restart(tmp_path):
 def test_a_thing_found_gone_is_not_remembered_as_there(tmp_path):
     tracker, memory = Tracker(), Memory(tmp_path / "home.db")
     _seen(tracker, "keys", 3.8, -2.0)
-    for _ in range(3):
-        tracker.missed(tracker.objects()[0])  # looked at its place clearly three times: not there
+    for _ in range(GONE_AFTER):
+        tracker.missed(tracker.objects()[0])  # looked at its place clearly often enough: not there
     memory.save(tracker, [], {})
     restored = Tracker()
     memory.restore(restored)

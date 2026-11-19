@@ -111,7 +111,7 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
     a, b = cam.bearing(x1), cam.bearing(x2)
     middle, span = (a + b) / 2, abs(a - b)  # the middle direction: on a wide lens the middle pixel is not
     axis = (math.cos(cam.yaw), math.sin(cam.yaw))
-    if depth is not None and cam.depth:
+    if depth is not None:
         r0, r1 = int(y1), max(int(y2), int(y1) + 1)
         c0, c1 = int(x1), max(int(x2), int(x1) + 1)
         patch = depth[r0:r1, c0:c1]

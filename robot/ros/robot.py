@@ -1,9 +1,8 @@
 """Sprocket v2 Robot API on ROS 2: Nav2 navigation, TF pose, synthetic /scan, and /cmd_vel Twist control.
 
-Every skill from the 2D simulator (`go_to`, `pursue`, `peek`, `look_under`, `express`, `wake_turn`, `motion_sequence`,
-`render_view`, etc.) runs through ROS 2: Nav2 actions for map-level goals, BodyController 30-50 Hz pursuit &
-procedural aliveness on /cmd_vel, 3-CSI calibrated synthetic /scan for AMCL/clearance without hardware lidar, and the
-front MIPI-CSI camera for live RGB frames.
+Every skill from the 2D simulator (`go_to`, `follow`, `express`, etc.) runs through ROS 2: Nav2 actions for map-level
+goals, BodyController 30-50 Hz pursuit and procedural aliveness on /cmd_vel, and 3-CSI calibrated synthetic /scan for
+AMCL/clearance without hardware lidar.
 """
 
 from __future__ import annotations
@@ -13,12 +12,8 @@ import threading
 import time
 from typing import Any
 
-import numpy as np
-
 from robot.agent.api import Object, PathBlocked, Point, Pose, Preempted, choose, wrap, xy
 from robot.interfaces.voice import chime as synth_chime
-from robot.perception.camera import data_url
-from robot.perception.camera import resize_rgb as _resize_rgb
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
 DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
@@ -28,16 +23,15 @@ class RosRobot(SimRobot):
     def __init__(self, scene: Scene, max_time: float = 600.0, nudge: Any = None,
                  synthetic_scan: bool = True) -> None:
         import rclpy
-        from geometry_msgs.msg import Twist, TwistStamped
+        from geometry_msgs.msg import TwistStamped
         from nav2_msgs.action import DriveOnHeading, FollowPath, NavigateToPose, Spin
         from rclpy.action import ActionClient
         from rclpy.executors import MultiThreadedExecutor
         from rclpy.parameter import Parameter
-        from rclpy.qos import qos_profile_sensor_data
-        from sensor_msgs.msg import Image, LaserScan
+        from sensor_msgs.msg import LaserScan
         from tf2_ros import Buffer, TransformListener
 
-        from robot.ros.perceive import TOPICS, SyntheticScanPublisher, _image
+        from robot.ros.perceive import SyntheticScanPublisher
 
         super().__init__(scene, max_time=max_time)
         if not rclpy.ok():
@@ -53,18 +47,16 @@ class RosRobot(SimRobot):
             ("drive_on_heading", DriveOnHeading))}
         self.kinds = {"navigate_to_pose": NavigateToPose, "follow_path": FollowPath, "spin": Spin,
                       "drive_on_heading": DriveOnHeading}
-        stamped = any("TwistStamped" in t for n, ts in self.node.get_topic_names_and_types()
-                      if n in ("cmd_vel", "/cmd_vel") for t in ts)
-        self._twist = TwistStamped if stamped else Twist
-        self.cmd = self.node.create_publisher(self._twist, "/cmd_vel", 10)
+        # Direct motion (drive, express) enters Nav2's own command chain where its controller's does: the velocity
+        # smoother, then the collision monitor, which stops the robot short of anything in the way. Nothing reaches
+        # the wheels around that safety stop.
+        self._twist = TwistStamped
+        self.cmd = self.node.create_publisher(TwistStamped, "/cmd_vel_nav", 10)
         self._scan: Any = None
-        self._front_rgb: np.ndarray | None = None
         self.last_chime: bytes | None = None
         self.on_chime: Any = None
         self._scan_bridge = SyntheticScanPublisher(self.node, publish=False) if synthetic_scan else None
         self.node.create_subscription(LaserScan, "/scan", lambda m: setattr(self, "_scan", m), 10)
-        self.node.create_subscription(Image, TOPICS["front_camera"],
-                                      lambda m: setattr(self, "_front_rgb", _image(m)), qos_profile_sensor_data)
         self._executor = MultiThreadedExecutor()
         self._executor.add_node(self.node)
         threading.Thread(target=self._executor.spin, daemon=True).start()
@@ -81,11 +73,32 @@ class RosRobot(SimRobot):
                 nudge()
                 next_nudge = time.monotonic() + 10.0
             time.sleep(0.2)
+        self._wait_for_nav2(deadline)
         self.t0 = self._now()
         self.t = 0.0
         self.trace.poses = [(0.0, self.x, self.y, self.yaw)]
         self._last_perceive = -1.0
         self._perceive()
+
+    def _wait_for_nav2(self, deadline: float) -> None:
+        """Until every Nav2 lifecycle manager says its nodes are active: before that, its action servers exist but
+        refuse goals (a spin sent while the planner was still activating was turned down)."""
+        from std_srvs.srv import Trigger
+
+        clients: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            for name, types in self.node.get_service_names_and_types():
+                if name.endswith("/is_active") and "std_srvs/srv/Trigger" in types and name not in clients:
+                    clients[name] = self.node.create_client(Trigger, name)
+            if clients:
+                answers = [c.call_async(Trigger.Request()) for c in clients.values()]
+                end = time.monotonic() + 5.0
+                while not all(a.done() for a in answers) and time.monotonic() < end:
+                    time.sleep(0.05)
+                if all(a.done() and a.result().success for a in answers):
+                    return
+            time.sleep(1.0)
+        raise RuntimeError("Nav2 did not become active")
 
     # ---- keeping the shadow world in step ---------------------------------------------------------------------
     def _now(self) -> float:
@@ -148,11 +161,9 @@ class RosRobot(SimRobot):
 
     def _publish(self, v: float, w: float) -> None:
         msg = self._twist()
-        twist = msg.twist if hasattr(msg, "twist") else msg
-        if hasattr(msg, "header"):
-            msg.header.stamp = self.node.get_clock().now().to_msg()
-            msg.header.frame_id = "base_link"
-        twist.linear.x, twist.angular.z = float(v), float(w)
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.header.frame_id = "base_link"
+        msg.twist.linear.x, msg.twist.angular.z = float(v), float(w)
         self.cmd.publish(msg)
 
     def cancel(self) -> None:
@@ -250,90 +261,20 @@ class RosRobot(SimRobot):
             except Exception:
                 pass
 
-    def _drive_a_star_cmd_vel(self, target: Point | Pose | Object, distance: float, desired_reach: float) -> None:
-        goal, reach = self._reach(target, distance)
-        path = self._plan(goal, reach)
-        if path is None:
-            raise PathBlocked(f"no free path to ({goal[0]:.1f}, {goal[1]:.1f})")
-        waypoints = [(float(p[0]), float(p[1])) for p in path]
-        idx = 0
-        best, since = math.inf, self.t
-        try:
-            while math.dist(goal, (self.x, self.y)) > desired_reach and idx < len(waypoints):
-                self._interrupts()
-                v, w, next_idx, arrived = self.body.step_pursuit(
-                    (self.x, self.y, self.yaw),
-                    waypoints,
-                    idx,
-                    blend_r=0.28,
-                    v_cruise=CRUISE,
-                    occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
-                    people=self._people_with_vel(),
-                )
-                idx = next_idx
-                self._step(v, w)
-                if arrived or math.dist(goal, (self.x, self.y)) <= desired_reach:
-                    break
-                rem = math.dist(goal, (self.x, self.y))
-                if rem < best - 0.05:
-                    best, since = rem, self.t
-                elif self.t - since > 10.0:
-                    break
-        finally:
-            self._halt()
-        self._face_goal(goal)
-
     def _go(self, target: Point | Pose | Object, distance: float) -> None:
+        """Nav2 drives there; when it gives up short of the target, so does the robot, and the caller hears why."""
         goal = xy(target)
-        desired_reach = (target.radius if isinstance(target, Object) else 0.0) + max(distance, 0.35)
-
-        def face_goal() -> None:
-            self._face_goal(goal)
-
+        reach = (target.radius if isinstance(target, Object) else 0.0) + max(distance, 0.35)
         where = self._goal_point(target, distance)
         if where is not None:
             (gx, gy), yaw = where
-            nav_failed = False
             try:
                 self._act("navigate_to_pose", pose=self._pose_msg(gx, gy, yaw))
-            except (PathBlocked, RuntimeError):
+            except PathBlocked:
                 self._sync()
-                actual_dist = math.dist(goal, (self.x, self.y))
-                if actual_dist <= desired_reach + 0.35:
-                    face_goal()
-                    return
-                if isinstance(target, Object) and distance < 0.75:
-                    retry_where = self._goal_point(target, distance=max(distance, 0.45) + 0.25)
-                    if retry_where is not None:
-                        (gx2, gy2), yaw2 = retry_where
-                        try:
-                            self._act("navigate_to_pose", pose=self._pose_msg(gx2, gy2, yaw2))
-                        except (PathBlocked, RuntimeError):
-                            self._sync()
-                            actual_dist = math.dist(goal, (self.x, self.y))
-                            if actual_dist <= desired_reach + 0.35:
-                                face_goal()
-                                return
-                            nav_failed = True
-                    else:
-                        self._sync()
-                        actual_dist = math.dist(goal, (self.x, self.y))
-                        if actual_dist <= desired_reach + 0.35:
-                            face_goal()
-                            return
-                        nav_failed = True
-                else:
-                    nav_failed = True
-
-            if nav_failed:
-                self._sync()
-                actual_dist = math.dist(goal, (self.x, self.y))
-                if actual_dist > desired_reach + 0.35:
-                    self._drive_a_star_cmd_vel(target, distance, desired_reach)
-                    if isinstance(target, Pose):
-                        self._rotate(wrap(math.radians(target.yaw) - self.yaw))
-                    return
-
+                if math.dist(goal, (self.x, self.y)) > reach + 0.35:
+                    raise
+                self._face_goal(goal)  # stopped just short: close enough, and facing it
         if isinstance(target, Pose):
             self._rotate(wrap(math.radians(target.yaw) - self.yaw))
 
@@ -409,80 +350,6 @@ class RosRobot(SimRobot):
             out.append((p[0], p[1], vx, vy))
         return out
 
-    def pursue(self, target: Any, distance: float = 1.0, seconds: float | None = None) -> None:
-        self._call("pursue", target=target, distance=distance, seconds=seconds)
-        is_user = isinstance(target, str) and target.lower().strip() in ("user", "the user", "me")
-        tgt = (self.user() if is_user else None) or self._target(target)
-        end = self.t + float(seconds) if seconds is not None else math.inf
-        last_scored = -1e9
-        visual_probs: dict[str, float] | None = None
-        try:
-            while self.t < end:
-                self._interrupts()
-                if is_user:
-                    u = self.user()
-                    if not u:
-                        break
-                    pt = u.position
-                elif isinstance(tgt, Object) and tgt.id in self.things:
-                    th = self.things[tgt.id]
-                    pt = self._where(th) or (th.x, th.y)
-                else:
-                    pt = xy(tgt)
-                d = math.hypot(pt[0] - self.x, pt[1] - self.y)
-                if d <= distance + 0.15:
-                    err = wrap(math.atan2(pt[1] - self.y, pt[0] - self.x) - self.yaw)
-                    if abs(err) > 0.15:
-                        self._step(0.0, max(-1.8, min(1.8, 2.0 * err)))
-                    else:
-                        break
-                else:
-                    route = self._plan(pt, distance) or [pt]
-                    brain = getattr(self, "brain", None)
-                    if brain is not None and hasattr(brain, "score_paths") and self.t - last_scored >= 0.8:
-                        frame = self.render_view(width=320, height=240)
-                        if frame is not None and frame.size > 0:
-                            try:
-                                visual_probs = brain.score_paths(data_url(frame), str(target))
-                            except Exception:  # noqa: BLE001 - fall back to geometric rollout if brain is busy
-                                pass
-                        last_scored = self.t
-                    v, w, _, _ = self.body.step_pursuit(
-                        (self.x, self.y, self.yaw),
-                        route,
-                        0,
-                        blend_r=0.28,
-                        v_cruise=CRUISE,
-                        occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
-                        people=self._people_with_vel(),
-                        visual_probs=visual_probs,
-                    )
-                    self._step(v, w)
-        finally:
-            self._halt()
-
-    def peek(self, target: Any) -> None:
-        self._call("peek", target=target)
-        target_pt = xy(self._target(target))
-        peek_pt = self.body.plan_peek(
-            (self.x, self.y, self.yaw), target_pt, lambda x, y: self._occ(x, y, self.inflated)
-        )
-        if peek_pt is not None:
-            self.go_to(peek_pt)
-            self.face(target_pt)
-
-    def look_under(self, anchor: Any) -> None:
-        self._call("look_under", anchor=anchor)
-        t = self._target(anchor)
-        anchor_radius = t.radius if isinstance(t, Object) else 0.5
-        anchor_xy = xy(t)
-        look_pt = self.body.plan_look_under(
-            (self.x, self.y, self.yaw), anchor_xy, anchor_radius, lambda x, y: self._occ(x, y, self.inflated)
-        )
-        if look_pt is not None:
-            self.go_to(look_pt)
-            self.face(anchor_xy)
-
     def express(self, posture: str, chime_kind: str = "", seconds: float = 0.6) -> None:
         self._call("express", posture=posture, chime_kind=chime_kind)
         self.posture = posture
@@ -503,35 +370,6 @@ class RosRobot(SimRobot):
                 self._step(v, w)
         finally:
             self._halt()
-
-    def wake_turn(self, doa_rad: float) -> None:
-        self._call("wake_turn", doa_rad=doa_rad)
-        self._rotate(wrap(doa_rad), rate=2.5)
-        self.express("listening", chime_kind="wake", seconds=0.3)
-
-    def motion_sequence(self, steps: list[Any]) -> None:
-        self._call("motion_sequence", count=len(steps))
-        try:
-            for step in steps:
-                if isinstance(step, dict):
-                    v = float(step.get("v", 0.0))
-                    w = float(step.get("w", 0.0))
-                    sec = float(step.get("seconds", step.get("s", 0.5)))
-                elif isinstance(step, (list, tuple)) and len(step) >= 3:
-                    v, w, sec = float(step[0]), float(step[1]), float(step[2])
-                else:
-                    continue
-                for _ in range(max(1, round(sec / DT))):
-                    self._step(v, w)
-        finally:
-            self._halt()
-
-    def render_view(self, width: int = 320, height: int = 240) -> np.ndarray:
-        """Latest RGB frame from the front CSI camera, or a zero array before frames arrive."""
-        rgb = self._front_rgb
-        if rgb is None or rgb.size == 0:
-            return np.zeros((max(0, height), max(0, width), 3), dtype=np.uint8)
-        return _resize_rgb(rgb, width, height)
 
     # ---- state and sensing that come from ROS -------------------------------------------------------------------
     def pose(self) -> Pose:

@@ -69,17 +69,17 @@ class Explorer:
         self.updates += 1
 
     def _next_map(self, timeout: float = 12.0) -> None:
-        seen, end = self.updates, time.monotonic() + timeout
-        while self.updates == seen and time.monotonic() < end:
+        seen, end = self.updates, self.robot._now() + timeout
+        while self.updates == seen and self.robot._now() < end:
             self.robot._step(0.0, 0.0)
 
     def explore(self, budget: float = 480.0) -> dict[str, float]:
-        """Drive to frontiers until none is left or `budget` seconds have passed. "None left" is believed only after
+        """Drive to frontiers until none is left or `budget` seconds of the robot's time have passed. "None left" is believed only after
         two more maps: a map can lag what the lidar saw on the way to the last frontier (the first try stopped at 9%
         of the floor, on a map made before the robot had moved)."""
-        started, goals, left, quiet = time.monotonic(), 0, -1, 0
+        started, goals, left, quiet = self.robot._now(), 0, -1, 0
         self.robot._rotate(2 * math.pi)  # slam_toolbox adds a scan only after a turn or a move: look all round first
-        while time.monotonic() - started < budget:
+        while self.robot._now() - started < budget:
             if self.grid is None:
                 time.sleep(0.5)
                 continue
@@ -104,7 +104,7 @@ class Explorer:
             except Exception as exc:  # noqa: BLE001 - Nav2 could not get there: try another frontier
                 print(f"exploring: could not reach ({x:.1f}, {y:.1f}): {exc}", flush=True)
                 self.unreachable.append((x, y))
-        return {"seconds": time.monotonic() - started, "goals": goals, "unreachable": len(self.unreachable),
+        return {"seconds": self.robot._now() - started, "goals": goals, "unreachable": len(self.unreachable),
                 "frontiers left": max(left, 0)}
 
     def save(self, path: Path, dock: tuple[float, float]) -> Path:

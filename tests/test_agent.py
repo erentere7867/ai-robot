@@ -12,10 +12,11 @@ class Scripted:
     """Stands in for the model: replies in order, and keeps every conversation it was shown."""
 
     def __init__(self, *replies: Reply) -> None:
-        self.replies, self.seen = list(replies), []
+        self.replies, self.seen, self.thinks = list(replies), [], []
 
-    def chat(self, messages, tools, **_):  # noqa: ANN001, ANN003, ANN201
+    def chat(self, messages, tools, think=0, **_):  # noqa: ANN001, ANN003, ANN201
         self.seen.append([dict(m) for m in messages])
+        self.thinks.append(think)
         return self.replies.pop(0)
 
 
@@ -36,11 +37,29 @@ def test_a_result_comes_back_and_a_plain_reply_ends_the_task_after_one_check():
     brain = Scripted(call("turn", degrees=90, direction="left"), say("Done!"), say("Turned left."))
     record = Agent(brain).do("Turn left 90 degrees.", sim)
     assert record.outcome == "done"
-    assert tool_results(brain.seen[1]) == ["Turned 90 degrees left."]
+    assert tool_results(brain.seen[1])[0].startswith("Turned 90 degrees left.\nThis request so far: turned 90 degrees left")
     assert "Before you finish" in brain.seen[2][-1]["content"]  # the stop hook asked once
     assert [t for _, t in sim.trace.said] == ["Turned left."]
     first = brain.seen[0][1]["content"]
     assert any(p.get("type") == "image_url" for p in first)  # the model sees the camera, not only a list
+
+
+def test_reasoning_only_after_news_skips_the_turns_after_calls_that_worked():
+    sim = SimRobot(office())
+    brain = Scripted(call("turn", degrees=90, direction="left"), call("go_to", target="box"), say("Which box?"),
+                     say("Which box?"))
+    Agent(brain, think="medium", think_when="news").do("Turn left, then go to the box.", sim)
+    assert brain.thinks == [512, 0, 512, 0]  # the request; after a turn that worked; after an error; the review
+
+
+def test_with_no_cameras_the_model_gets_the_list_and_pictures_only_when_it_looks():
+    sim = SimRobot(living_room())
+    brain = Scripted(call("look", direction="front"), say("A sofa."), say("A sofa."))
+    Agent(brain, cameras="none").do("What do you see?", sim)
+    first = brain.seen[0][1]["content"]
+    assert not any(p.get("type") == "image_url" for p in first)
+    assert "call look to see" in first[0]["text"] and "Objects" in first[0]["text"]
+    assert any(p.get("type") == "image_url" for p in brain.seen[1][-1]["content"])  # after look
 
 
 def test_an_ambiguous_target_is_explained_and_nothing_moves():
@@ -82,3 +101,13 @@ def test_stop_never_waits_for_the_model():
     brain = Scripted()
     record = Agent(brain).do("stop", SimRobot(living_room()))
     assert record.outcome == "preempted" and brain.seen == []
+
+
+def test_each_motion_says_what_the_request_has_done_so_far():
+    sim = SimRobot(living_room())
+    spin = call("turn", degrees=360, direction="left")
+    brain = Scripted(spin, spin, say("Done."), say("Spun twice."))
+    Agent(brain).do("Spin around twice.", sim)
+    second = tool_results(brain.seen[2])[-1]  # what the model reads after its second full turn
+    assert "turned 360 degrees left; turned 360 degrees left; 720 degrees of turning in all" in second
+    assert "facing the way it began" in second
