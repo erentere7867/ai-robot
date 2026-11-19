@@ -485,7 +485,15 @@ voice(s);
 cams(s);
 }
 
-let camsKey='',lastCamAt=0;
+let camsKey='',lastCamAt=0,camsVisible=false;
+const camObserver=new IntersectionObserver(([entry])=>{
+camsVisible=entry.isIntersecting;
+if(camsVisible){lastCamAt=0;refreshCams()}
+});
+camObserver.observe($('camsec'));
+document.addEventListener('visibilitychange',()=>{
+if(!document.hidden){lastCamAt=0;refreshCams()}
+});
 function cams(s){
 const list=s.cameras||[];
 if(!list.length){$('camsec').hidden=true;return}
@@ -500,6 +508,10 @@ img.onerror=()=>{img.dataset.loading='';img.dataset.loadingAt='0'};
 });
 lastCamAt=0;
 }
+refreshCams();
+}
+function refreshCams(){
+if(!camsVisible||document.hidden||$('camsec').hidden)return;
 const now=Date.now();
 if(now-lastCamAt<200)return;
 lastCamAt=now;
