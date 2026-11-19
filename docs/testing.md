@@ -32,6 +32,10 @@ docker exec -it sprocket bash                              # then the three comm
 `--network host` puts the servers' ports and the live page on the host, and `--ipc host` gives ROS's shared-memory
 transport the host's `/dev/shm`.
 
+Verified on 2026-11-19 on a cloud VM (Ubuntu 24.04 host, 4 Xeon cores, 16 GB, no GPU) in a bare `ubuntu:26.04`
+container as above, from a clean clone: `setup.sh` in 16 minutes in one go, then the doctor `ready`, with task M1
+passing in 6 minutes at `--rtf 0.1`.
+
 ## Three levels
 
 | Level | Catches | Needs | Time |
