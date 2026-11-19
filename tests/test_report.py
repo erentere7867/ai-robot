@@ -71,3 +71,15 @@ def test_same_mission_keeps_each_layout_report_and_photos(tmp_path):
         assert (folder / "map.png").is_file()
         assert f"{scene}/M1/report.html" in index
         assert f"{scene}" in index.split(f"{scene}/M1/report.html'>", 1)[1].split("</a>", 1)[0]
+
+
+def test_views_score_counts_found_and_false_against_the_truth(tmp_path, capsys):
+    from robot.eval.views import score
+
+    px = np.array([[900, 0], [500, 0], [0, 0], [0, 40]])  # columns: chair, tv stand; four pictures
+    np.savez(tmp_path / "v.npz", rgb=np.zeros((4, 2, 2, 3), np.uint8), labels=np.array(["chair", "tv stand"]), px=px)
+    answers = iter([True, False, True, False] + [False, False, True, False])  # chair asked first, then tv
+    score(tmp_path / "v.npz", ["chair", "tv"], lambda rgb, word: next(answers), clear=300)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1].split() == ["chair", "2", "2", "50%", "50%"]  # in pictures 1-2 (one yes), absent in 3-4 (one yes)
+    assert lines[2].split() == ["tv", "0", "3", "-", "33%"]  # the tv stand only 40 px: never plainly in view

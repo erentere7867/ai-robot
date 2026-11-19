@@ -14,7 +14,8 @@ small and maintainable: one place for each piece of logic, nothing duplicated, n
 rules for changing it are in [AGENTS.md](AGENTS.md).
 
 - [docs/testing.md](docs/testing.md): how Sprocket is tested, and how to set up any Linux machine to test it the
-  same way (unit tests, the 2D suite, the 3D apartment).
+  same way: `bash tools/linux/setup.sh` installs everything on a bare Ubuntu, and `python -m robot.eval.doctor`
+  checks it and runs a 3D task.
 - [docs/usage.md](docs/usage.md): set up, run the model and the vision server, run the tests, the 2D suite, the 3D
   apartment with its live page and task reports, and the demo.
 - [docs/architecture.md](docs/architecture.md): the design: body, perception, memory, the agent.

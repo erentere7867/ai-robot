@@ -10,4 +10,5 @@ if [ "$1" = "--all" ]; then
   for _ in 1 2 3; do pgrep -f "[l]lama-server" > /dev/null || break; sleep 1; done
   pkill -9 -f "[l]lama-server"
 fi
+command -v fastdds > /dev/null && fastdds shm clean > /dev/null 2>&1  # ROS's shared memory, for the next run
 echo "stopped"
