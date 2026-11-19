@@ -64,7 +64,7 @@ First-time setup and everything else are in [docs/usage.md](docs/usage.md).
 
 1. **Watch it live**: run with `--live 8765` and open http://127.0.0.1:8765. You see the request, every tool call and
    its result, the model's reasoning, the search's choices as it makes them, the map, and the three cameras.
-2. **Read the task's report**: `~/robot-runtime/runs/<tag>/<task>/report.html` (while the run is live, also
+2. **Read the task's report**: `~/robot-runtime/runs/<tag>/<scene>/<task>/report.html` (while the run is live, also
    http://127.0.0.1:8765/runs/<tag>/index.html). It has the house's map with the real objects; what the robot
    believed was where, each marked real, false (with the real thing nearest it) or rejected; where it really went and
    where it thought it was; numbered places where each call began; and a timeline of every model turn with its full
