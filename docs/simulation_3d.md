@@ -174,14 +174,14 @@ slip on a hard floor would hide the contact.
 
 ## Running
 
-Once: `wsl -- bash tools/wsl/setup_habitat.sh`, `tools/wsl/setup_models.sh`, and the depth model above. Every
-shell: `. tools/wsl/env.sh` (ROS, the Python env, OpenGL on the GPU, and ROS over shared memory: with WSL's mirrored
+Once: `wsl -- bash tools/linux/setup_habitat.sh`, `tools/linux/setup_models.sh`, and the depth model above. Every
+shell: `. tools/linux/env.sh` (ROS, the Python env, OpenGL on the GPU, and ROS over shared memory: with WSL's mirrored
 networking, DDS over UDP finds the other processes but delivers no data).
 
 ```bash
 python -m robot.eval.home3d --tag first            # 27 tasks, judged against the truth
 python -m robot.interfaces.demo                    # talk to it on http://127.0.0.1:8765
-bash tools/wsl/stop.sh                             # stop everything a run left behind
+bash tools/linux/stop.sh                             # stop everything a run left behind
 ```
 
 ## Fixed on the way here

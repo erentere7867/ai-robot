@@ -25,7 +25,9 @@ def start(scene: str) -> tuple[subprocess.Popen, int]:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    env = {**os.environ, "GALLIUM_DRIVER": os.environ.get("GALLIUM_DRIVER", "d3d12")}  # OpenGL on the GPU in WSL
+    env = dict(os.environ)
+    if Path("/dev/dxg").exists():  # WSL: OpenGL on the GPU through Direct3D 12; Mesa draws on the CPU otherwise
+        env.setdefault("GALLIUM_DRIVER", "d3d12")
     proc = subprocess.Popen([HABITAT_PYTHON, str(SERVER), "--port", str(port), "--scene", scene],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, text=True, cwd="/tmp")
     for line in proc.stdout or ():  # Habitat prints its renderer details first

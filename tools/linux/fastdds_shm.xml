@@ -2,7 +2,7 @@
 <!-- ROS 2 (Fast DDS) on this WSL machine: shared memory only. With WSL's mirrored networking, discovery over UDP
      finds the other processes but no data arrives (not even ROS's own talker/listener demo); every node runs on this
      one machine, so shared memory carries everything. Segments are big enough for a 1280x720 colour picture.
-     Not needed on the robot. Used via FASTDDS_DEFAULT_PROFILES_FILE in tools/wsl/env.sh. -->
+     Not needed on the robot. Used via FASTDDS_DEFAULT_PROFILES_FILE in tools/linux/env.sh. -->
 <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
   <transport_descriptors>
     <transport_descriptor>

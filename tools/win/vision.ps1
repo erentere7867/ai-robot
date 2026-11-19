@@ -2,7 +2,7 @@
 #   .\tools\win\vision.ps1          # start it in the background if it is not running (log: %TEMP%\sprocket-vision.log)
 #   .\tools\win\vision.ps1 -Stop
 # Needs the venv %USERPROFILE%\sprocket-win (onnxruntime-directml, numpy); its models are in the repo's
-# models\vision\ (made by tools/wsl/setup_models.sh --gpu-models); see docs/usage.md.
+# models\vision\ (made by tools/linux/setup_models.sh --gpu-models); see docs/usage.md.
 param([switch]$Stop, [switch]$Serve)
 $health = "http://127.0.0.1:8090/health"
 function Test-Ready { try { return (Invoke-RestMethod $health -TimeoutSec 2).status -eq "ok" } catch { return $false } }
@@ -14,7 +14,7 @@ if ($Stop) { Get-Server | ForEach-Object { Stop-Process -Id $_.ProcessId -Force 
 $python = Join-Path $env:USERPROFILE "sprocket-win\Scripts\python.exe"
 $models = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "models\vision"
 if ($Serve) {  # the server itself, in this window; the background start below runs this
-    & $python (Join-Path $PSScriptRoot "vision_server.py") --models $models *> (Join-Path $env:TEMP "sprocket-vision.log")
+    & $python (Join-Path (Split-Path -Parent $PSScriptRoot) "vision_server.py") --models $models *> (Join-Path $env:TEMP "sprocket-vision.log")
     return
 }
 if (Test-Ready) { "vision server already running"; return }

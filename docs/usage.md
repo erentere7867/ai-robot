@@ -36,9 +36,9 @@ can time out.
 2. **WSL environment.** ROS 2 lyrical with Nav2 and slam_toolbox in `/opt/ros/lyrical`, and the robot's venv at
    `~/sprocket-venv` with this repo installed: `~/sprocket-venv/bin/pip install -e ".[eval,vision,dev]"` (ultralytics
    brings torch, for the words' text features).
-3. **The 3D apartment.** `wsl -- bash tools/wsl/setup_habitat.sh` (GPU rendering in WSL, Habitat-Sim in its own
+3. **The 3D apartment.** `wsl -- bash tools/linux/setup_habitat.sh` (GPU rendering in WSL, Habitat-Sim in its own
    Python 3.9, ReplicaCAD; about 650 MB).
-4. **Models.** `bash tools/wsl/setup_models.sh` checks `models/` and fetches YOLOE-26l, the pose model,
+4. **Models.** `bash tools/linux/setup_models.sh` checks `models/` and fetches YOLOE-26l, the pose model,
    MobileCLIP's text encoder, the Piper voice and Whisper. `--export <dir>` and `--import <dir>` carry the whole folder
    to another machine.
 5. **Vision server.** A full Python 3.10 or newer on Windows (not the embeddable one, which has no `venv`):
@@ -46,8 +46,8 @@ can time out.
    python -m venv $env:USERPROFILE\sprocket-win
    & $env:USERPROFILE\sprocket-win\Scripts\pip install onnxruntime-directml numpy
    ```
-   then make its models in WSL: `bash tools/wsl/setup_models.sh --gpu-models` (into `models/vision/`)
-   (YOLOE exported with 8 word slots by `tools/wsl/export_yoloe.py`, and the depth network).
+   then make its models in WSL: `bash tools/linux/setup_models.sh --gpu-models` (into `models/vision/`)
+   (YOLOE exported with 8 word slots by `tools/linux/export_yoloe.py`, and the depth network).
 
 ## Every day
 
@@ -59,6 +59,8 @@ powershell -ExecutionPolicy Bypass -File tools\brain.ps1 -Stop    # stop the mod
 ```
 
 ## Tests and lint (in WSL, from the repo)
+
+How to test a change, and how to set up a plain Linux machine for it: [testing.md](testing.md).
 
 ```bash
 ~/sprocket-venv/bin/python -m pytest -q
@@ -80,9 +82,9 @@ The real robot software in a ReplicaCAD apartment: only the world, the body and 
 `maps/`; later runs localise in it.
 
 ```bash
-. tools/wsl/env.sh
+. tools/linux/env.sh
 python -m robot.eval.home3d --tag mine --rtf 0.5 --live 8765 --only N1 P1 S1
-bash "<repo>/tools/wsl/stop.sh"                # stops everything the run started
+bash "<repo>/tools/linux/stop.sh"                # stops everything the run started
 ```
 
 - `--live 8765` serves the live page while it runs: the request, each tool call and its result, the model's
@@ -98,5 +100,5 @@ bash "<repo>/tools/wsl/stop.sh"                # stops everything the run starte
 
 - `python -m robot.eval.brain_check --fetch`, then `python -m robot.eval.brain_check`: the model's yes/no answers and
   its picking of numbered objects on real indoor photos (COCO), against human labels.
-- `tools/wsl/export_yoloe.py`: export YOLOE with a different size or number of word slots.
-- `tools/wsl/brain.sh`: the model on llama.cpp built in WSL or on Linux (the board).
+- `tools/linux/export_yoloe.py`: export YOLOE with a different size or number of word slots.
+- `tools/linux/brain.sh`: the model on llama.cpp built in WSL or on Linux (the board).
