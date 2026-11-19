@@ -8,6 +8,13 @@ import pytest
 
 from robot.interfaces import demo, voice
 from robot.interfaces.live import Live
+from robot.ros.real import RealRobot
+
+
+class ApartmentRobot(RealRobot):
+    def __init__(self):
+        self.perception = SimpleNamespace(stop=Mock())
+        self.shutdown = Mock()
 
 
 def round_trips(monkeypatch, *, fail=False):
@@ -15,7 +22,7 @@ def round_trips(monkeypatch, *, fail=False):
     home = SimpleNamespace(reset=Mock(), close=Mock())
 
     def robot(*args):
-        result = SimpleNamespace(perception=SimpleNamespace(stop=Mock()), shutdown=Mock())
+        result = ApartmentRobot()
         robots.append(result)
         return result
 

@@ -26,6 +26,7 @@ from robot.agent.instant import instant
 from robot.interfaces.live import Live
 from robot.mind.brain import Brain
 from robot.perception.camera import encode_png
+from robot.ros.robot import RosRobot
 from robot.sim.world import SimRobot
 
 SCENES = ("3D apartment", "living room", "two rooms", "office", "random room")
@@ -193,7 +194,7 @@ def main() -> None:
     def new_scene(name: str) -> None:
         previous = holder.sim
         holder.sim = make_robot(name, brain)
-        if not isinstance(previous, SimRobot):
+        if isinstance(previous, RosRobot):
             previous.perception.stop()
             previous.shutdown()
         agent.forget()  # a new room: earlier requests no longer apply
