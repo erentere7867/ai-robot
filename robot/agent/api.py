@@ -64,9 +64,6 @@ class Matches(list):
         return getattr(self[0], name)
 
 
-SIDES = ("ahead", "front-left", "left", "behind-left", "behind", "behind-right", "right", "front-right")
-
-
 def side(bearing: float) -> str:
     """A bearing in degrees as words: ahead, front-left, left, behind-left, behind, behind-right, right, front-right."""
     a = abs(bearing)
