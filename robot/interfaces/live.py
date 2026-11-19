@@ -502,16 +502,23 @@ img.src=`/camera/${encodeURIComponent(img.dataset.cam)}.png?t=${now}`;
 });
 }
 
-let rec=null,spoken=-1;
+let rec=null,pendingMic=null,spoken=-1;
 async function talk(){
-if(rec)return;
+if(rec||pendingMic)return;
+const request={};pendingMic=request;
 try{
 const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+if(pendingMic!==request){
+stream.getTracks().forEach(t=>t.stop());
+if(!rec)$('talk').textContent='Hold to talk';
+return;
+}
+pendingMic=null;
 const ctx=new AudioContext(),src=ctx.createMediaStreamSource(stream),node=ctx.createScriptProcessor(4096,1,1),chunks=[];
 node.onaudioprocess=e=>chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
 src.connect(node);node.connect(ctx.destination);
 rec={stream,ctx,node,chunks};$('talk').textContent='Listening… release to send';
-}catch(e){$('heard').textContent='No microphone: '+e.message}
+}catch(e){if(pendingMic===request)pendingMic=null;$('heard').textContent='No microphone: '+e.message}
 }
 function wav(chunks,rate){
 const n=chunks.reduce((a,c)=>a+c.length,0),pcm=new Float32Array(n);let o=0;
@@ -525,6 +532,7 @@ for(let i=0;i<m;i++){const x=Math.max(-1,Math.min(1,pcm[Math.floor(i*step)]));v.
 return v.buffer;
 }
 function release(){
+pendingMic=null;
 if(!rec)return;
 const{stream,ctx,node,chunks}=rec;rec=null;node.disconnect();
 stream.getTracks().forEach(t=>t.stop());
@@ -533,6 +541,7 @@ $('talk').textContent='Hold to talk';$('heard').textContent='Hearing…';
 fetch('/voice',{method:'POST',body}).catch(()=>{});
 }
 $('talk').onpointerdown=talk;$('talk').onpointerup=release;$('talk').onpointerleave=release;
+$('talk').onpointercancel=release;
 function toggleVoice(){
 if(!window.speechSynthesis)return;
 if(!$('speak').checked)window.speechSynthesis.cancel();
