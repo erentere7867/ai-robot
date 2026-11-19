@@ -34,20 +34,21 @@ can time out.
    `$env:LLAMA_SERVER`. Put `LFM3-VL-2B-QAD-Q4_0.gguf` and `mmproj-LFM3-VL-2B-F16.gguf` in `llm\` under
    the repo's `models\` (or `$env:SPROCKET_MODELS_DIR`).
 2. **WSL environment.** ROS 2 lyrical with Nav2 and slam_toolbox in `/opt/ros/lyrical`, and the robot's venv at
-   `~/sprocket-venv` with this repo installed: `~/sprocket-venv/bin/pip install -e ".[eval,vision,dev]"` (ultralytics
-   brings torch, for the words' text features).
+   `~/sprocket-venv` (`python3 -m venv --system-site-packages ~/sprocket-venv`: rclpy needs the Python packages ROS
+   installs with apt) with this repo installed: `~/sprocket-venv/bin/pip install -e ".[eval,vision,dev]"`
+   (ultralytics brings torch, for the words' text features).
 3. **The 3D apartment.** `wsl -- bash tools/linux/setup_habitat.sh` (GPU rendering in WSL, Habitat-Sim in its own
    Python 3.9, ReplicaCAD; about 650 MB).
-4. **Models.** `bash tools/linux/setup_models.sh` checks `models/` and fetches YOLOE-26l, the pose model,
-   MobileCLIP's text encoder, the Piper voice and Whisper. `--export <dir>` and `--import <dir>` carry the whole folder
-   to another machine.
+4. **Models.** `bash tools/linux/setup_models.sh` fetches what is missing in `models/` (the language model, the
+   depth network, YOLOE-26l, the pose model, MobileCLIP's text encoder, the Piper voice and Whisper), makes the vision
+   server's models in `models/vision/` (YOLOE exported with 8 word slots by `tools/linux/export_yoloe.py`, and the
+   depth network), and checks them. `--export <dir>` and `--import <dir>` carry the whole folder to another machine.
 5. **Vision server.** A full Python 3.10 or newer on Windows (not the embeddable one, which has no `venv`):
    ```powershell
    python -m venv $env:USERPROFILE\sprocket-win
    & $env:USERPROFILE\sprocket-win\Scripts\pip install onnxruntime-directml numpy
    ```
-   then make its models in WSL: `bash tools/linux/setup_models.sh --gpu-models` (into `models/vision/`)
-   (YOLOE exported with 8 word slots by `tools/linux/export_yoloe.py`, and the depth network).
+   Its models are the ones step 4 made in `models/vision/`.
 
 ## Every day
 

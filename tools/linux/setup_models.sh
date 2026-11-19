@@ -41,14 +41,16 @@ fetch() {
       "from ultralytics.utils.downloads import attempt_download_asset as a; a('$asset')")
   done
   [ -f "$MODELS_DIR/voice/en_US-lessac-medium.onnx" ] || "$VENV_PY" -c "from pathlib import Path; \
-from piper.download_voices import download_voice as d; d('en_US-lessac-medium', Path('$MODELS_DIR/voice'))"
+from piper.download_voices import download_voice as d; p = Path('$MODELS_DIR/voice'); p.mkdir(exist_ok=True); \
+d('en_US-lessac-medium', p)"  # piper writes into the folder but does not make it
   [ -f "$MODELS_DIR/whisper/faster-whisper-base.en/model.bin" ] || "$VENV_PY" -c "from faster_whisper.utils import \
 download_model as d; d('base.en', output_dir='$MODELS_DIR/whisper/faster-whisper-base.en')"
   # the vision server's files: YOLOE with 8 word slots (a few minutes on a CPU), and the depth network
   mkdir -p "$MODELS_DIR/vision"
   [ -f "$MODELS_DIR/vision/yoloe26l_8.onnx" ] || (cd "$MODELS_DIR" && "$VENV_PY" "$HERE/export_yoloe.py" \
     yoloe-26l-seg.pt vision/yoloe26l_8.onnx)
-  cp -n "$MODELS_DIR/depth-anything-v2-small-onnx/model.onnx" "$MODELS_DIR/vision/depth_small.onnx"
+  [ -f "$MODELS_DIR/vision/depth_small.onnx" ] || cp "$MODELS_DIR/depth-anything-v2-small-onnx/model.onnx" \
+    "$MODELS_DIR/vision/depth_small.onnx"
 }
 
 check() {

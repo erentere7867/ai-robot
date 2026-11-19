@@ -76,8 +76,9 @@ the whole workspace; first-time setup and everything else are in [docs/usage.md]
 2. **Read the task's report**: `runs/<tag>/<scene>/<task>/report.html` (while the run is live, also
    http://127.0.0.1:8765/runs/<tag>/index.html). It has the house's map with the real objects; what the robot
    believed was where, each marked real, false (with the real thing nearest it) or rejected; where it really went and
-   where it thought it was; numbered places where each call began; and a timeline of every model turn with its full
-   reasoning, its calls and their results, and the exact pictures the model was given.
+   where it thought it was; numbered places where each call began; a timeline of every model turn with its full
+   reasoning, its calls and their results, and the exact pictures the model was given; and the problems outside the
+   turns (the model server timing out, a check that could not run).
 3. **Name the cause** before changing code: the harness (prompt, tools, results), perception (false or missing
    detections), the body (Nav2 failing, "status 6", a goal it cannot reach), the check itself, or the model.
 4. **Rerun just that task** with `--only <id>`; one run is noisy, so repeat before calling a change better.

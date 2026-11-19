@@ -140,6 +140,9 @@ def write(folder: Path, task: Any, row: dict, records: list, robot: Any, home: A
         return f"<li class={kind}>{html.escape(t.label)} {t.id}: {html.escape(what)} (seen {t.hits} times)</li>"
 
     believed = "".join(belief(t) for t in tracks if not t.person)
+    # what went wrong outside the model's turns (the model server timing out, a check that failed): without it a
+    # task that failed before its first turn shows only its apology
+    problems = "".join(f"<li>{html.escape(p)}</li>" for p in row["problems"])
     page = f"""<!doctype html><html><head><meta charset=utf-8><title>{html.escape(task.id)}</title><style>
 body{{font:14px system-ui;background:#111;color:#ddd;margin:16px}} img{{max-width:100%}}
 .pass{{color:#6f6}}.fail{{color:#f66}} .turn{{border-left:3px solid #48f;padding:6px 10px;margin:10px 0}}
@@ -152,6 +155,7 @@ li.false{{color:#f77}} li.gone{{color:#888}} li.real{{color:#8bf}}
 <h1>{html.escape(task.id)}: {html.escape(' / '.join(task.says))} <span class={'pass' if row['passed'] else 'fail'}>
 {'passed' if row['passed'] else 'FAILED'}</span></h1>
 <p>{html.escape(verdict)} · {row['simulated_s']} s simulated · {row['bumps']} bumps</p>
+{f"<h3>Problems</h3><ul class=fail>{problems}</ul>" if problems else ""}
 <div class=cols><div><img src=map.png><p class=t>green: real objects (named when the task or the robot's beliefs
 mention their kind) · orange: where the body really went (green dot start, red dot end) · thin blue: where the robot
 thought it was · crosses: what it believed was there (blue: a real one is there, red: none, grey: rejected) · white

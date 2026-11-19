@@ -337,6 +337,7 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                         records[-1].problems.append(f"check: {exc}")
                     rows.append({"scene": scene, "id": task.id, "says": task.says, "passed": passed,
                                  "outcomes": [r.outcome for r in records],
+                                 "problems": [p for r in records for p in r.problems],  # why, when it failed
                                  "steps": [line for r in records for line in [f"## {r.instruction}",
                                                                               *r.lines(thoughts=True)]],
                                  "said": [t for _, t in robot.trace.said],

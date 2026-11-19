@@ -7,7 +7,7 @@ predictions 1x(4+SLOTS+32)x19320 (box centre and size, one score per word, mask 
 incorrect" for the dynamo export), and it bakes the count in; the server fills unused slots and ignores them.
 
 Run from the models folder (elsewhere ultralytics downloads its 242 MB text encoder again), or let
-tools/linux/setup_models.sh --gpu-models run it:
+tools/linux/setup_models.sh run it:
     cd models && ~/sprocket-venv/bin/python ../tools/linux/export_yoloe.py yoloe-26l-seg.pt vision/yoloe26l_8.onnx
 """
 import sys
