@@ -56,7 +56,6 @@ class RealRobot(RosRobot):
                                      scan_bridge=getattr(self, "_scan_bridge", None))
         self.brain = brain
         self.things, self.memory = {}, {}
-        self._people_velocities: dict[int, tuple[float, float]] = {}
         self._cleared_tracks: set[int] = set()
         self._habit_recorded: dict[int, str] = {}
         self.human_pose: Any = None
@@ -112,7 +111,7 @@ class RealRobot(RosRobot):
             return
         now = time.monotonic()
         things, memory, detected = {}, {}, set()
-        people, people_vel = [], {}
+        people = []
         tracks = self.perception.objects()
         anchors: list[Any] = []
         movables: list[Any] = []
@@ -150,7 +149,6 @@ class RealRobot(RosRobot):
                 detected.add(tr.id)
             if tr.person:
                 people.append((tr, thing))
-                people_vel[tr.id] = (float(getattr(tr, "vx", 0.0)), float(getattr(tr, "vy", 0.0)))
                 if getattr(tr, "pose", None) is not None and human_pose is None:
                     human_pose = tr.pose
             elif tr.confirmed and not tr.rejected:
@@ -175,7 +173,6 @@ class RealRobot(RosRobot):
                 self._user = min(t.id for _, t in people)
             things[self._user].user = True
         self.things, self.memory, self._detected = things, memory, detected
-        self._people_velocities = people_vel
         self.human_pose = human_pose
         if getattr(self, "_rooms", None) and now - getattr(self, "_named_at", 0.0) > 5.0:  # from the tour and the model
             from robot.ros.rooms import name

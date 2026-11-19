@@ -1,12 +1,12 @@
 # Start the robot's model (LFM3-VL-2B) with llama.cpp on Windows, on port 8081, on the GPU.
-#   .\tools\brain.ps1            # models from $env:SPROCKET_MODELS_DIR, else Downloads\sprocket-portable-bundle\sprocket-models
+#   .\tools\brain.ps1            # models from the repo's models\ folder, or $env:SPROCKET_MODELS_DIR
 #   .\tools\brain.ps1 -Stop
 # Needs llama.cpp build 11960 or newer (LFM3 support): $env:LLAMA_SERVER, else C:\llama-vulkan\llama-server.exe, else the
 # one on the PATH. WSL reaches it at http://127.0.0.1:8081 too.
 param(
     [switch]$Stop,
     [string]$Models = $(if ($env:SPROCKET_MODELS_DIR) { $env:SPROCKET_MODELS_DIR } else {
-        Join-Path $env:USERPROFILE "Downloads\sprocket-portable-bundle\sprocket-models" })
+        Join-Path (Split-Path -Parent $PSScriptRoot) "models" })
 )
 $health = "http://127.0.0.1:8081/health"
 function Test-Ready { try { return (Invoke-RestMethod $health -TimeoutSec 2).status -eq "ok" } catch { return $false } }

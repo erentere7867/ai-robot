@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# The models Sprocket uses, in $SPROCKET_MODELS_DIR (default ~/sprocket-models): check what is there, fetch what can
+# The models Sprocket uses, in the repo's models/ (or $SPROCKET_MODELS_DIR): check what is there, fetch what can
 # be fetched, make the GPU vision server's ONNX files, and carry everything to another machine as one folder.
 #   bash tools/wsl/setup_models.sh                      # check and fetch
-#   bash tools/wsl/setup_models.sh --gpu-models <dir>   # also make the vision server's models in <dir>, e.g.
-#                                                       #   /mnt/c/Users/<you>/sprocket-win/models
+#   bash tools/wsl/setup_models.sh --gpu-models         # also make the vision server's models in models/vision
 #   bash tools/wsl/setup_models.sh --export <dir>       # copy all models to <dir>/sprocket-models (links followed)
 #   bash tools/wsl/setup_models.sh --import <dir>       # copy them back from <dir>/sprocket-models
-# The language model (LFM3-VL-2B GGUF and its vision projector) is not fetched: put both in llm/, or keep them where
+# The language model (LFM3-VL-2B GGUF and its vision projector) is not fetched: put both in models/llm/, where
 # tools\brain.ps1 looks on Windows.
 set -euo pipefail
-MODELS_DIR="${SPROCKET_MODELS_DIR:-$HOME/sprocket-models}"
-VENV_PY="$HOME/sprocket-venv/bin/python"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+MODELS_DIR="${SPROCKET_MODELS_DIR:-$(cd "$HERE/../.." && pwd)/models}"
+VENV_PY="$HOME/sprocket-venv/bin/python"
 MODE="setup"; DIR=""
 case "${1:-}" in
   "") ;;
-  --gpu-models|--export|--import) [ $# -ge 2 ] || { echo "error: $1 needs a folder" >&2; exit 2; }
+  --gpu-models) MODE="gpu-models"; DIR="$MODELS_DIR/vision" ;;
+  --export|--import) [ $# -ge 2 ] || { echo "error: $1 needs a folder" >&2; exit 2; }
     MODE="${1#--}"; DIR="$2" ;;
   -h|--help) sed -n 2,10p "$0"; exit 0 ;;
   *) echo "error: unknown option '$1'" >&2; exit 2 ;;

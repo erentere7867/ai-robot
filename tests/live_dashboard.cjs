@@ -17,8 +17,9 @@ async function dashboard() {
     let send = () => ({ok: true});
     let sends = 0;
     vm.runInNewContext(script + '\ndraw = () => {};', {
-        document: {getElementById: ui},
+        document: {getElementById: ui, addEventListener() {}},
         AbortController,
+        IntersectionObserver: class { observe() {} },
         setTimeout(callback, delay) {
             timers.set(callback, delay);
             return callback;
