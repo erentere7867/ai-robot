@@ -9,6 +9,7 @@ import numpy as np
 
 from robot.agent.agent import Step, TaskRecord
 from robot.eval import report
+from robot.eval.home3d import Referee, Task, keep_pictures, write_report
 from robot.perception.tracker import Track
 from robot.sim.world import Thing, Trace
 
@@ -28,7 +29,8 @@ def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):
     rec = TaskRecord("Go to the sofa.", steps=[Step("", calls=[("go_to", {"target": "sofa"}, "Arrived.", True)],
                                                     thought="The sofa is ahead.", t=1.0), Step("Done!", t=6.0)])
     task = SimpleNamespace(id="N1", says=("Go to the sofa.",))
-    row = {"id": "N1", "says": ("Go to the sofa.",), "passed": True, "simulated_s": 5.0, "bumps": 0}
+    row = {"scene": "apt_0", "id": "N1", "says": ("Go to the sofa.",), "passed": True,
+           "simulated_s": 5.0, "bumps": 0}
     (tmp_path / "N1").mkdir()
     page = report.write(tmp_path / "N1", task, row, [rec], robot, home, 0, [(3.0, "001_front_camera.jpg")],
                         "ended at (0.3, 0.0)")
@@ -37,4 +39,35 @@ def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):
     assert "The sofa is ahead." in text and "go_to(target=&#x27;sofa&#x27;)" in text and "001_front_camera.jpg" in text
     assert "sofa 3: a real one is there" in text and "tv 4: no real one there; nearest real thing: sofa" in text
     assert text.index("The sofa is ahead.") < text.index("search sofa") < text.index("001_front_camera.jpg")
-    assert "N1/report.html" in report.index(tmp_path, [row]).read_text()
+    assert "apt_0/N1/report.html" in report.index(tmp_path, [row]).read_text()
+
+
+def test_same_mission_keeps_each_layout_report_and_photos(tmp_path):
+    import cv2
+
+    task = Task("M1", ("Move forward.",), lambda referee, start: True)
+    rows = []
+    for scene, passed, x, shade in [("apt_0", True, 0.2, 40), ("apt_4", False, 0.8, 210)]:
+        home = SimpleNamespace(scene=scene, dock=lambda: (0.0, 0.0, 0.0), path=[(1.0, x, 0.0, 0.0)],
+                               truth={"width": 1.0, "height": 1.0, "res": 0.5, "shape": (2, 2),
+                                      "free": np.packbits(np.ones(4, bool)).tobytes(), "objects": []})
+        robot = SimpleNamespace(t=1.0, things={}, trace=Trace(),
+                                camera_view=lambda camera, width, height, shade=shade: np.full((8, 8, 3), shade, np.uint8))
+        folder = tmp_path / scene / task.id
+        kept = keep_pictures(robot, folder)
+        robot.camera_view()
+        rows.append({"scene": scene, "id": task.id, "says": task.says, "passed": passed,
+                     "simulated_s": 1.0, "bumps": 0})
+        write_report(tmp_path, task, rows, [], robot, home, 0, kept, Referee(home))
+
+    index = (tmp_path / "index.html").read_text()
+    for scene, verdict, x, shade in [("apt_0", "passed", "0.2", 40), ("apt_4", "FAILED", "0.8", 210)]:
+        folder = tmp_path / scene / task.id
+        page = (folder / "report.html").read_text()
+        assert f"{verdict}</span>" in page
+        assert f"ended at ({x}, 0.0)" in page
+        assert "001_front_camera.jpg" in page
+        assert abs(float(cv2.imread(str(folder / "001_front_camera.jpg")).mean()) - shade) < 2
+        assert (folder / "map.png").is_file()
+        assert f"{scene}/M1/report.html" in index
+        assert f"{scene}" in index.split(f"{scene}/M1/report.html'>", 1)[1].split("</a>", 1)[0]
