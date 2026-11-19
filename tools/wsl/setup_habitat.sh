@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Set up the 3D apartment (robot/sim/home3d.py) in WSL: GPU rendering, Habitat-Sim in its own Python, the free scenes.
+# Set up the 3D apartment in WSL (robot/sim/habitat_server.py, run by robot/sim/stack.py): GPU rendering,
+# Habitat-Sim in its own Python, the free scenes.
 #   wsl -- bash tools/wsl/setup_habitat.sh
 # Habitat-Sim 0.3.3 is built only for Python 3.9, so it lives in its own micromamba env (~/micromamba/envs/habitat)
 # and the robot talks to it over a local socket. Downloads: micromamba (~15 MB), Habitat-Sim (~250 MB),

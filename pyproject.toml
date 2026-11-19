@@ -1,12 +1,13 @@
 [project]
 name = "sprocket-robot"
 version = "0.3.0"
-description = "Sprocket v2: living general-purpose wheeled robot with 3-CSI pure vision, circulating hybrid memory, and a closed-loop visual mind on the Arduino VENTUNO Q"
+description = "Sprocket v2: a pet-like, helpful wheeled robot on the Arduino VENTUNO Q, with an agentic vision-language mind"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26", "pyyaml>=6.0", "httpx>=0.27.0"]
 
 [project.optional-dependencies]
 eval = ["opencv-python-headless>=4.9"]
+vision = ["ultralytics>=8.4", "onnxruntime>=1.20"]  # the words' text features for YOLOE; depth on the CPU
 dev = ["pytest>=8.0", "ruff>=0.11"]
 
 [build-system]

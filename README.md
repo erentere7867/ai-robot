@@ -1,49 +1,42 @@
 # Sprocket v2
 
-A living, visually aware general-purpose wheeled robot on the Arduino VENTUNO Q.
+A pet-like, helpful wheeled robot on the Arduino VENTUNO Q, with everything running on the robot.
 
-Sprocket's mind is an **agentic tool-calling loop** around an on-board vision-language model (`LFM3-VL-2B` for now): it sees the cameras, calls tools in the model's native format, reads every result, keeps a to-do list, and ends a task by replying in words. Under it sit a body with its own control loops, **360° pure-vision perception (3 × MIPI-CSI cameras + 8×8 ToF)** and long-term memory.
+Its mind is an **agentic tool-calling loop** around an on-board vision-language model (`LFM3-VL-2B` for now). The
+model gets the three cameras' pictures and the user's words, answers what it can from the pictures, and acts by
+calling tools: `go_to("sofa")`, `search("keys", area="bedroom")`, `follow("user")`, `go_toward("behind-left", 2)`. The
+tools do the real-time work: YOLOE looks for the words they name, a tracker follows what it finds, depth from the
+cameras makes a 360° scan, and Nav2 plans and drives. Every result goes back to the model before its next step.
 
-The specification is in [docs/architecture.md](docs/architecture.md); the agent's design and measurements are in [docs/ideas/sprocket-harness.md](docs/ideas/sprocket-harness.md).
+- [docs/usage.md](docs/usage.md): set up, run the model and the vision server, run the tests, the 2D suite, the 3D
+  apartment with its live page and task reports, and the demo.
+- [docs/architecture.md](docs/architecture.md): the design: body, perception, memory, the agent.
+- [docs/simulation_3d.md](docs/simulation_3d.md): the 3D apartment, and what has been measured in it.
+- [docs/ideas/sprocket-harness.md](docs/ideas/sprocket-harness.md): how the agent harness came to be, with its numbers.
+- [AGENTS.md](AGENTS.md): rules for anyone (person or coding agent) changing the code.
 
 ## Layout
 
 ```text
-firmware/  STM32H5 sketch: 200 Hz wheel control, VL53L5CX step/cliff reflex, IMU + anti-snag
+firmware/     STM32H5 sketch: 200 Hz wheel control, VL53L5CX step/cliff reflex, IMU + anti-snag
 robot/
-  body/       30–50 Hz Living Body Engine: trajectory rollout, social yielding, aliveness, active vision
-  perception/ 3-CSI camera rig, metric floor/ToF depth calibration, synthetic /scan, pose/gaze, id overlay; YOLOE + depth on the GPU vision server
-  mind/       model client (native tool calls, d1-2B scoring), long-term memory (SQLite)
   agent/      the agent loop, its tools (checked, with errors that teach), to-do list, instant stop/wait
-  sim/        2D simulator behind the robot API, with drawn perspective cameras
-  ros/        3D Gazebo & ROS 2 stack (3-CSI rig, metric depth, synthetic /scan, rooms, exploration, RealRobot)
-  interfaces/ Live web dashboard, Whisper + WeSpeaker voiceprint + DOA ring buffer, Piper + expressive chimes
-  eval/       Evaluation suite and photo verification checks
-  train/      random scene generator (the post-training data builder comes next)
-tests/        Unit and integration tests
+  mind/       the model's client (native tool calls, yes/no probabilities), long-term memory (SQLite)
+  perception/ camera rig, YOLOE for asked words, depth scaled by the floor, synthetic /scan, tracker, pose
+  body/       the body's control loops: trajectory rollout, pursuit, social yielding, aliveness
+  ros/        the robot on ROS 2: Nav2, its own map and rooms, perception nodes, RealRobot
+  sim/        the 2D simulator behind the same robot API, and the Habitat 3D apartment
+  interfaces/ live web page, voice (Whisper, voiceprints, Piper), the demo
+  eval/       the 2D suite, the 3D tasks with per-task reports, the vision model's photo check
+  train/      random 2D scenes (the post-training data builder comes next)
+tests/        unit and integration tests
+tools/        start the model (brain.ps1, wsl/brain.sh) and the GPU vision server (win/), set up WSL and models
 ```
 
-## Quick Start
-
-The model runs on llama-server (build 11960 or newer, for LFM3) on port 8081. On Windows, from the repository
-folder in PowerShell (`tools/wsl/brain.sh` does the same inside WSL or Linux with llama.cpp built there):
+## Quick start (Windows + WSL)
 
 ```powershell
-wsl -- bash tools/wsl/setup_habitat.sh                             # once: GPU rendering in WSL + the 3D apartment
-powershell -ExecutionPolicy Bypass -File tools\demo.ps1           # the model (if not running) + the demo; open http://127.0.0.1:8765
-powershell -ExecutionPolicy Bypass -File tools\brain.ps1 -Stop    # stop the model when done
+powershell -ExecutionPolicy Bypass -File tools\demo.ps1    # model + vision server + the 3D apartment; open http://127.0.0.1:8765
 ```
 
-The demo starts in the **3D apartment**: a real-looking home (ReplicaCAD) in Habitat-Sim that stands in only for the
-world, the body and the raw sensors; the robot's own software runs on top unchanged (ROS 2, Nav2, its own map, depth
-and YOLOE from its colour cameras, the agent), slower than real time on a PC
-([docs/simulation_3d.md](docs/simulation_3d.md)). The 2D rooms in the room picker are a fast smoke test.
-
-```bash
-python -m pip install -e ".[eval,dev]"
-python -m pytest -q
-python -m ruff check .
-python -m robot.eval.suite --tag mine         # the 50-task suite in the fast 2D world
-python -m robot.eval.home3d --tag mine        # 27 tasks in the 3D apartment on the real stack (WSL: . tools/wsl/env.sh)
-python -m robot.interfaces.demo               # talk to it at http://127.0.0.1:8765
-```
+First-time setup, the tests and the evals are in [docs/usage.md](docs/usage.md).

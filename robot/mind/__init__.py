@@ -1,4 +1,4 @@
-"""The brain: LFM3-VL-2B closed-loop planner and d1-2B calibrated decision scorer."""
+"""The mind: the vision-language model's client (robot/mind/brain.py) and long-term memory."""
 
 from robot.mind.brain import Brain, Reply
 

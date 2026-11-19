@@ -20,6 +20,7 @@ import queue
 import threading
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -61,6 +62,7 @@ class Live:
         self.state = State()
         self.inbox: queue.Queue[tuple[str, str]] = queue.Queue()  # ("instruct", text), ("stop", ""), ("scene", name)
         self.camera: Any = None  # name -> PNG bytes or None, for multi-camera panel
+        self.files: Any = None  # a folder served at /runs/ (the 3D eval's reports), or None
         self.ears: Any = None
         self.mouth: Any = None
         self._lock = threading.Lock()
@@ -176,6 +178,14 @@ class Live:
                     return b""
 
             def do_GET(self) -> None:  # noqa: N802 - http.server method name
+                if self.path.startswith("/runs/") and live.files is not None:
+                    base = Path(live.files).resolve()
+                    want = (base / urlparse(self.path).path.removeprefix("/runs/")).resolve()
+                    if base in want.parents and want.is_file():
+                        kind = {".html": "text/html; charset=utf-8", ".png": "image/png",
+                                ".jpg": "image/jpeg"}.get(want.suffix, "application/octet-stream")
+                        return self._send(want.read_bytes(), kind)
+                    return self._send(b"not found", "text/plain", 404)
                 if self.path.startswith("/camera/"):
                     png = None
                     if live.camera is not None:

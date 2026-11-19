@@ -1,4 +1,4 @@
-"""The brain: the vision-language model (LFM3-VL-2B for now) and the d1-2B decision scorer behind llama-server."""
+"""The brain: the vision-language model (LFM3-VL-2B for now) behind llama-server."""
 
 from __future__ import annotations
 
@@ -48,12 +48,8 @@ def _with_image(url: str, text: str) -> list[dict[str, Any]]:
 
 
 class Brain:
-    def __init__(self, url: str = "http://127.0.0.1:8081", timeout_s: float = 180.0,
-                 decision_url: str | None = None) -> None:
+    def __init__(self, url: str = "http://127.0.0.1:8081", timeout_s: float = 180.0) -> None:
         self.http = httpx.Client(base_url=url, timeout=timeout_s, trust_env=False)
-        self.decision_http = (
-            httpx.Client(base_url=decision_url, timeout=timeout_s, trust_env=False) if decision_url else self.http
-        )
 
     def healthy(self) -> bool:
         try:
@@ -154,11 +150,11 @@ class Brain:
         messages: list[dict[str, Any]],
         choices: tuple[str, ...] = ("yes", "no"),
     ) -> dict[str, float]:
-        """Runs single-token forward pass (d1-2B), extracts exponential logprobs matching choices,
+        """One token from the model, its log-probabilities matched to `choices`,
 
         and returns normalized probability dict summing to 1.0 (uniform if no matching tokens).
         """
-        r = self.decision_http.post(
+        r = self.http.post(
             "/v1/chat/completions",
             json={
                 "messages": messages,

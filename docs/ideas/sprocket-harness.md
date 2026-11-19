@@ -1,5 +1,11 @@
 # Sprocket Harness: Act Through Tools, See the Result
 
+> A record of how the harness came to be, with what was measured at each step. Since 19 November 2026: YOLOE looks
+> only for the words tools ask for, on the Windows GPU; all three cameras come with each request; `search` asks the
+> model which way looks likeliest; `go_toward` replaced pointing at numbered dots; and each 3D task writes a report.
+> What changed and why is in [simulation_3d.md](../simulation_3d.md); the harness as it is now is in
+> [architecture.md](../architecture.md), section 6.
+
 ## Problem Statement
 How might we make Sprocket's on-board vision-language model reliably turn any request into the right actions, with a harness built like modern agent harnesses instead of a form it fills in once per step?
 

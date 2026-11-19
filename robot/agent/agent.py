@@ -58,6 +58,7 @@ class Step:
     model_s: float = 0.0
     tokens: int = 0
     thought: str = ""  # what the model reasoned before acting (thinking on)
+    t: float = 0.0  # the robot's clock when the turn began (simulated seconds in the simulator)
 
 
 @dataclass
@@ -256,10 +257,10 @@ class Agent:
                     return self._finish(robot, record, "preempted", last_said)
                 self._trim_images(messages)
                 self._push(thought="(thinking...)")
-                t0 = time.perf_counter()
+                t0, began = time.perf_counter(), round(float(getattr(robot, "t", 0.0)), 1)
                 reply = self.brain.chat(messages, tools.schemas(), think=think)
                 step = Step(reply.text, model_s=round(time.perf_counter() - t0, 3), tokens=reply.write_tokens,
-                            thought=reply.thought.strip())
+                            thought=reply.thought.strip(), t=began)
                 record.steps.append(step)
                 self._push(steps=record.lines(thoughts=True), thought=step.thought or "(no reasoning this turn)")
                 assistant: dict[str, Any] = {"role": "assistant", "content": reply.text}

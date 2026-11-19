@@ -60,22 +60,45 @@ class Referee:
 
 
 # ---- what the checks read ----------------------------------------------------------------------------------------
-def keep_pictures(robot: Any, folder: Path) -> None:
+def out_dir() -> Path:
+    return Path("~/robot-runtime/runs").expanduser()
+
+
+def keep_pictures(robot: Any, folder: Path) -> list[tuple[float, str]]:
     """Save every picture the model is given (the agent takes them with camera_view) as numbered JPEGs, so what it
-    said it saw can be checked against what it was shown."""
+    said it saw can be checked against what it was shown; the list fills with (simulated time, file name)."""
     import cv2
 
     folder.mkdir(parents=True, exist_ok=True)
-    view, count = robot.camera_view, [0]
+    view, kept = robot.camera_view, []
 
     def saving(camera: str = "front_camera", width: int = 512, height: int = 288) -> Any:
         frame = view(camera, width, height)
         if frame is not None and getattr(frame, "size", 0):
-            count[0] += 1
-            cv2.imwrite(str(folder / f"{count[0]:03d}_{camera}.jpg"), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            name = f"{len(kept) + 1:03d}_{camera}.jpg"
+            cv2.imwrite(str(folder / name), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            kept.append((round(robot.t, 1), name))
         return frame
 
     robot.camera_view = saving
+    return kept
+
+
+def write_report(run: Path, task: Task, rows: list[dict], records: list, robot: Any, home: Home, mark: int,
+                 kept: list[tuple[float, str]], referee: Referee) -> None:
+    """The task's report page and the run's index (robot/eval/report.py), with where it ended against the real
+    objects the task names."""
+    from robot.eval import report
+
+    x, y, _ = end(referee)
+    near = "; ".join(f"{gap((x, y), nearest(things(referee, n), (x, y))):.2f} m from the nearest real {n}'s edge"
+                     for n in task.needs if things(referee, n))
+    try:
+        report.write(run / task.id, task, rows[-1], records, robot, home, mark, kept,
+                     f"ended at ({x:.1f}, {y:.1f}) in the house" + (f": {near}" if near else ""))
+        report.index(run, rows)
+    except Exception as exc:  # noqa: BLE001 - a page for people to read must not end the run
+        print(f"report for {task.id}: {type(exc).__name__}: {exc}", flush=True)
 
 
 def said(sim: Referee, last_only: bool = False) -> str:
@@ -267,12 +290,14 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
         from robot.interfaces.live import Live
 
         live, holder = Live(), Holder(None)
+        live.files = out_dir()  # the run's reports, at /runs/<tag>/index.html
         live.serve(live_port)
         show_cameras(live, holder)
         threading.Thread(target=refresh, args=(live, holder), daemon=True).start()
-        print(f"live page: http://127.0.0.1:{live_port}", flush=True)
+        print(f"live page: http://127.0.0.1:{live_port}  reports: http://127.0.0.1:{live_port}/runs/{tag}/index.html",
+              flush=True)
     rows = []
-    out = Path("~/robot-runtime/runs").expanduser() / f"{tag}.jsonl"
+    out = out_dir() / f"{tag}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("", encoding="utf-8")
     for scene in scenes:
@@ -286,7 +311,7 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                     continue
                 home.reset()
                 robot = home.robot(detector, brain)
-                keep_pictures(robot, out.parent / tag / task.id)
+                kept = keep_pictures(robot, out.parent / tag / task.id)
                 try:
                     home.wait(WATCH)  # sitting on its dock, looking around
                     robot._perceive_objects()
@@ -320,6 +345,7 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                                  "bumps": home.bumps - bumps})
                     with out.open("a", encoding="utf-8") as f:  # as each task ends: a crash keeps the rest
                         f.write(json.dumps(rows[-1], default=str) + "\n")
+                    write_report(out.parent / tag, task, rows, records, robot, home, mark, kept, referee)
                 finally:
                     if holder is not None:
                         holder.sim = None
