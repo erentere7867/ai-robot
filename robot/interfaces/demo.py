@@ -139,6 +139,8 @@ def drive(live: Live, agent: Agent, holder: Holder, new_scene: Any = None, *,
             except Exception as exc:  # noqa: BLE001 - a room that cannot load must not take the page down
                 print(f"error     room {text}: {exc}", flush=True)
                 live.update(status="failed", problems=[f"Could not load {text}: {exc}"])
+            finally:
+                live.update(scene_loading="")
         elif kind == "stop" or (kind == "instruct" and instant(text) == "stop"):
             halt()
             live.update(status="stopped", posture="neutral", chime="uh_oh")

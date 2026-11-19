@@ -47,6 +47,7 @@ class State:
     room_bounds: dict[str, tuple[float, float, float, float]] = field(default_factory=dict)
     scene: str = ""
     scenes: list[str] = field(default_factory=list)
+    scene_loading: str = ""  # the room picked on the page while it loads; `scene` stays the room the robot is in
     history: list[dict[str, Any]] = field(default_factory=list)
     cameras: list[str] = field(default_factory=list)
     scan: list[tuple[float, float]] = field(default_factory=list)
@@ -223,7 +224,10 @@ class Live:
                     body = {}
                 kind = self.path.split("?")[0].strip("/")
                 if kind in ("instruct", "stop", "scene"):
-                    live.inbox.put((kind, str(body.get("text", ""))[:300]))
+                    text = str(body.get("text", ""))[:300]
+                    if kind == "scene" and text in live.state.scenes:
+                        live.update(scene_loading=text)  # before replying, so the page's next poll sees the pick
+                    live.inbox.put((kind, text))
                 self._send(b'{"ok":true}', "application/json")
 
             def log_message(self, *args: Any) -> None:  # quiet
@@ -335,7 +339,8 @@ function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>
 const post=(p,text)=>fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}).catch(()=>{});
 $('form').onsubmit=e=>{e.preventDefault();const t=$('cmd').value.trim();if(t){$('instruction').textContent=t;$('status').textContent='planning';$('status').className='status planning';post('/instruct',t);$('cmd').value=''}};
 $('stop').onclick=()=>post('/stop','');
-$('scene').onchange=()=>post('/scene',$('scene').value);
+let picksSent=0,picksTaken=0;
+$('scene').onchange=()=>{const n=++picksSent;post('/scene',$('scene').value).finally(()=>{picksTaken=Math.max(picksTaken,n)})};
 
 function draw(s){
 const c=$('map'),g=c.getContext('2d'),[W,H]=s.size||[8,6];
@@ -442,7 +447,7 @@ g.strokeStyle=ink;g.lineWidth=3;g.stroke();
 }
 
 let scenesKey='';
-function render(s){
+function render(s,picksSeen){
 $('instruction').textContent=s.instruction||'Tell the robot what to do';
 $('status').textContent=s.status||'idle';
 $('status').className='status '+(s.status||'idle');
@@ -465,10 +470,15 @@ else{$('reply').hidden=true}
 }else{$('reply').hidden=true}
 $('problems').innerHTML=(s.problems||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">none</li>';
 $('history').innerHTML=(s.history||[]).slice().reverse().map(h=>`<li><b>${esc(h.outcome)}</b> ${esc(h.instruction)}</li>`).join('')||'<li class="muted">nothing yet</li>';
-const key=(s.scenes||[]).join('|')+'#'+(s.scene||'');
+const key=(s.scenes||[]).join('|');
 if(key!==scenesKey){
 scenesKey=key;
-$('scene').innerHTML=(s.scenes||[]).map(n=>`<option${n===s.scene?' selected':''}>${esc(n)}</option>`).join('');
+$('scene').innerHTML=(s.scenes||[]).map(n=>`<option>${esc(n)}</option>`).join('');
+}
+if(picksSeen===picksSent){
+const room=s.scene_loading||s.scene||'';
+if($('scene').value!==room)$('scene').value=room;
+$('scene').disabled=!!s.scene_loading;
 }
 draw(s);
 voice(s);
@@ -557,9 +567,11 @@ const a=new Audio('/speech?text='+encodeURIComponent(text));a.onended=done;a.one
 async function pollLoop(){
 const ctrl=new AbortController();
 const timer=setTimeout(()=>ctrl.abort(),2500);
+// a poll sent before the server took the latest pick still shows the room it replaced
+const picksSeen=picksTaken;
 try{
 const r=await fetch('/state',{cache:'no-store',signal:ctrl.signal});
-if(r.ok){render(await r.json())}
+if(r.ok){render(await r.json(),picksSeen)}
 }catch(e){}
 finally{
 clearTimeout(timer);
