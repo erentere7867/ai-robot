@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Start the robot's model (LFM3-VL-2B) with llama.cpp built in WSL or on Linux (the board), on port 8081: on the GPU
 # when llama.cpp was built with CUDA (~/llama.cpp/build-cuda), else on the CPU. On Windows use tools\brain.ps1.
-#   bash tools/wsl/brain.sh
+#   bash tools/wsl/brain.sh                    # 4 CPU threads by default
+#   SPROCKET_BRAIN_THREADS=8 bash tools/wsl/brain.sh  # CPU-only server with spare cores
 set -euo pipefail
 
 MODELS_DIR="${SPROCKET_MODELS_DIR:-$HOME/sprocket-models}"
@@ -17,11 +18,19 @@ cd ~/llama.cpp 2>/dev/null || {
   echo "  powershell -ExecutionPolicy Bypass -File tools\\brain.ps1"
   exit 1
 }
+threads=4
 if [ -x build-cuda/bin/llama-server ]; then bin=build-cuda/bin/llama-server; gpu="-ngl 99 -fa on"; where=GPU
-else bin=build/bin/llama-server; gpu=""; where=CPU; fi
+else
+  bin=build/bin/llama-server; gpu=""; where=CPU
+  threads="${SPROCKET_BRAIN_THREADS:-4}"
+  if ! [[ "$threads" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SPROCKET_BRAIN_THREADS must be a positive integer" >&2
+    exit 2
+  fi
+fi
 [ -f "$MODEL" ] || { echo "missing model: $MODEL (see tools/wsl/setup_models.sh)"; exit 1; }
 [ -f "$MMPROJ" ] || { echo "missing vision projector: $MMPROJ (see tools/wsl/setup_models.sh)"; exit 1; }
-nohup "$bin" -m "$MODEL" --mmproj "$MMPROJ" $gpu -c 32768 -np 2 --jinja --swa-full --port 8081 -t 4 \
+nohup "$bin" -m "$MODEL" --mmproj "$MMPROJ" $gpu -c 32768 -np 2 --jinja --swa-full --port 8081 -t "$threads" \
   > ~/llama-wsl.log 2>&1 &
 echo "starting LFM3-VL-2B on the $where ($MODEL)..."
 for _ in $(seq 1 120); do curl -s http://127.0.0.1:8081/health | grep -q ok && break; sleep 2; done
