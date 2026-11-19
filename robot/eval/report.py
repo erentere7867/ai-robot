@@ -165,8 +165,9 @@ numbers: where each call began</p></div>
 
 def index(run: Path, rows: list[dict]) -> Path:
     """The run's page: each task, passed or not, with a link to its report."""
-    lines = "".join(f"<li class={'pass' if r['passed'] else 'fail'}><a href='{html.escape(r['id'])}/report.html'>"
-                    f"{html.escape(r['id'])}: {html.escape(' / '.join(r['says']))}</a> "
+    lines = "".join(f"<li class={'pass' if r['passed'] else 'fail'}><a href='{html.escape(r['scene'])}/"
+                    f"{html.escape(r['id'])}/report.html'>"
+                    f"{html.escape(r['scene'])} · {html.escape(r['id'])}: {html.escape(' / '.join(r['says']))}</a> "
                     f"{'passed' if r['passed'] else 'FAILED'}</li>" for r in rows)
     out = run / "index.html"
     out.write_text(f"<!doctype html><html><head><meta charset=utf-8><title>{html.escape(run.name)}</title><style>"

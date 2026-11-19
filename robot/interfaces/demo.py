@@ -139,6 +139,8 @@ def drive(live: Live, agent: Agent, holder: Holder, new_scene: Any = None, *,
             except Exception as exc:  # noqa: BLE001 - a room that cannot load must not take the page down
                 print(f"error     room {text}: {exc}", flush=True)
                 live.update(status="failed", problems=[f"Could not load {text}: {exc}"])
+            finally:
+                live.update(scene_loading="")
         elif kind == "stop" or (kind == "instruct" and instant(text) == "stop"):
             halt()
             live.update(status="stopped", posture="neutral", chime="uh_oh")
@@ -189,7 +191,11 @@ def main() -> None:
     threading.Thread(target=refresh, args=(live, holder), daemon=True).start()
 
     def new_scene(name: str) -> None:
+        previous = holder.sim
         holder.sim = make_robot(name, brain)
+        if not isinstance(previous, SimRobot):
+            previous.perception.stop()
+            previous.shutdown()
         agent.forget()  # a new room: earlier requests no longer apply
         live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], said=[], chime="")
 

@@ -47,6 +47,7 @@ class State:
     room_bounds: dict[str, tuple[float, float, float, float]] = field(default_factory=dict)
     scene: str = ""
     scenes: list[str] = field(default_factory=list)
+    scene_loading: str = ""  # the room picked on the page while it loads; `scene` stays the room the robot is in
     history: list[dict[str, Any]] = field(default_factory=list)
     cameras: list[str] = field(default_factory=list)
     scan: list[tuple[float, float]] = field(default_factory=list)
@@ -223,7 +224,10 @@ class Live:
                     body = {}
                 kind = self.path.split("?")[0].strip("/")
                 if kind in ("instruct", "stop", "scene"):
-                    live.inbox.put((kind, str(body.get("text", ""))[:300]))
+                    text = str(body.get("text", ""))[:300]
+                    if kind == "scene" and text in live.state.scenes:
+                        live.update(scene_loading=text)  # before replying, so the page's next poll sees the pick
+                    live.inbox.put((kind, text))
                 self._send(b'{"ok":true}', "application/json")
 
             def log_message(self, *args: Any) -> None:  # quiet
@@ -360,7 +364,8 @@ send.disabled=false;
 }
 };
 $('stop').onclick=()=>post('/stop','').catch(()=>{});
-$('scene').onchange=()=>post('/scene',$('scene').value).catch(()=>{});
+let picksSent=0,picksTaken=0;
+$('scene').onchange=()=>{const n=++picksSent;post('/scene',$('scene').value).catch(()=>{}).finally(()=>{picksTaken=Math.max(picksTaken,n)})};
 
 function draw(s){
 const c=$('map'),g=c.getContext('2d'),[W,H]=s.size||[8,6];
@@ -472,7 +477,7 @@ const status=$('status');
 if(status.textContent!==text)status.textContent=text;
 status.className='status '+style;
 }
-function render(s){
+function render(s,picksSeen){
 $('instruction').textContent=s.instruction||'Tell the robot what to do';
 showStatus(s.status||'idle');
 $('posture').textContent='posture: '+(s.posture||'neutral');
@@ -494,10 +499,15 @@ else{$('reply').hidden=true}
 }else{$('reply').hidden=true}
 $('problems').innerHTML=(s.problems||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">none</li>';
 $('history').innerHTML=(s.history||[]).slice().reverse().map(h=>`<li><b>${esc(h.outcome)}</b> ${esc(h.instruction)}</li>`).join('')||'<li class="muted">nothing yet</li>';
-const key=(s.scenes||[]).join('|')+'#'+(s.scene||'');
+const key=(s.scenes||[]).join('|');
 if(key!==scenesKey){
 scenesKey=key;
-$('scene').innerHTML=(s.scenes||[]).map(n=>`<option${n===s.scene?' selected':''}>${esc(n)}</option>`).join('');
+$('scene').innerHTML=(s.scenes||[]).map(n=>`<option>${esc(n)}</option>`).join('');
+}
+if(picksSeen===picksSent){
+const room=s.scene_loading||s.scene||'';
+if($('scene').value!==room)$('scene').value=room;
+$('scene').disabled=!!s.scene_loading;
 }
 draw(s);
 voice(s);
@@ -531,16 +541,23 @@ img.src=`/camera/${encodeURIComponent(img.dataset.cam)}.png?t=${now}`;
 });
 }
 
-let rec=null,spoken=-1;
+let rec=null,pendingMic=null,spoken=-1;
 async function talk(){
-if(rec)return;
+if(rec||pendingMic)return;
+const request={};pendingMic=request;
 try{
 const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+if(pendingMic!==request){
+stream.getTracks().forEach(t=>t.stop());
+if(!rec)$('talk').textContent='Hold to talk';
+return;
+}
+pendingMic=null;
 const ctx=new AudioContext(),src=ctx.createMediaStreamSource(stream),node=ctx.createScriptProcessor(4096,1,1),chunks=[];
 node.onaudioprocess=e=>chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
 src.connect(node);node.connect(ctx.destination);
 rec={stream,ctx,node,chunks};$('talk').textContent='Listening… release to send';
-}catch(e){$('heard').textContent='No microphone: '+e.message}
+}catch(e){if(pendingMic===request)pendingMic=null;$('heard').textContent='No microphone: '+e.message}
 }
 function wav(chunks,rate){
 const n=chunks.reduce((a,c)=>a+c.length,0),pcm=new Float32Array(n);let o=0;
@@ -554,6 +571,7 @@ for(let i=0;i<m;i++){const x=Math.max(-1,Math.min(1,pcm[Math.floor(i*step)]));v.
 return v.buffer;
 }
 function release(){
+pendingMic=null;
 if(!rec)return;
 const{stream,ctx,node,chunks}=rec;rec=null;node.disconnect();
 stream.getTracks().forEach(t=>t.stop());
@@ -562,6 +580,7 @@ $('talk').textContent='Hold to talk';$('heard').textContent='Hearing…';
 fetch('/voice',{method:'POST',body}).catch(()=>{});
 }
 $('talk').onpointerdown=talk;$('talk').onpointerup=release;$('talk').onpointerleave=release;
+$('talk').onpointercancel=release;
 function toggleVoice(){
 if(!window.speechSynthesis)return;
 if(!$('speak').checked)window.speechSynthesis.cancel();
@@ -586,10 +605,12 @@ const a=new Audio('/speech?text='+encodeURIComponent(text));a.onended=done;a.one
 async function pollLoop(){
 const ctrl=new AbortController();
 const timer=setTimeout(()=>ctrl.abort(),2500);
+// a poll sent before the server took the latest pick still shows the room it replaced
+const picksSeen=picksTaken;
 try{
 const r=await fetch('/state',{cache:'no-store',signal:ctrl.signal});
 if(!r.ok)throw new Error('State request failed');
-render(await r.json());
+render(await r.json(),picksSeen);
 $('state-stale').hidden=true;
 }catch{
 showStatus('Live updates unavailable','stale');
