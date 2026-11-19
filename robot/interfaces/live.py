@@ -253,6 +253,8 @@ margin:0 0 8px}h3{font-size:12px;letter-spacing:.04em;text-transform:uppercase;c
 .status.running,.status.planning{background:var(--accent);color:#fff}
 .status.done{background:var(--ok);color:#fff}.status.failed,.status.stopped{background:var(--bad);color:#fff}
 .status.refused{background:var(--warn);color:#fff}
+.status.stale,.send-error:not(:empty){background:color-mix(in srgb,var(--bad) 8%,var(--panel));color:var(--bad)}
+.send-error:not(:empty){margin-top:8px;padding:8px 12px;border-left:3px solid var(--bad);border-radius:8px;font-size:14px}
 pre{margin:0;padding:8px 10px;border-radius:8px;background:var(--bg);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
 overflow-x:auto;white-space:pre-wrap}
 .steps{margin:0;padding-left:20px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -264,6 +266,7 @@ ul{margin:0;padding-left:18px}.muted{color:var(--muted)}.wide{grid-column:1/-1}
 form{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 input,select,button{font:inherit;border-radius:8px;border:1px solid var(--line);padding:8px 12px;background:var(--bg);
 color:var(--ink)}input{flex:1;min-width:200px}button{cursor:pointer;background:var(--accent);color:#fff;border:0}
+#send:disabled{opacity:.65;cursor:wait}
 button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .cams figure{margin:0}.cams img{width:100%;border-radius:8px;background:var(--bg)}.cams figcaption{font-size:13px;color:var(--muted)}
 .hint{font-size:13px;color:var(--muted);margin-top:6px}
@@ -275,20 +278,23 @@ button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-colum
 <section class="wide">
 <h1 id="instruction">Tell the robot what to do</h1>
 <div class="badges">
-<span id="status" class="status">idle</span>
+<span id="status" class="status" role="status">Connecting…</span>
+<span id="state-stale" class="muted" hidden>Displayed robot data may be out of date.</span>
 <span id="posture" class="badge">posture: neutral</span>
 <span id="chime" class="badge" hidden></span>
 <span id="rooms" class="muted"></span>
 </div>
 <form id="form">
-<input id="cmd" placeholder="e.g. Circle the table twice, then come back to me" autocomplete="off">
-<button type="submit">Send</button>
+<input id="cmd" placeholder="e.g. Circle the table twice, then come back to me" autocomplete="off"
+ aria-label="Robot command" aria-describedby="send-error">
+<button type="submit" id="send">Send</button>
 <button type="button" class="stop" id="stop">Stop</button>
 <button type="button" id="talk" hidden title="Hold and speak">Hold to talk</button>
 <label id="speaklabel" class="muted" hidden><input type="checkbox" id="speak" checked onchange="toggleVoice()" style="min-width:0;flex:0"> speak aloud</label>
 <label class="muted"><input type="checkbox" id="showscan" checked style="min-width:0;flex:0"> show 3-CSI depth contours</label>
 <select id="scene" title="Room"></select>
 </form>
+<div id="send-error" class="send-error" role="alert"></div>
 <div class="reply" id="reply" hidden><span class="reply-tag">SPROCKET</span><span id="reply-text"></span></div>
 <div class="hint" id="hint">The robot is the blue dot with a heading indicator; you are the blue person.
 Pink dots show 360° 3-CSI depth contours (no LiDAR). Faded objects are remembered.</div>
@@ -332,10 +338,29 @@ Pink dots show 360° 3-CSI depth contours (no LiDAR). Faded objects are remember
 </main><script>
 const $=id=>document.getElementById(id);
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
-const post=(p,text)=>fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}).catch(()=>{});
-$('form').onsubmit=e=>{e.preventDefault();const t=$('cmd').value.trim();if(t){$('instruction').textContent=t;$('status').textContent='planning';$('status').className='status planning';post('/instruct',t);$('cmd').value=''}};
-$('stop').onclick=()=>post('/stop','');
-$('scene').onchange=()=>post('/scene',$('scene').value);
+const post=(p,text,signal)=>fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text}),signal});
+$('form').onsubmit=async e=>{
+e.preventDefault();
+const input=$('cmd'),send=$('send'),error=$('send-error'),draft=input.value,text=draft.trim();
+if(!text||send.disabled)return;
+const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),5000);
+send.disabled=true;
+send.textContent='Sending…';
+error.textContent='';
+try{
+const r=await post('/instruct',text,ctrl.signal);
+if(!r.ok)throw new Error('Command was not acknowledged');
+if(input.value===draft)input.value='';
+}catch{
+error.textContent='Couldn’t confirm the command was sent. Your draft is still here.';
+}finally{
+clearTimeout(timer);
+send.textContent='Send';
+send.disabled=false;
+}
+};
+$('stop').onclick=()=>post('/stop','').catch(()=>{});
+$('scene').onchange=()=>post('/scene',$('scene').value).catch(()=>{});
 
 function draw(s){
 const c=$('map'),g=c.getContext('2d'),[W,H]=s.size||[8,6];
@@ -442,10 +467,14 @@ g.strokeStyle=ink;g.lineWidth=3;g.stroke();
 }
 
 let scenesKey='';
+function showStatus(text,style=text){
+const status=$('status');
+if(status.textContent!==text)status.textContent=text;
+status.className='status '+style;
+}
 function render(s){
 $('instruction').textContent=s.instruction||'Tell the robot what to do';
-$('status').textContent=s.status||'idle';
-$('status').className='status '+(s.status||'idle');
+showStatus(s.status||'idle');
 $('posture').textContent='posture: '+(s.posture||'neutral');
 if(s.chime){$('chime').hidden=false;$('chime').textContent='chime: '+s.chime}else{$('chime').hidden=true}
 $('rooms').textContent=(s.rooms&&s.rooms.length)?'rooms: '+s.rooms.join(', '):'';
@@ -559,9 +588,13 @@ const ctrl=new AbortController();
 const timer=setTimeout(()=>ctrl.abort(),2500);
 try{
 const r=await fetch('/state',{cache:'no-store',signal:ctrl.signal});
-if(r.ok){render(await r.json())}
-}catch(e){}
-finally{
+if(!r.ok)throw new Error('State request failed');
+render(await r.json());
+$('state-stale').hidden=true;
+}catch{
+showStatus('Live updates unavailable','stale');
+$('state-stale').hidden=false;
+}finally{
 clearTimeout(timer);
 setTimeout(pollLoop,350);
 }
