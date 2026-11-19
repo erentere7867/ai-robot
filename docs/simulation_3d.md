@@ -143,6 +143,12 @@ in view at all ("false"); YOLOE at the robot's threshold, 0.22:
 - **Stalls of 20-35 s** in answers from the GPU server were the connection, not the GPU: /health, which never waits
   for the GPU, took 19.5 and 35.6 s. A new connection per request at about 16 a second from WSL; with connections
   kept open (HTTP/1.1), an hour of probing every half second across six 3D runs, and a load test, saw none.
+- **Keep the connection, not the pixels.** Completed HTTP requests could retain full frames until Python's cyclic
+  collector ran. Streaming the upload from a buffer closed after each exchange reduced peak process memory from
+  305-306 to 58-59 MiB in three paired 120-frame loopback runs (720p, no inference). On eight apartment pictures
+  repeated three times, the DirectML client's detection arrays and depth pixels matched byte for byte in all 24
+  pairs. Median detector/depth exchanges were 113/72 ms before, 111/70 ms after. These are PC transport measurements,
+  not board latency or a bound on whole-robot memory.
 
 ## First time in a home
 

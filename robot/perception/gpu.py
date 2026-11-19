@@ -26,12 +26,17 @@ class VisionServer:
         self.slots = int(self.info["slots"])
 
     def _post(self, path: str, **arrays: np.ndarray) -> Any:
-        buf = io.BytesIO()
-        np.savez(buf, **arrays)
-        r = self.http.post(path, content=buf.getvalue(), headers={"Content-Type": "application/octet-stream"})
-        if r.status_code != 200:
-            raise RuntimeError(f"vision server {path}: {r.text}")
-        return np.load(io.BytesIO(r.content))
+        # httpx responses can live until cyclic collection: 137 completed uploads still held 720p frames.
+        # Close the upload buffer after the exchange and don't cache the response pixels on the HTTP object.
+        with io.BytesIO() as buf:
+            np.savez(buf, **arrays)
+            buf.seek(0)
+            with self.http.stream("POST", path, content=buf, headers={"Content-Type": "application/octet-stream"}) as r:
+                if r.status_code != 200:
+                    r.read()
+                    raise RuntimeError(f"vision server {path}: {r.text}")
+                body = b"".join(r.iter_bytes())
+        return np.load(io.BytesIO(body))
 
     def detect(self, rgb: np.ndarray, words: np.ndarray, n: int, conf: float) -> Any:
         return self._post(f"/detect?n={n}&conf={conf}", picture=np.ascontiguousarray(rgb, np.uint8), words=words)
