@@ -161,19 +161,6 @@ class BodyController:
         candidates.sort(key=lambda c: c.total_score, reverse=True)
         return candidates
 
-    def apply_visual_scores(
-        self,
-        paths: list[CandidatePath],
-        visual_probs: dict[str, float],
-        weight: float = 2.0,
-    ) -> list[CandidatePath]:
-        """Re-ranks candidate trajectories by incorporating d1-2B calibrated visual scores."""
-        for p in paths:
-            p.visual_prob = visual_probs.get(p.label, 0.5)
-            p.total_score += weight * p.visual_prob
-        paths.sort(key=lambda c: c.total_score, reverse=True)
-        return paths
-
     def step_pursuit(
         self,
         pose: tuple[float, float, float],
@@ -183,7 +170,6 @@ class BodyController:
         v_cruise: float = 0.4,
         occupied_fn: Callable[[float, float], bool] = lambda x, y: False,
         people: list[tuple[float, float, float, float]] | tuple = (),
-        visual_probs: dict[str, float] | None = None,
     ) -> tuple[float, float, int, bool]:
         """Non-stop waypoint spline pursuit: advances idx when within blend_r of intermediate waypoints
 
@@ -221,8 +207,6 @@ class BodyController:
         candidates = self.rollout_trajectories(
             pose, waypoints[idx], occupied_fn, people, v_max=speed, horizon_s=1.2, dt=0.1
         )
-        if visual_probs:
-            candidates = self.apply_visual_scores(candidates, visual_probs)
         best = candidates[0]
 
         if best.clearance > 0.15 or not occupied_fn(best.points[0][0], best.points[0][1]):

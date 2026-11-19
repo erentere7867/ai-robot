@@ -55,15 +55,6 @@ _FONT_5X7: dict[str, list[int]] = {
     "_": [0, 0, 0, 0, 0, 0, 0b11111],
 }
 
-PATH_PALETTE = [
-    (0, 230, 120),
-    (0, 180, 255),
-    (255, 180, 0),
-    (255, 60, 180),
-    (170, 90, 255),
-]
-
-
 def _draw_char(img: np.ndarray, ch: str, x: int, y: int, color: tuple[int, int, int], scale: int = 1) -> None:
     glyph = _FONT_5X7.get(ch.upper(), _FONT_5X7[" "])
     h, w = img.shape[:2]
@@ -81,21 +72,6 @@ def _draw_text(img: np.ndarray, text: str, x: int, y: int, color: tuple[int, int
     for ch in text:
         _draw_char(img, ch, cx, y, color, scale)
         cx += (5 + 1) * scale
-
-
-def _draw_line(img: np.ndarray, x0: int, y0: int, x1: int, y1: int, color: tuple[int, int, int],
-               thickness: int = 2) -> None:
-    h, w = img.shape[:2]
-    steps = max(abs(x1 - x0), abs(y1 - y0), 1)
-    xs = np.linspace(x0, x1, steps + 1).round().astype(int)
-    ys = np.linspace(y0, y1, steps + 1).round().astype(int)
-    t = (thickness - 1) // 2
-    for dx in range(-t, t + 1):
-        for dy in range(-t, t + 1):
-            px = xs + dx
-            py = ys + dy
-            mask = (px >= 0) & (px < w) & (py >= 0) & (py < h)
-            img[py[mask], px[mask]] = color
 
 
 def _draw_rect(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, color: tuple[int, int, int],

@@ -410,7 +410,7 @@ def main() -> None:
     parser.add_argument("--only", nargs="*", default=[])
     parser.add_argument("--noise", type=float, default=0.0, help="detector noise, 0 (perfect) to 1 (poor)")
     parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="medium", help="how long the model may reason before each turn")
-    parser.add_argument("--cameras", choices=("front", "all"), default="front",
+    parser.add_argument("--cameras", choices=("front", "all"), default="all",
                         help="pictures sent with each request: the front camera, or all three")
     parser.add_argument("--see-after-moves", action="store_true", help="fresh pictures after every move too")
     parser.add_argument("--brain", default="http://127.0.0.1:8081", help="llama-server URL")
