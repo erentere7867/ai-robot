@@ -50,7 +50,6 @@ class State:
     scene_loading: str = ""  # the room picked on the page while it loads; `scene` stays the room the robot is in
     history: list[dict[str, Any]] = field(default_factory=list)
     cameras: list[str] = field(default_factory=list)
-    scan: list[tuple[float, float]] = field(default_factory=list)
     voice: bool = False
     heard: str = ""
     said_total: int = 0
@@ -295,13 +294,12 @@ button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-colum
 <button type="button" class="stop" id="stop">Stop</button>
 <button type="button" id="talk" hidden title="Hold and speak">Hold to talk</button>
 <label id="speaklabel" class="muted" hidden><input type="checkbox" id="speak" checked onchange="toggleVoice()" style="min-width:0;flex:0"> speak aloud</label>
-<label class="muted"><input type="checkbox" id="showscan" checked style="min-width:0;flex:0"> show 3-CSI depth contours</label>
 <select id="scene" title="Room"></select>
 </form>
 <div id="send-error" class="send-error" role="alert"></div>
 <div class="reply" id="reply" hidden><span class="reply-tag">SPROCKET</span><span id="reply-text"></span></div>
 <div class="hint" id="hint">The robot is the blue dot with a heading indicator; you are the blue person.
-Pink dots show 360° 3-CSI depth contours (no LiDAR). Faded objects are remembered.</div>
+Faded objects are remembered.</div>
 <div class="hint" id="heard"></div>
 </section>
 
@@ -389,7 +387,6 @@ for(const[a,b]of(s.walls||[])){
 if(Array.isArray(a))addPt(a[0],a[1]);
 if(Array.isArray(b))addPt(b[0],b[1]);
 }
-for(const pt of(s.scan||[])){if(Array.isArray(pt))addPt(pt[0],pt[1])}
 for(const t of(s.objects||[])){
 const r=Number(t.r)||0;
 addPt(t.x-r,t.y-r);addPt(t.x+r,t.y+r);
@@ -454,8 +451,6 @@ g.globalAlpha=1;
 const lbl=isUser?'you':(t.label+(t.id!==undefined?' '+t.id:''));
 placeLabel(lbl,cx,cy,rr,isUser,(isUser||t.known)?ink:mut);
 }
-if(!$('showscan')||$('showscan').checked){g.fillStyle='#e0457b';
-for(const[sx,sy]of(s.scan||[])){g.fillRect(X(sx)-1.5,Y(sy)-1.5,3,3)}}
 g.fillStyle=acc;g.globalAlpha=.35;
 for(const p of(s.poses||[])){g.beginPath();g.arc(X(p[0]),Y(p[1]),2.5,0,7);g.fill()}
 g.globalAlpha=1;
