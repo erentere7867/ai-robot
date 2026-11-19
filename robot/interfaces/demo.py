@@ -191,7 +191,12 @@ def main() -> None:
     threading.Thread(target=refresh, args=(live, holder), daemon=True).start()
 
     def new_scene(name: str) -> None:
+        previous = holder.sim
         holder.sim = make_robot(name, brain)
+        if hasattr(previous, "perception"):
+            previous.perception.stop()
+        if hasattr(previous, "shutdown"):
+            previous.shutdown()
         agent.forget()  # a new room: earlier requests no longer apply
         live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], said=[], chime="")
 
