@@ -10,4 +10,5 @@ if (-not $?) { exit 1 }
 if (-not $?) { exit 1 }
 $extra = ($args | ForEach-Object { if ("$_" -match "\s") { "'$_'" } else { "$_" } }) -join " "
 "open http://127.0.0.1:8765 (Ctrl+C here stops the demo; the model keeps running)"
-wsl --cd "$repo" -e bash -lc "exec ~/sprocket-venv/bin/python -m robot.interfaces.demo $extra"
+# env.sh first: the 3D apartment, the demo's first scene, is the robot's ROS software and needs ROS on the path
+wsl --cd "$repo" -e bash -lc ". tools/linux/env.sh && exec python -m robot.interfaces.demo $extra"

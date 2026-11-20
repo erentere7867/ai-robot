@@ -143,6 +143,14 @@ in view at all ("false"); YOLOE at the robot's threshold, 0.22:
 - **Stalls of 20-35 s** in answers from the GPU server were the connection, not the GPU: /health, which never waits
   for the GPU, took 19.5 and 35.6 s. A new connection per request at about 16 a second from WSL; with connections
   kept open (HTTP/1.1), an hour of probing every half second across six 3D runs, and a load test, saw none.
+- **Keep the connection, not the pixels.** Completed HTTP requests could retain full frames until Python's cyclic
+  collector ran. Streaming the upload from a buffer closed after each exchange reduced peak process memory from
+  305-306 to 58-59 MiB in three paired 120-frame loopback runs (720p, no inference). On eight apartment pictures
+  repeated three times, the DirectML client's detection arrays and depth pixels matched byte for byte in all 24
+  pairs. Median detector/depth exchanges were 113/72 ms before, 111/70 ms after. In two bounded apartment searches,
+  the parent peaked at 4,340 MiB evaluator RSS with up to 2,509 MiB of cached uploads (2,791 frames sampled);
+  the change at 2,008 MiB with no cached uploads (4,756 frames). Both finished, on different routes. This is not
+  a task-speed comparison, board latency, or a bound on whole-robot memory.
 
 ## First time in a home
 
@@ -197,6 +205,91 @@ bash tools/linux/stop.sh                             # stop everything a run lef
   slam_toolbox made a cell wall when 10% of beams through it ended there (right for a lidar, not for estimated
   depth: now 30%); the ToF sensors never reached Nav2, so what the cameras take for floor (the lowest 6 cm) was
   invisible to it. All three fixed in the robot's own software, not the simulator.
+
+### Watched approaches (20 November, apt_0)
+
+Asked to go to the nearest chair and describe the view, the model first got two new track IDs both listed as
+"1.7 m right", but no picture with those IDs. Returning one marked camera on ambiguity exposed the next fault:
+two separate chairs both labelled `1 CHAIR` after driving. In a nine-second drive replay, two shadow trackers
+received identical detections: the old tracker gave one ID to 17/31 disjoint pairs, the new one to 0/31.
+The running tracker also had 0/159 on a model-driven approach. These are repeated sightings, not 159 objects.
+On 144 sparse recorded views replayed 75 times, median tracker CPU per frame (per-route averages) was 4.8 vs
+6.6 microseconds. Distinct IDs do not guarantee stable identity: chairs 1 and 2 became 7 and 2 across a turn.
+
+The three model-driven approaches ended 0.67/0.69/0.68 m from the nearest chair's edge, without contact.
+All picked the slightly farther chair in the initial view (matched against the judge's dock pixels offline);
+the last two spoke a description but hit the 75 s budget. No improvement in nearest-object navigation established.
+A separate turn-and-count request issued no motion calls and spoke an unfinished answer; the two 912-token
+responses exhausted their generation budgets. The stationary control had 0/225 shared IDs in either shadow.
+Pictures, transcripts and reports: `runs/watched-1120/{before,after,distinct,turn,replay}`.
+
+#### Wide-angle handoff (`runs/handoff-depth-01`)
+
+- On a 21 s turn/drive/turn, six of 58 frames that placed an object from depth used another exposure. In one,
+  the robot had turned 8.9 degrees: a chair centre shifted 40 px in a box only 72 px wide. Object ranging now
+  matches camera and capture stamp, waiting at most 150 ms before using the existing floor/scan path. In the
+  20 s repeat 77/101 processed frames had matching depth; none used another exposure. Both drives had zero bumps.
+- At the dock the farther chair spanned 181 px and the nearer one 88 px, but their **angles** were 16.6 and
+  15.8 degrees. The pinhole correction already accounts for this. Across 23 off-axis chair sightings (>48 degrees),
+  median absolute centre-range error was 0.23 m with learned depth vs 0.03 m substituting judge depth offline.
+- YOLOE sometimes boxed two legs of **one** chair separately. On 16 re-rendered views, cylindrical input removed
+  both duplicate detections but missed a chair on another frame. On eight other saved plant views it found
+  four genuine instances instead of three but returned three unmatched boxes instead of one. No remap shipped.
+  The N3 model run stopped 0.67 m from the nearest edge with no bump; proximity still does not establish identity.
+- Remapping input to the same depth network also had mixed results. On 42 saved object masks the median
+  per-mask surface-range error fell from 0.46 to 0.30 m, but on 23 masks from this turn it rose from 0.14 to
+  0.15 m. This was an offline surface check, not a test of obstacle clearance; the depth input is unchanged.
+
+#### Grounding follow-up (`runs/shape-handoff-01`)
+
+- The dock chairs' real centre ranges were 1.81 and 1.95 m. Learned depth alone gave 1.68 and 1.71 m.
+  Combining a compatible mask-foot range with depth gave 1.79 and 1.91 m on the same boxes. This leaves an
+  elevated outline alone if floor contact is implausible; it does not correct every monocular depth error.
+- On two saved turns, 7 of 155 judge-identified chair sightings had an ID other than the original ID for that
+  chair. Treating a narrow detected part as part of an established footprint reduced that to 0/155. The separate
+  live 21 s turn had 0/65 and no contact. These are repeat observations of **two** chairs, not independent objects.
+- Starting turned 30 degrees put a whole chair in front and the other chair's leg in a rear camera. Four
+  replays (both camera orders, matched depth or intermittent depth) collapsed them to one ID without the
+  sightline check and kept two with it. A later live drive also exposed a *late* merge: keeping the distinction
+  only for the current frame is insufficient. The shared tracker now retains the cross-camera separation.
+- The model can choose the wrong ID from numerically correct ranges, treat "the nearest chair" as an object
+  class, or drive by a guessed direction without looking up either object. Ranked results and marked images
+  cover visible candidates; visual-name validation refuses distance comparisons rather than moving. In two
+  initial dock runs it chose the correct physical instance and stopped 0.59/0.57 m from its edge. A later
+  dock repeat instead drove in a guessed direction and timed out. The proximity score alone cannot test this.
+- Final stock N3 at the dock and at -30 degrees: ID 2 matched the nearest physical instance (38) on departure
+  in the rear-right camera **and** on arrival in front. Final box IoUs were 0.97 and 0.95; endpoints were 0.57
+  and 0.74 m from its edge with zero bumps. Both replies nevertheless implied the *user* had moved, too.
+  These two runs verify this handoff, not model reliability across homes.
+- Hardware sanity check, **not a lidar benchmark**: sampling the judge's horizontal pixel row from each
+  camera origin at one-degree intervals intersected a chair in all 22 visible chair/view pairs across 16 saved
+  views. Only 2 and 3 beams hit the respective chairs at the dock. This says nothing about reflectance, noise,
+  a different mounting height, or obstacles outside that plane.
+
+#### Visible object described by colour (`runs/blue-grounding-SuyM`)
+
+An interactive request for a blue bicycle activated YOLOE for "bicycle", but the tracker stored "bike" and its
+box centre read brown. Replaying the dock views with YOLOE's masks gave black, not blue: tyres and background
+outnumber the frame pixels. A lookup now matches the tracker's canonical name and asks for the colour of the crop
+without suggesting the requested answer. It caches that answer on the track, not on every camera frame.
+In a separate apartment run, "What do you see?" got one reply, then "Go to the blue bicycle" took one drive,
+no search and no bumps. The chosen box matched instance 4 (IoU 0.98); the endpoint was 0.36 m from its edge,
+3.03 m from the other bike. This tests one viewpoint; it does not establish general colour recognition accuracy.
+
+#### When a navigation target disappears (interactive session `173110-YTOF`)
+
+`go_to("tv 25")` kept driving to a fixed point even after the track disappeared. Nav2's logged start and goal
+were 7.23 m apart. Replanning those points on the saved inflated map gave a 13.12 m route; 35 of 101 samples
+on the straight segment were blocked. That explains a detour, not why the robot believed a TV was there.
+The later lookup of ID 25 explicitly reported clear views without the object. The session did not keep its original
+crop, so neither an initial false label nor a bad map position can be ruled out. Nav2 eventually reported failure.
+
+In `guarded-final-IWne` a controlled verifier withdrawal after 0.15 m of an actual apartment drive cancelled the
+accepted Nav2 goal, with no bump. The estimated pose moved another 0.10 m in the next 0.75 simulated seconds:
+goal cancellation is not an instantaneous physical stop. In `view-goal-Q5jq` the right-hand chair's actual crop
+and the rear-right image with both badges reached the model. Despite that, the model substituted a normal approach
+for a request to go underneath. The bounded TV repeat also failed to find the real TV. These results validate
+the evidence and cancellation paths, **not** safe under-furniture navigation or reliable recognition of screens.
 
 ## Hazards found
 

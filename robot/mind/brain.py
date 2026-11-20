@@ -29,6 +29,10 @@ class Reply:
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
     tool_calls: list[ToolCall] = field(default_factory=list)
 
+    @property
+    def finish_reason(self) -> str | None:
+        return self.raw["choices"][0].get("finish_reason") if self.raw else None
+
 
 # The model card's sampling for LFM3-VL-2B (with temperature 0.1); llama-server's own defaults differ (top_p 0.95,
 # min_p 0.05, no repeat penalty).

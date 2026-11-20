@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import replace
+
+import numpy as np
 import pytest
 
 from robot.agent.agent import Agent
+from robot.agent.api import NotFound, Preempted
 from robot.agent.tools import Tools
 from robot.eval.suite import living_room, office
 from robot.mind.brain import Reply, ToolCall
+from robot.perception.camera import data_url
 from robot.sim.world import Scene, SimRobot
 
 
@@ -18,7 +24,7 @@ class Scripted:
         self.replies, self.seen, self.thinks = list(replies), [], []
 
     def chat(self, messages, tools, think=0, **_):  # noqa: ANN001, ANN003, ANN201
-        self.seen.append([dict(m) for m in messages])
+        self.seen.append(deepcopy(messages))  # the live context later trims older images in place
         self.thinks.append(think)
         return self.replies.pop(0)
 
@@ -43,8 +49,32 @@ def test_a_result_comes_back_and_a_plain_reply_ends_the_task_after_one_check():
     assert tool_results(brain.seen[1])[0].startswith("Turned 90 degrees left.\nThis request so far: turned 90 degrees left")
     assert "Before you finish" in brain.seen[2][-1]["content"]  # the stop hook asked once
     assert [t for _, t in sim.trace.said] == ["Turned left."]
+    assert [line for line in record.lines() if line.startswith("reply:")] == ['reply: "Turned left."']
     first = brain.seen[0][1]["content"]
     assert any(p.get("type") == "image_url" for p in first)  # the model sees the camera, not only a list
+
+
+def test_a_camera_answer_is_delivered_once_and_only_that_answer_is_remembered():
+    sim = SimRobot(living_room())
+    brain = Scripted(say("A brown chair."), say("You're welcome."))
+    agent = Agent(brain)
+    agent.do("What do you see?", sim)
+    agent.do("Thanks!", sim)
+    assert len(brain.seen) == 2 and [text for _, text in sim.trace.said] == ["A brown chair.", "You're welcome."]
+    history = brain.seen[1][1]["content"][0]["text"]
+    assert history.count("A brown chair.") == 1
+
+
+def test_stopping_during_search_keeps_the_interrupted_call_in_the_trace(monkeypatch):
+    sim = SimRobot(living_room())
+
+    def stopped(*args, **kwargs):
+        raise Preempted("stopped")
+
+    monkeypatch.setattr(sim, "search", stopped)
+    record = Agent(Scripted(call("search", what="bag"))).do("Find the bag.", sim)
+    assert record.outcome == "preempted"
+    assert record.steps[-1].calls == [("search", {"what": "bag"}, "Interrupted before returning a result.", False)]
 
 
 def test_reasoning_only_after_news_skips_the_turns_after_calls_that_worked():
@@ -65,12 +95,19 @@ def test_with_no_cameras_the_model_gets_the_list_and_pictures_only_when_it_looks
     assert any(p.get("type") == "image_url" for p in brain.seen[1][-1]["content"])  # after look
 
 
-def test_an_ambiguous_target_is_explained_and_nothing_moves():
+@pytest.mark.parametrize("marked", [[], ["rear_right_camera"], ["front_camera", "rear_right_camera"]])
+def test_an_ambiguous_target_is_explained_and_nothing_moves(marked):
     sim = SimRobot(office())
+    sim.marked_cameras = lambda ids: marked if len(ids) >= 2 else []
     start = (sim.x, sim.y)
     brain = Scripted(call("go_to", target="box"), say("Which box?"), say("Which box?"))
     Agent(brain).do("Go to the box.", sim)
     result = tool_results(brain.seen[1])[0]
+    if marked:
+        assert [p["text"] for p in result if p.get("text", "").endswith("camera:")] == [
+            cam.removesuffix("_camera").replace("_", "-") + " camera:" for cam in marked]
+        assert sum(p["type"] == "image_url" for p in result) == len(marked)
+        result = result[0]["text"]
     assert result.startswith("Error:") and "could be any of" in result and "Use the id" in result
     assert (sim.x, sim.y) == start
 
@@ -81,6 +118,94 @@ def test_the_same_call_again_and_again_is_refused_with_a_note():
     brain = Scripted(turn, turn, turn, say("ok"), say("ok"))
     Agent(brain).do("Turn left.", sim)
     assert tool_results(brain.seen[3])[-1].startswith("Not run: you made this exact call 2 times")
+
+
+def test_repeated_look_samples_the_requested_camera_again_while_stationary(monkeypatch):
+    sim = SimRobot(living_room())
+    reads = []
+
+    def frame(camera, width, height):
+        reads.append(camera)
+        return np.full((20, 20, 3), len(reads), dtype=np.uint8)
+
+    monkeypatch.setattr(sim, "camera_view", frame)
+    brain = Scripted(*(call("look", direction=d) for d in ("rear right", "rear_left", "front", "front", "front")),
+                     say("Done."))
+    Agent(brain, review=False).do("Check the cameras.", sim)
+    assert reads[3:] == ["rear_right_camera", "rear_left_camera", "front_camera", "front_camera", "front_camera"]
+    urls = [tool_results(turn)[-1][-1]["image_url"]["url"] for turn in brain.seen[1:]]
+    assert len(set(urls)) == 5 and (sim.x, sim.y) == (0.0, 0.0)
+
+
+def test_search_returns_its_crop_before_a_queued_drive(monkeypatch):
+    sim = SimRobot(living_room())
+    seen, = sim.detect("chair")
+    crop = np.full((18, 15, 3), 67, dtype=np.uint8)
+    monkeypatch.setattr(sim, "target_crop", lambda i: crop if i == seen.id else None, raising=False)
+    monkeypatch.setattr(sim, "marked_cameras", lambda ids: [], raising=False)  # no badge in the latest frames
+    both = Reply("", tool_calls=[ToolCall("find", "search", {"what": "chair"}),
+                                 ToolCall("drive", "go_to", {"target": str(seen.id)})])
+    brain = Scripted(both, say("I see it."))
+    Agent(brain, cameras="none", review=False).do("Find the chair.", sim)
+    find, drive = tool_results(brain.seen[1])
+    assert "candidate" in find[0]["text"] and f"ID {seen.id}" in find[-2]["text"]
+    assert find[-1]["image_url"]["url"] == data_url(crop) and "Not run" in drive
+    assert not any(e.name == "go_to" for e in sim.trace.events)
+
+
+def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
+    sim = SimRobot(living_room())
+    cut = call("move", metres=1)
+    cut.raw = {"choices": [{"finish_reason": "length"}]}
+    record = Agent(Scripted(cut)).do("Drive a metre.", sim)
+    assert record.outcome == "failed" and "cut off" in sim.trace.said[-1][1]
+    assert not any(e.name == "move" for e in sim.trace.events)
+
+
+def test_a_side_and_an_edge_gap_compose_without_losing_the_target_id():
+    sim = SimRobot(living_room())
+    chair, = sim.detect("chair")
+    tools = Tools(sim)
+    before = sim.pose()
+    ambiguous, ok = tools.run("go_to", {"target": "right chair"})
+    assert not ok and "viewpoint" in ambiguous and sim.pose() == before
+    refused, ok = tools.run("go_to_side", {"target": str(chair.id), "side": "under"})
+    assert not ok and "clearance" in refused and sim.pose() == before
+    endpoint = sim.spot(chair, "behind", distance=0.75)
+    _, ok = tools.run("go_to_side", {"target": str(chair.id), "side": "behind", "distance": 0.75})
+    assert ok and np.linalg.norm(np.asarray(endpoint) - (sim.x, sim.y)) < 0.2
+    dispatch, = [e for e in sim.trace.events if e.name == "go_to"]
+    assert dispatch.args["target"].id == chair.id
+
+
+def test_a_distance_comparison_never_becomes_a_detector_label_or_starts_a_drive():
+    sim = SimRobot(office())
+    start, words = sim.pose(), sim.vocabulary.copy()
+    tools = Tools(sim)
+    for name, args in (("go_to", {"target": "the nearest box"}), ("search", {"what": "furthest bag", "near": "start"}),
+                       ("wait", {"seconds": 1, "until": "closest person"})):
+        result, ok = tools.run(name, args)
+        assert not ok and "just the object name" in result
+        assert sim.pose() == start and sim.vocabulary == words
+
+
+@pytest.mark.parametrize("gone", [True, False])
+def test_a_remembered_or_lost_id_does_not_confirm_arrival(monkeypatch, gone):
+    sim = SimRobot(living_room())
+    target, = sim.detect("chair")
+    lookup = sim.obj
+
+    def observed(i):
+        if not any(e.name == "face" for e in sim.trace.events):
+            return lookup(i)
+        if gone:
+            raise NotFound("no longer in view")
+        return replace(target, last_seen=4.0)
+
+    monkeypatch.setattr(sim, "obj", observed)
+    tools = Tools(sim)
+    result, ok = tools.run("go_to", {"target": str(target.id)})
+    assert not ok and "Target not confirmed" in result and tools.looked == ["front_camera"]
 
 
 def test_the_next_request_sees_what_the_last_one_did_and_where_it_began():

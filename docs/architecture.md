@@ -88,6 +88,8 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
    run without the model. There is no fixed household list: in the apartment one added about 1.4 wrong names a
    picture, and big furniture was found under 8% of the time from 22 cm anyway. In the simulator YOLOE and depth run on
    the Windows GPU (`tools/vision_server.py`, DirectML: 75 and 82 ms a frame); on the board, on its NPU.
+   The detector and depth node reuse their HTTP connections, but each camera upload buffer closes as soon as its
+   reply is read. The connection does not own a history of sent pixels.
 1. **Metric depth from the floor (`depth.py`, the depth node in `robot/ros/perceive.py`):**
    - `Depth Anything V2 small` (ONNX) estimates relative inverse depth for each camera's newest frame.
    - `fit_to_floor()` turns it into metres: the camera's height and the IMU's tilt give the floor's true distance at
@@ -101,6 +103,12 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
      returns on 17% of open beams (true depth: 1%). The monocular depth, not the method, is the limit
      (docs/simulation_3d.md).
 3. **3D Object & Moving Person Tracking (`locate.py`, `tracker.py`):**
+   - Object depth must match the RGB camera and exposure. A complete outline whose floor-contact range agrees
+     with depth refines its centre; an implausible or missing contact does not.
+   - Disjoint whole objects in one image keep separate IDs even when their map estimates overlap. A much smaller
+     piece within a single recently observed footprint can keep the parent's ID without shrinking it or taking
+     another object's match. At a camera seam, range error along a clipped sightline does not explain a second
+     object's centre lying sideways outside both footprints. The model sees one badge per track per camera.
    - Extracts oriented 3D bounding dimensions (`width`, `depth_extent`, `orientation_yaw`) from segmentation masks + depth clusters.
    - Tracks 2D map velocity $(v_x, v_y)$ via $\alpha$-$\beta$ filtering so `Track.predict(dt)` supports dynamic pursuit and social hallway yielding.
    - Associates people across cameras using clothing appearance histograms + `MobileCLIP2` visual vectors + `WeSpeaker` voiceprint IDs.
@@ -113,6 +121,7 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
 6. **Rooms named by the model (`RealRobot._ask_rooms`, `rooms.py`):** every few seconds, until it has five answers
    for the room it stands in, the model is asked what kind of room the front picture shows; a tour's place names win.
 7. **Visual Grounding Overlay (`overlay.py`):** the tracker's ids are drawn on the pictures the agent gets.
+   On an ambiguous target, the tool still refuses to move and requests the recent camera view with the most distinct candidate badges. If none are visible, it returns the choices in text alone.
 
 ---
 
@@ -143,13 +152,15 @@ SQLite stores structured spatial/state records alongside normalized float32 embe
 An agentic loop, as in coding agents, around the robot's vision-language model. The design and the reasons for it are in [docs/ideas/sprocket-harness.md](ideas/sprocket-harness.md).
 
 1. **One task is one running conversation** (`robot/agent/agent.py`). The first message holds what the robot senses — room, battery, the tracked objects (id, what, how far, which way: people and the things tools have looked for) and the three cameras' pictures with ids drawn on — then the user's words. Each model turn may speak, call tools, or both; every tool result goes back to the model before its next turn.
-2. **Native tool calls** (`Brain.chat`). Tools are JSON function schemas; llama-server renders them with the model's own chat template (`LFM3-VL` uses the `qwen3_coder` XML style) and parses the calls back into OpenAI-style `tool_calls`. Several calls in one turn run in order; after a failure the rest are skipped and say so.
+2. **Native tool calls** (`Brain.chat`). Tools are JSON function schemas; llama-server uses the model's chat template. Batched calls run in order. A failure or a tool returning visual evidence skips the rest of that batch: the model must see the result before it chooses its next action. A reply the server marks incomplete at its output limit dispatches no calls.
 3. **Tools** (`robot/agent/tools.py`): `say`, `go_to`, `go_toward`, `go_to_side`, `stop_near`, `move`, `turn`, `drive`, `orbit`, `follow`, `face`, `keep_facing`, `search`, `look`, `look_back`, `wait`, `ask`, `remember`, `recall`, `todo`, `todo_done`. Tools that find, follow or drive to a thing pass its name to YOLOE, which then looks for that word on all three cameras while the tool's own loop runs; `go_toward(direction, metres)` is for a place that is not one thing, with Nav2 finding the way; `search(what, area, near)` asks the model at each stop which camera's way looks likeliest; `look_back(seconds)` shows the front camera's last pictures. A different behaviour is a different tool, not an optional argument: the 2B model filled optional arguments on almost every call (`side="front"`, `stop_distance=2` for "come here"). Targets are an object id, `user`, a room or saved place, or a description. Every call is checked first: an unknown tool, a missing or out-of-range argument, or a target that matches nothing or several things returns an error saying what to do instead (`'box' could be any of: box 1 (0.8 m front-left); box 2 … Use the id, or ask the user which one`). Nothing is silently changed.
-4. **Seeing**: all three cameras come with each request (`cameras="front"` sends only the front one; the 2B model, given only the front picture, searched for a table that was behind it). `look(direction)` brings the front, rear-left, rear-right, behind or all-around pictures into the next message; looking again without moving is answered with "you already have those pictures". `see_after_moves=True` also sends fresh pictures after every move (measured against look-only; see the idea doc). In the 2D simulator the cameras are drawn in perspective (`SimRobot.camera_view`); in the 3D apartment and on the robot they are the real frames (`RealRobot.camera_view`).
+4. **Seeing**: all three camera snapshots come with each request by default. `look(direction, what)` samples a camera again without driving, even while stationary; the optional visual name activates detection. `rear-left` and `rear-right` name the cameras directly. Marks belong to the same exposure as their pixels. A successful 3D search returns the selected track's saved crop when available, labelled as recorded evidence, and recent marked views where available. The model judges the image; a detector badge is not proof of identity.
 5. **To-do list**: for a several-part request the model writes `todo([...])` and ticks steps off with `todo_done(n)`; the list is shown back with every update and on the live page.
 6. **Ending a task**: a reply with no tool call is spoken and ends the task. The first time the model tries to finish after acting, a stop hook shows it the request, what it did and any open to-do steps, and asks it to check; its next plain reply ends the task.
-7. **Loops**: the same call with the same arguments a third time in a row is not run; the model is told to do something different or finish. Updates during a task restate the request and what is done so far, and say they are not a new request.
+7. **Loops**: a third identical call in a row is refused, except for `look`: objects and people can move while the robot is still. The overall turn budget still applies.
 8. **Real time**: `stop` and `wait` act at once without the model. Anything else the user says while a task runs interrupts the current step and joins the conversation (`Agent.interject`), so the model can change course. Posture and chime come from events (listening at the start, uh-oh on a failure, happy on success), not from the model.
 9. **Between tasks** the next request is one user turn that tells the last one step by step (each call and its result, and the reply) and older ones as one line each with their actions; the last task is not replayed as chat turns (the model card advises against multi-turn conversation). The robot keeps the place "where you were before".
 10. **Within a task** it stays one tool-use turn, as LFM3-VL is trained: pictures from `look` come back inside the tool result, so the chat template keeps the task's reasoning (a new user message would drop it). Only the user speaking mid-task adds a user turn. Sampling follows the model card (temperature 0.1, top_k 50, top_p 1, min_p 0, repeat penalty 1.1).
-11. **Thinking**: before each turn the model may reason, capped per request (`thinking_budget_tokens`): `off`, `low` (128 tokens), `medium` (512, the default) or `high` (2048). Its reasoning stays with its tool calls within a task and shows on the live page as grey "thought:" lines.
+11. **Thinking**: generation has a per-turn reasoning budget (`off`, `low`: 128 tokens, `medium`: 512, `high`: 2048). The dashboard shows complete, expandable model turns rather than 220-character fragments. The next turn after a tool result is a new generation in the same task, not a new user request.
+
+For an explicit side and gap, use `go_to_side(target, side, distance)`; `behind` means the far side from the current approach, not the object's intrinsic back. Plain `go_to(target)` stays narrow: in a 3D control with optional fields it invented `side="right"` for "Go to the blue bicycle." Navigation rechecks the selected object's ID during the drive and cancels on withdrawal, relabelling or a move outside the original footprint. An ordinary occlusion is not a withdrawal. Parking under furniture is unsupported: the current sensors cannot certify the entire swept body's clearance.

@@ -80,7 +80,8 @@ def show_cameras(live: Live, holder: Holder) -> None:
         if holder.sim is None or name not in CAMERAS:
             return None
         view = getattr(holder.sim, "live_view", holder.sim.camera_view)  # the newest frame, where the robot has one
-        return encode_png(view(name))
+        rgb = view(name)
+        return encode_png(rgb) if rgb is not None else None
 
     live.camera = frame
     live.update(cameras=list(CAMERAS))
@@ -123,7 +124,8 @@ def drive(live: Live, agent: Agent, holder: Holder, new_scene: Any = None, *,
             live.update(status="failed", problems=[str(exc)])
             return
         live.show_world(holder.sim)
-        live.update(history=(live.state.history + [{"instruction": text, "outcome": record.outcome}])[-12:])
+        entry = {"instruction": text, "outcome": record.outcome, "steps": record.lines()}
+        live.update(history=(live.state.history + [entry])[-12:])
         print(f"{record.outcome:<9} {text}", flush=True)
 
     while stop_event is None or not stop_event.is_set():
@@ -156,6 +158,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", help="run this suite case and keep the page open")
     parser.add_argument("--scene", choices=SCENES, default="3D apartment")
+    parser.add_argument("--host", default="127.0.0.1", help="dashboard bind address; use 0.0.0.0 on a trusted LAN")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--brain", default="http://127.0.0.1:8081", help="llama-server URL")
     parser.add_argument("--cameras", choices=("front", "all"), default="all")
@@ -163,11 +166,11 @@ def main() -> None:
     args = parser.parse_args()
 
     live = Live()
-    live.serve(args.port)
+    live.serve(args.port, host=args.host)
     from robot.interfaces.voice import attach
 
     attach(live)
-    print(f"Open http://127.0.0.1:{args.port}", flush=True)
+    print(f"Dashboard listening on {args.host}:{args.port}", flush=True)
     brain = Brain(args.brain)
     if not brain.healthy():
         print(f"llama-server is not answering on {args.brain}; start it first (tools/linux/brain.sh)", flush=True)

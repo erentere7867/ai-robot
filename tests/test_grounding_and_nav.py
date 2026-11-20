@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import Future
+from threading import Lock
+from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 
-from robot.agent.api import NotFound, Object, PathBlocked, Pose
+from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted, TargetLost
 from robot.interfaces.live import PAGE
+from robot.perception.tracker import Track, Tracker
+from robot.ros.perceive import Perception
+from robot.ros.real import RealRobot
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
 
@@ -87,6 +94,26 @@ def test_synonym_fallback_when_exact_match_absent():
     assert sim3._named("mug").label == "cup"
 
 
+def test_colour_request_uses_the_named_track_crop_not_the_background():
+    real = object.__new__(RealRobot)
+    tracker = Tracker()
+    track = Track(7, "bike", 1.1, -0.5, 0.3, 0, 0, hits=4)
+    tracker.tracks[track.id] = track
+    thing = Thing("bike", track.x, track.y, color="brown", id=7)
+    real.perception = SimpleNamespace(lock=Lock(), tracker=tracker, crops={7: np.zeros((36, 36, 3), np.uint8)})
+    questions = []
+
+    def decide(messages, choices):
+        questions.append(messages[0]["content"][-1]["text"])
+        return {w: float(w == "blue") for w in choices}
+
+    real.brain = SimpleNamespace(decide=decide)
+    assert not real._matching("red bicycle", [thing])
+    assert real._matching("the blue bicycle", [thing]) == [thing]
+    assert track.color == thing.color == "blue"
+    assert len(questions) == 1 and "red" not in questions[0] and "blue" not in questions[0]
+
+
 def test_exact_match_prioritized_over_synonyms():
     # Both table and desk exist: asking for table must yield table
     desk = Thing("desk", 2.0, 0.0, radius=0.4, id=1)
@@ -154,6 +181,41 @@ def test_ros_robot_goal_point_heading_faces_object():
     # Robot must arrive facing the target object (3.0, 0.0) from (end_x, end_y)
     expected_yaw = math.atan2(0.0 - end_y, 3.0 - end_x)
     assert abs(arrival_yaw - expected_yaw) < 1e-3
+
+
+@pytest.mark.parametrize("when", ["before acceptance", "while driving"])
+def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
+    robot = MockRosRobot(_make_scene([Thing("bag", 1.5, 0.0)]))
+    target, = robot.detect("bag")
+    sent, result = Future(), Future()
+    cancelled, velocities = [], []
+
+    def cancel():
+        cancelled.append(True)
+        result.set_result(SimpleNamespace(status=5))
+
+    handle = SimpleNamespace(accepted=True, cancel_goal_async=cancel, get_result_async=lambda: result)
+    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True,
+                                                        send_goal_async=lambda goal: sent)}
+    robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
+    robot._publish = lambda v, w: velocities.append((v, w))
+
+    def step(v, w):
+        if when == "before acceptance":
+            raise Preempted("stop")
+        robot.things.pop(target.id)  # perception withdrew the ID after Nav2 accepted it
+
+    robot._step = step
+    if when == "while driving":
+        sent.set_result(handle)
+        with pytest.raises(TargetLost, match="stopped approaching"):
+            RosRobot._act(robot, "navigate_to_pose", watch=target)
+        assert velocities[-1] == (0.0, 0.0) and robot._goal is None
+    else:
+        with pytest.raises(Preempted):
+            RosRobot._act(robot, "navigate_to_pose", watch=target)
+        sent.set_result(handle)
+    assert cancelled == [True]
 
 
 def test_ros_robot_go_arrival_tolerance_absorbs_nav2_abort():
@@ -423,11 +485,39 @@ def test_wheels_that_do_not_follow_the_drive_put_the_touched_spot_in_the_scan():
     assert np.all(np.isnan(scan._contact_part(t + 200.0, (0.0, 0.0, 0.0))[2]))  # forgotten after CONTACT_KEEP
 
 
+def test_camera_for_ambiguous_ids_uses_distinct_visible_marks_not_old_or_rejected_ones():
+    real = object.__new__(RealRobot)
+    real._now = lambda: 10.0
+    tracks = {i: SimpleNamespace(present=True, rejected=i == 3) for i in (1, 2, 3)}
+    real.perception = SimpleNamespace(
+        lock=Lock(), tracker=SimpleNamespace(tracks=tracks),
+        detected={"front": (9.9, None), "left": (9.5, None), "right": (6.0, None)},
+        boxes={"front": [((), 1), ((), 1), ((), 3)], "left": [((), 1), ((), 2)], "right": [((), 4)]},
+    )
+    assert real.marked_cameras({1, 2, 3}) == ["left"]
+    tracks[4] = SimpleNamespace(present=True, rejected=False)
+    assert real.marked_cameras({3, 4}) == []
+    real.perception.detected["right"] = (10.0, None)
+    assert real.marked_cameras({1, 2, 4}) == ["right", "left"]
+
+
+def test_a_stale_detection_cannot_put_its_badge_on_a_new_exposure():
+    p = object.__new__(Perception)
+    p.lock, p.tracker = Lock(), Tracker()
+    cam = "front_camera"
+    p.tracker.tracks[1] = Track(1, "bag", 1, 0, 0.2, 0, 0)
+    current = np.full((90, 160, 3), 73, dtype=np.uint8)
+    p.detected = {cam: (2.0, np.zeros_like(current))}
+    p.frames = {cam: (SimpleNamespace(sec=8, nanosec=0), current)}
+    p.boxes = {cam: [((10, 12, 45, 70), 1)]}
+    assert np.array_equal(p.render_annotated_view(cam, 160, 90, 7.0), current)
+    assert p.render_annotated_view(cam, 160, 90, 9.0) is None
+
+
 def test_real_robot_wall_bounds_rejection():
     from unittest.mock import MagicMock
 
     from robot.perception.tracker import Track
-    from robot.ros.real import RealRobot
 
     # Scene 10x10 -> bounds are +/- 4.88 (width/2 - 0.12)
     scene = _make_scene()
@@ -541,8 +631,3 @@ def test_real_robot_outdoor_scene_does_not_reject_distant_tracks():
 
     # Distant object should NOT be rejected in an outdoor scene
     assert 1 in real.things
-
-
-
-
-

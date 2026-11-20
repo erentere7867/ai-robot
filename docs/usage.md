@@ -59,6 +59,10 @@ powershell -ExecutionPolicy Bypass -File tools\demo.ps1           # or both of t
 powershell -ExecutionPolicy Bypass -File tools\brain.ps1 -Stop    # stop the model; tools\win\vision.ps1 -Stop for the other
 ```
 
+To control the simulator from a second device on a trusted LAN, pass `--host 0.0.0.0` to `tools\demo.ps1`
+or `python -m robot.interfaces.demo`. Open `http://<PC-LAN-IP>:8765` on that device, not `0.0.0.0`.
+The dashboard has no authentication. Keep it off public networks; without the flag it listens only on loopback.
+
 ## Tests and lint (in WSL, from the repo)
 
 How to test a change, and how to set up a plain Linux machine for it: [testing.md](testing.md).
