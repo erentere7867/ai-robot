@@ -272,6 +272,18 @@ def test_an_id_merged_into_another_still_finds_the_thing():
     assert tr.current(kept + 1) == kept and tr.current(kept) == kept
 
 
+def test_separate_boxes_stay_separate_across_a_duplicate_merge_and_an_empty_frame():
+    tr = Tracker()
+    # The wide proposal overlaps both; the other two cannot be duplicate boxes in this picture.
+    ds = [Detection("bag", x, 1.0, 0.3, camera="front", box=box) for x, box in (
+        (1.0, (0, 0, 100, 60)), (1.05, (0, 0, 40, 60)), (1.2, (65, 10, 95, 60)))]
+    first, duplicate, other = [t.id for _, t in tr.update(ds, 0.0)]
+    assert first == duplicate == tr.current(2) and other != first
+    tr.update([], 0.1)
+    assert set(tr.tracks) == {first, other}
+    assert tr.tracks[first].apart == {other} and tr.tracks[other].apart == {first}
+
+
 def test_a_standing_person_stops_jumping_and_a_walking_one_is_followed():
     tr = Tracker()
     for k in range(30):  # standing still; sightings scatter by 0.4 m, ten a second

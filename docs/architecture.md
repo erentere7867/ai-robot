@@ -103,6 +103,7 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
      returns on 17% of open beams (true depth: 1%). The monocular depth, not the method, is the limit
      (docs/simulation_3d.md).
 3. **3D Object & Moving Person Tracking (`locate.py`, `tracker.py`):**
+   - Tracks seen in disjoint boxes in the same frame stay distinct during that tracker session, even if their map estimates overlap. Merging duplicate tracks carries that separation to the surviving ID.
    - Extracts oriented 3D bounding dimensions (`width`, `depth_extent`, `orientation_yaw`) from segmentation masks + depth clusters.
    - Tracks 2D map velocity $(v_x, v_y)$ via $\alpha$-$\beta$ filtering so `Track.predict(dt)` supports dynamic pursuit and social hallway yielding.
    - Associates people across cameras using clothing appearance histograms + `MobileCLIP2` visual vectors + `WeSpeaker` voiceprint IDs.
@@ -115,6 +116,7 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
 6. **Rooms named by the model (`RealRobot._ask_rooms`, `rooms.py`):** every few seconds, until it has five answers
    for the room it stands in, the model is asked what kind of room the front picture shows; a tour's place names win.
 7. **Visual Grounding Overlay (`overlay.py`):** the tracker's ids are drawn on the pictures the agent gets.
+   On an ambiguous target, the tool still refuses to move and requests the recent camera view with the most distinct candidate badges. If none are visible, it returns the choices in text alone.
 
 ---
 

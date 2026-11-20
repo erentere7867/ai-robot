@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import Any
 
 import numpy as np
@@ -65,6 +66,7 @@ class Detection:
     pose: Any = None  # HumanPose
     visual_vec: np.ndarray | None = None
     voice_id: str | None = None
+    box: tuple[int, int, int, int] | None = None
 
 
 @dataclass
@@ -99,6 +101,7 @@ class Track:
     visual_vec: np.ndarray | None = None
     voice_id: str | None = None
     cut: bool = False
+    apart: set[int] = field(default_factory=set, repr=False, compare=False)
 
     def predict(self, dt: float) -> tuple[float, float]:
         """Predicted 2D position (x, y) at dt seconds into the future."""
@@ -263,10 +266,21 @@ class Tracker:
         same size, whatever their names, closer than their sightings' scatter allows (a sighting a few tenths of a
         metre off while driving, under another name, started a twin that later sightings fed). Two person tracks merge
         when they stand within half a metre and look alike: one person seen from two cameras in different light."""
+        # Two chairs 0.65 m apart acquired one id even while both were boxed in the same picture.
+        # A noisy map range must not undo that image evidence on the next frame from another camera.
+        for (d, t), (e, o) in combinations(pairs, 2):
+            a, b = d.box, e.box
+            if a is not None and b is not None and d.camera == e.camera and t.person == o.person and (
+                a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
+            ):
+                t.apart.add(o.id)
+                o.apart.add(t.id)
         for t in sorted(self.tracks.values(), key=lambda t: t.id):
             if t.id not in self.tracks:
                 continue
             for o in [o for o in self.tracks.values() if o.id > t.id and o.person == t.person]:
+                if o.id in t.apart:
+                    continue
                 gap = math.dist((t.x, t.y), (o.x, o.y))
                 scatter = min(0.6, 2.5 * math.sqrt(t.var + o.var + max(t.noise, o.noise) ** 2))  # merging is surer to hurt
                 if t.person:  # closer than 0.35 m is one person, however the cameras saw their clothes
@@ -291,6 +305,10 @@ class Tracker:
                 t.colors.update(o.colors)
                 t.last_seen = max(t.last_seen, o.last_seen)
                 t.score = max(t.score, o.score)
+                for neighbor in o.apart:
+                    self.tracks[neighbor].apart.remove(o.id)
+                    self.tracks[neighbor].apart.add(t.id)
+                t.apart.update(o.apart)
                 del self.tracks[o.id]
                 self.became[o.id] = t.id
                 for k, (d, track) in enumerate(pairs):
@@ -352,5 +370,4 @@ def look(pixels: Any, bins: int = 8) -> Any:
     hue = np.where(high == r, (g - b) / span % 6, np.where(high == g, (b - r) / span + 2, (r - g) / span + 4)) / 6
     hist, _, _ = np.histogram2d(hue, saturation, bins=bins, range=((0, 1), (0, 1)))
     return hist / hist.sum()
-
 

@@ -206,6 +206,23 @@ bash tools/linux/stop.sh                             # stop everything a run lef
   depth: now 30%); the ToF sensors never reached Nav2, so what the cameras take for floor (the lowest 6 cm) was
   invisible to it. All three fixed in the robot's own software, not the simulator.
 
+### Watched approaches (20 November, apt_0)
+
+Asked to go to the nearest chair and describe the view, the model first got two new track IDs both listed as
+"1.7 m right", but no picture with those IDs. Returning one marked camera on ambiguity exposed the next fault:
+two separate chairs both labelled `1 CHAIR` after driving. In a nine-second drive replay, two shadow trackers
+received identical detections: the old tracker gave one ID to 17/31 disjoint pairs, the new one to 0/31.
+The running tracker also had 0/159 on a model-driven approach. These are repeated sightings, not 159 objects.
+On 144 sparse recorded views replayed 75 times, median tracker CPU per frame (per-route averages) was 4.8 vs
+6.6 microseconds. Distinct IDs do not guarantee stable identity: chairs 1 and 2 became 7 and 2 across a turn.
+
+The three model-driven approaches ended 0.67/0.69/0.68 m from the nearest chair's edge, without contact.
+All picked the slightly farther chair in the initial view (matched against the judge's dock pixels offline);
+the last two spoke a description but hit the 75 s budget. No improvement in nearest-object navigation established.
+A separate turn-and-count request issued no motion calls and spoke an unfinished answer; the two 912-token
+responses exhausted their generation budgets. The stationary control had 0/225 shared IDs in either shadow.
+Pictures, transcripts and reports: `runs/watched-1120/{before,after,distinct,turn,replay}`.
+
 ## Hazards found
 
 - **Under the stairs.** Exploring `apt_0`, the robot drove under the open staircase, whose underside slopes down

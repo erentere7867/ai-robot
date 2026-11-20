@@ -581,7 +581,7 @@ class Perception:
             ky, kx = rgb.shape[0] // depth.shape[0], rgb.shape[1] // depth.shape[1]
             depth = np.repeat(np.repeat(depth, ky, axis=0), kx, axis=1)
         scan, _ = taken_with(self.scans, t, 0.3)  # /scan from the depth node, near this frame's moment
-        detections, boxes, hows = [], {}, {}
+        detections, hows = [], {}
         for s in seen:
             x1, y1, x2, y2 = (int(v) for v in s.box)
             cut = x1 <= 4 or x2 >= rgb.shape[1] - 4
@@ -617,15 +617,14 @@ class Perception:
             detection = Detection(s.label, mx, my, place.radius, colour.name(core), s.score, name, cut, sigma,
                                   look(core) if is_person else None,
                                   width=place.width, depth_extent=place.depth_extent,
-                                  orientation_yaw=place.orientation_yaw, pose=human_pose)
+                                  orientation_yaw=place.orientation_yaw, pose=human_pose, box=(x1, y1, x2, y2))
             detections.append(detection)
-            boxes[id(detection)] = (x1, y1, x2, y2)
             hows[id(detection)] = place.how
         now = time.monotonic()
         with self.lock:
             pairs = self.tracker.update(detections, now)
             matched = {id(t) for _, t in pairs}
-            self.boxes[name] = [(boxes[id(det)], track.id) for det, track in pairs]
+            self.boxes[name] = [(det.box, track.id) for det, track in pairs]
             self.detected[name] = (t, rgb)
             self.sightings.extend((now, name, track.id, det.x, det.y, hows[id(det)], pose[0], pose[1], gap)
                                   for det, track in pairs)
@@ -634,8 +633,7 @@ class Perception:
                     track.pose = det.pose
                 if det.cut and track.id in self.crops:
                     continue  # a part of the thing makes a poor picture of it; keep the whole one
-                x1, y1, x2, y2 = boxes[id(det)]
-                self.crops[track.id] = _only(rgb, (x1, y1, x2, y2), [boxes[id(d)] for d, _ in pairs if d is not det])
+                self.crops[track.id] = _only(rgb, det.box, [d.box for d, _ in pairs if d is not det])
             watched = {canonical(w) for w in getattr(self.detector, "vocabulary", ())}
             for track in self.tracker.objects():  # negative evidence: viewed clearly, not seen, while looked for
                 if id(track) in matched or not track.present or track.person or canonical(track.label) not in watched:
