@@ -12,7 +12,19 @@ import threading
 import time
 from typing import Any
 
-from robot.agent.api import Object, PathBlocked, Point, Pose, Preempted, choose, wrap, xy
+from robot.agent.api import (
+    NotFound,
+    Object,
+    PathBlocked,
+    Point,
+    Pose,
+    Preempted,
+    SafetyStop,
+    TargetLost,
+    choose,
+    wrap,
+    xy,
+)
 from robot.interfaces.voice import chime as synth_chime
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
@@ -173,7 +185,15 @@ class RosRobot(SimRobot):
         self._publish(0.0, 0.0)
 
     # ---- Nav2 actions -----------------------------------------------------------------------------------------
-    def _act(self, name: str, **fields: Any) -> None:
+    def _check_goal(self, target: Object) -> None:
+        try:
+            current = self.obj(target.id)
+        except NotFound as exc:
+            raise TargetLost(f"stopped approaching {target.label} {target.id}: {exc}") from exc
+        if current.label != target.label or math.dist(current.position, target.position) > target.radius + current.radius:
+            raise TargetLost(f"stopped: the label or mapped footprint of {target.label} {target.id} changed")
+
+    def _act(self, name: str, *, watch: Object | None = None, **fields: Any) -> None:
         """Send one action goal and wait for it, keeping the trace and the stop checks running meanwhile."""
         client = self.actions[name]
         if not client.wait_for_server(timeout_sec=10.0):
@@ -186,18 +206,40 @@ class RosRobot(SimRobot):
         goal = self.kinds[name].Goal()
         for key, value in fields.items():
             setattr(goal, key, value)
+        if watch is not None:
+            self._check_goal(watch)
         sent = client.send_goal_async(goal)
-        while not sent.done():
-            self._step(0.0, 0.0)
+        try:
+            while not sent.done():
+                self._step(0.0, 0.0)
+        except BaseException:
+            def cancel_when_accepted(future: Any) -> None:
+                accepted = future.result()
+                if accepted and accepted.accepted:
+                    accepted.cancel_goal_async()
+            sent.add_done_callback(cancel_when_accepted)
+            raise
         handle = sent.result()
         if not handle.accepted:
             raise PathBlocked(f"{name} refused the goal")
         self._goal, result = handle, handle.get_result_async()
+        next_check = 0.0
         try:
             while not result.done():
                 self._step(0.0, 0.0)
-        except BaseException:
+                if watch is not None and time.monotonic() >= next_check:
+                    self._check_goal(watch)
+                    next_check = time.monotonic() + 0.2
+        except BaseException as exc:
             handle.cancel_goal_async()
+            self._publish(0.0, 0.0)
+            if isinstance(exc, TargetLost):
+                # Do not hand the model another motion turn while the old controller can still drive.
+                deadline = time.monotonic() + 2.0
+                while not result.done() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                if not result.done():
+                    raise SafetyStop("Nav2 did not confirm the lost target's goal had stopped") from exc
             raise
         finally:
             self._goal = None
@@ -205,7 +247,8 @@ class RosRobot(SimRobot):
         if status == CANCELED:
             raise Preempted("stopped")
         if status != DONE:
-            raise PathBlocked(f"{name} could not finish (status {status})")
+            detail = getattr(result.result().result, "error_msg", "") or f"status {status}"
+            raise PathBlocked(f"{name} could not finish: {detail}")
 
     def _pose_msg(self, x: float, y: float, yaw: float) -> Any:
         from geometry_msgs.msg import PoseStamped
@@ -261,15 +304,17 @@ class RosRobot(SimRobot):
             except Exception:
                 pass
 
-    def _go(self, target: Point | Pose | Object, distance: float) -> None:
+    def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
         """Nav2 drives there; when it gives up short of the target, so does the robot, and the caller hears why."""
+        watch = target if isinstance(target, Object) else None
+        target, distance = self._destination(target, distance, side)
         goal = xy(target)
         reach = (target.radius if isinstance(target, Object) else 0.0) + max(distance, 0.35)
         where = self._goal_point(target, distance)
         if where is not None:
             (gx, gy), yaw = where
             try:
-                self._act("navigate_to_pose", pose=self._pose_msg(gx, gy, yaw))
+                self._act("navigate_to_pose", watch=watch, pose=self._pose_msg(gx, gy, yaw))
             except PathBlocked:
                 self._sync()
                 if math.dist(goal, (self.x, self.y)) > reach + 0.35:
