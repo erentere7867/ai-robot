@@ -111,6 +111,13 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
     a, b = cam.bearing(x1), cam.bearing(x2)
     middle, span = (a + b) / 2, abs(a - b)  # the middle direction: on a wide lens the middle pixel is not
     axis = (math.cos(cam.yaw), math.sin(cam.yaw))
+    fu, fv = foot if foot is not None else ((x1 + x2) / 2, y2)
+    contact = cam.floor(fu, fv) if y2 < cam.height - 2 else None
+    if contact is not None:
+        floor_seen = math.hypot(contact[0] - cam.x, contact[1] - cam.y)
+        floor_radius = _radius(floor_seen, span)
+        behind = BODY if person else floor_radius
+        floor_x, floor_y = contact[0] + behind * axis[0], contact[1] + behind * axis[1]
     if depth is not None:
         r0, r1 = int(y1), max(int(y2), int(y1) + 1)
         c0, c1 = int(x1), max(int(x2), int(x1) + 1)
@@ -118,7 +125,8 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
         good = np.isfinite(patch) & (patch > 0.1) & (patch < 8.0)
         if good.any():
             down = (np.arange(r0, r0 + patch.shape[0], dtype=np.float32)[:, None] - cam.height / 2) / cam.focal
-            heights = cam.z - down * patch  # height above the floor of each pixel's point
+            # No return is inf. At the horizon, 0 * inf is undefined even though the pixel is later masked out.
+            heights = cam.z - down * np.where(good, patch, 0.0)
             if np.percentile(heights[good], 90) < 0.04:
                 return None  # all floor
             valid_mask = good & (heights > 0.03)
@@ -163,6 +171,14 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
                 rel = bearing_eff - cam.yaw
                 radius = _radius(seen, span)
                 reach = seen + (BODY if person else radius)
+                if contact is not None and foot is not None and not person and x1 > 4 and x2 < cam.width - 4:
+                    # A complete outline gives a second estimate if its foot is consistent with the floor.
+                    # Do not project a shelf (or an occluded object's apparent bottom) blindly onto the floor.
+                    floor_reach = math.hypot(floor_x - cam.x, floor_y - cam.y)
+                    if abs(floor_reach - reach) <= radius + SIGMA["floor"][0] + SIGMA["floor"][1] * reach:
+                        reach = (reach + floor_reach) / 2
+                        radius = (radius + floor_radius) / 2
+                        rel = middle - cam.yaw
                 x, y, _ = cam.to_base(reach * math.cos(rel), reach * math.sin(rel), 0.0)
 
                 # 3D extents (width, depth_extent) and orientation_yaw from depth cluster
@@ -192,13 +208,9 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
                 return _place(x, y, radius, "depth", seen, width, depth_extent, ori_yaw)
     # where it meets the floor, unless the box runs off the bottom of the picture: then the picture's edge is not the
     # thing's foot, and the estimate came out half the true range
-    fu, fv = foot if foot is not None else ((x1 + x2) / 2, y2)
-    contact = cam.floor(fu, fv) if y2 < cam.height - 2 else None
     if contact is None:
         return None
-    seen = math.hypot(contact[0] - cam.x, contact[1] - cam.y)
-    radius = _radius(seen, span)
-    behind = BODY if person else radius
+    seen, radius = floor_seen, floor_radius
     forward = (contact[0] - cam.x) * axis[0] + (contact[1] - cam.y) * axis[1]
     if scan is not None and cam.point(fu, y1, forward)[2] >= SCAN_Z:  # scan beam passes over low things
         lo, hi = (math.atan2(cam.y + seen * math.sin(e), cam.x + seen * math.cos(e)) for e in (a, b))
@@ -208,8 +220,7 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
             return _place(reach * math.cos(bearing), reach * math.sin(bearing), radius, "lidar", lidar[0],
                           2 * radius, behind * 2, bearing)
     # the lowest point of a thing's outline is its nearest along the lens axis: its middle lies further along the axis
-    return _place(contact[0] + behind * axis[0], contact[1] + behind * axis[1], radius, "floor", seen,
-                  2 * radius, behind * 2, middle)
+    return _place(floor_x, floor_y, radius, "floor", seen, 2 * radius, behind * 2, middle)
 
 
 def _radius(seen: float, span: float) -> float:

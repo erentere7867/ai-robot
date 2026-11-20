@@ -67,6 +67,7 @@ class Detection:
     visual_vec: np.ndarray | None = None
     voice_id: str | None = None
     box: tuple[int, int, int, int] | None = None
+    normal: tuple[float, float] | None = None  # unit normal to the camera's sightline in the map
 
 
 @dataclass
@@ -102,6 +103,8 @@ class Track:
     voice_id: str | None = None
     cut: bool = False
     apart: set[int] = field(default_factory=set, repr=False, compare=False)
+    camera: str = ""
+    normal: tuple[float, float] | None = None
 
     def predict(self, dt: float) -> tuple[float, float]:
         """Predicted 2D position (x, y) at dt seconds into the future."""
@@ -143,13 +146,37 @@ class Tracker:
         """Fold one camera frame's detections in; returns each detection with the track it matched or created."""
         touched: list[Track] = []
         pairs: list[tuple[Detection, Track]] = []
+        parts = []
         for d in sorted(detections, key=lambda d: -d.score):
             label = canonical(d.label)
+            reserved = None
+            if d.box is not None and label != "person":
+                # A leg can have a better detector score than the whole seat. Don't let it consume the
+                # one whole-object match, move its centre or shrink the footprint used on the next frame.
+                nearby = [t for t in self.tracks.values() if t.label == label and t.confirmed and t.present
+                          and not t.rejected and now - t.last_seen <= GONE_S
+                          and math.hypot(t.x - d.x, t.y - d.y) <= t.radius + min(t.radius, d.sigma)
+                          and not _across_seam(d, t)]
+                if len(nearby) == 1 and nearby[0].sized and 2 * d.radius < nearby[0].radius:
+                    t = nearby[0]
+                    # A whole, separate outline of the parent in this frame is evidence for two objects,
+                    # even when their map footprints nearly touch (e.g. a small bag beside a suitcase).
+                    separate = any(
+                        e is not d and e.box is not None and not e.cut and canonical(e.label) == label
+                        and _alike(e.radius, t.radius) and math.hypot(e.x - t.x, e.y - t.y) <= t.radius
+                        and _disjoint(d.box, e.box) for e in detections
+                    )
+                    if not separate:
+                        parts.append((d, t))
+                        continue
+                    reserved = t
             best, best_gap = None, math.inf
             for t in self.tracks.values():
                 same = t.label == label
                 alike = d.cut or not t.sized or _alike(t.radius, d.radius)
-                if t in touched or (not same and (t.person or label == "person" or not alike)):
+                if t is reserved or t in touched or (not same and (t.person or label == "person" or not alike)):
+                    continue
+                if not t.person and _across_seam(d, t):
                     continue
                 if t.person and t.look is not None and d.look is not None and \
                         float(np.minimum(t.look, d.look).sum()) < UNLIKE:
@@ -212,6 +239,7 @@ class Tracker:
                 if d.voice_id is not None:
                     best.voice_id = d.voice_id
             best.misses, best.present = 0, True
+            best.camera, best.normal = d.camera, d.normal
             best.noise = 0.8 * best.noise + 0.2 * d.sigma
             best.votes[label] += d.score
             best.score = max(best.score, d.score)
@@ -232,6 +260,10 @@ class Tracker:
             touched.append(best)
             pairs.append((d, best))
         self._merge(pairs)
+        for d, prior in parts:
+            track = self.tracks[self.current(prior.id)]
+            track.last_seen, track.misses = now, 0
+            pairs.append((d, track))
         return pairs
 
     def _known_again(self, d: Detection, now: float, touched: list[Track]) -> Track | None:
@@ -270,9 +302,7 @@ class Tracker:
         # A noisy map range must not undo that image evidence on the next frame from another camera.
         for (d, t), (e, o) in combinations(pairs, 2):
             a, b = d.box, e.box
-            if a is not None and b is not None and d.camera == e.camera and t.person == o.person and (
-                a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
-            ):
+            if a is not None and b is not None and d.camera == e.camera and t.person == o.person and _disjoint(a, b):
                 t.apart.add(o.id)
                 o.apart.add(t.id)
         for t in sorted(self.tracks.values(), key=lambda t: t.id):
@@ -282,6 +312,15 @@ class Tracker:
                 if o.id in t.apart:
                     continue
                 gap = math.dist((t.x, t.y), (o.x, o.y))
+                if not t.person and _across_seam(t, o):
+                    # As with two boxes in one picture, keep the distinction after turning away.
+                    # Do not make a permanent decision from a lone return or an old mapped position.
+                    if (t.label == o.label and gap < max(self.gate, t.radius + o.radius)
+                            and t.confirmed and o.confirmed and t.present and o.present
+                            and abs(t.last_seen - o.last_seen) < 0.5):
+                        t.apart.add(o.id)
+                        o.apart.add(t.id)
+                    continue
                 scatter = min(0.6, 2.5 * math.sqrt(t.var + o.var + max(t.noise, o.noise) ** 2))  # merging is surer to hurt
                 if t.person:  # closer than 0.35 m is one person, however the cameras saw their clothes
                     alike = t.look is None or o.look is None or float(np.minimum(t.look, o.look).sum()) >= LIKE
@@ -357,6 +396,22 @@ def _alike(a: float, b: float) -> bool:
     return max(a, b) <= 2.0 * max(min(a, b), 0.05)
 
 
+def _disjoint(a: tuple, b: tuple) -> bool:
+    return a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
+
+
+def _across_seam(a: Detection | Track, b: Track) -> bool:
+    """Range may slide along a clipped sightline, not sideways across it. In overlapping cameras a leg's
+    ray missed the other object's centre by 0.47 m, well outside their combined 0.28 m radii."""
+    if a.cut == b.cut or a.camera == b.camera:
+        return False
+    normal = a.normal if a.cut else b.normal
+    if normal is None:
+        return False
+    lateral = abs(normal[0] * (a.x - b.x) + normal[1] * (a.y - b.y))
+    return lateral > a.radius + b.radius + 0.10
+
+
 def look(pixels: Any, bins: int = 8) -> Any:
     """A person's appearance from the middle of their box (clothes, not the background): a hue-saturation histogram
     of `bins` x `bins`, normalised to sum to 1. Brightness is left out, so a shadow does not change who someone is."""
@@ -370,4 +425,3 @@ def look(pixels: Any, bins: int = 8) -> Any:
     hue = np.where(high == r, (g - b) / span % 6, np.where(high == g, (b - r) / span + 2, (r - g) / span + 4)) / 6
     hist, _, _ = np.histogram2d(hue, saturation, bins=bins, range=((0, 1), (0, 1)))
     return hist / hist.sum()
-

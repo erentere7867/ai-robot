@@ -240,6 +240,32 @@ Pictures, transcripts and reports: `runs/watched-1120/{before,after,distinct,tur
   per-mask surface-range error fell from 0.46 to 0.30 m, but on 23 masks from this turn it rose from 0.14 to
   0.15 m. This was an offline surface check, not a test of obstacle clearance; the depth input is unchanged.
 
+#### Grounding follow-up (`runs/shape-handoff-01`)
+
+- The dock chairs' real centre ranges were 1.81 and 1.95 m. Learned depth alone gave 1.68 and 1.71 m.
+  Combining a compatible mask-foot range with depth gave 1.79 and 1.91 m on the same boxes. This leaves an
+  elevated outline alone if floor contact is implausible; it does not correct every monocular depth error.
+- On two saved turns, 7 of 155 judge-identified chair sightings had an ID other than the original ID for that
+  chair. Treating a narrow detected part as part of an established footprint reduced that to 0/155. The separate
+  live 21 s turn had 0/65 and no contact. These are repeat observations of **two** chairs, not independent objects.
+- Starting turned 30 degrees put a whole chair in front and the other chair's leg in a rear camera. Four
+  replays (both camera orders, matched depth or intermittent depth) collapsed them to one ID without the
+  sightline check and kept two with it. A later live drive also exposed a *late* merge: keeping the distinction
+  only for the current frame is insufficient. The shared tracker now retains the cross-camera separation.
+- The model can choose the wrong ID from numerically correct ranges, treat "the nearest chair" as an object
+  class, or drive by a guessed direction without looking up either object. Ranked results and marked images
+  cover visible candidates; visual-name validation refuses distance comparisons rather than moving. In two
+  initial dock runs it chose the correct physical instance and stopped 0.59/0.57 m from its edge. A later
+  dock repeat instead drove in a guessed direction and timed out. The proximity score alone cannot test this.
+- Final stock N3 at the dock and at -30 degrees: ID 2 matched the nearest physical instance (38) on departure
+  in the rear-right camera **and** on arrival in front. Final box IoUs were 0.97 and 0.95; endpoints were 0.57
+  and 0.74 m from its edge with zero bumps. Both replies nevertheless implied the *user* had moved, too.
+  These two runs verify this handoff, not model reliability across homes.
+- Hardware sanity check, **not a lidar benchmark**: sampling the judge's horizontal pixel row from each
+  camera origin at one-degree intervals intersected a chair in all 22 visible chair/view pairs across 16 saved
+  views. Only 2 and 3 beams hit the respective chairs at the dock. This says nothing about reflectance, noise,
+  a different mounting height, or obstacles outside that plane.
+
 ## Hazards found
 
 - **Under the stairs.** Exploring `apt_0`, the robot drove under the open staircase, whose underside slopes down

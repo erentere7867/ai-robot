@@ -593,26 +593,34 @@ class Perception:
             is_person = canonical(s.label) == "person"
             human_pose = (estimate_pose_from_keypoints(s.keypoints, cam, reach, pose)
                           if is_person and getattr(s, "keypoints", None) is not None else None)
+            ray = math.atan2(place.y - cam.y, place.x - cam.x) + pose[2] if cut else 0.0
             detection = Detection(s.label, mx, my, place.radius, colour.name(core), s.score, name, cut, sigma,
                                   look(core) if is_person else None,
                                   width=place.width, depth_extent=place.depth_extent,
-                                  orientation_yaw=place.orientation_yaw, pose=human_pose, box=(x1, y1, x2, y2))
+                                  orientation_yaw=place.orientation_yaw, pose=human_pose, box=(x1, y1, x2, y2),
+                                  normal=(-math.sin(ray), math.cos(ray)) if cut else None)
             detections.append(detection)
             hows[id(detection)] = place.how
         now = time.monotonic()
         with self.lock:
             pairs = self.tracker.update(detections, now)
             matched = {id(t) for _, t in pairs}
-            self.boxes[name] = [(det.box, track.id) for det, track in pairs]
+            # A split outline is one object. Keep all its pixels but only one badge and verification crop.
+            boxes = {}
+            for det, track in pairs:
+                if det.pose is not None:
+                    track.pose = det.pose
+                x, y, xx, yy = det.box
+                left, top, right, bottom = boxes.get(track.id, det.box)
+                boxes[track.id] = (min(left, x), min(top, y), max(right, xx), max(bottom, yy))
+            self.boxes[name] = [(box, tid) for tid, box in boxes.items()]
             self.detected[name] = (t, rgb)
             self.sightings.extend((now, name, track.id, det.x, det.y, hows[id(det)], pose[0], pose[1], gap)
                                   for det, track in pairs)
-            for det, track in pairs:  # pairs come sorted by score: find each detection's own box
-                if det.pose is not None:
-                    track.pose = det.pose
-                if det.cut and track.id in self.crops:
+            for tid, box in boxes.items():
+                if (box[0] <= 4 or box[2] >= cam.width - 4) and tid in self.crops:
                     continue  # a part of the thing makes a poor picture of it; keep the whole one
-                self.crops[track.id] = _only(rgb, det.box, [d.box for d, _ in pairs if d is not det])
+                self.crops[tid] = _only(rgb, box, [b for i, b in boxes.items() if i != tid])
             watched = {canonical(w) for w in getattr(self.detector, "vocabulary", ())}
             for track in self.tracker.objects():  # negative evidence: viewed clearly, not seen, while looked for
                 if id(track) in matched or not track.present or track.person or canonical(track.label) not in watched:

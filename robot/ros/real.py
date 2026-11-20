@@ -13,6 +13,7 @@ import queue
 import threading
 import time
 from collections import Counter
+from itertools import combinations
 from typing import Any
 
 import numpy as np
@@ -250,15 +251,19 @@ class RealRobot(RosRobot):
         """The latest real frame from one camera with the tracker's ids marked, as the vision model sees it."""
         return self.perception.render_annotated_view(camera=camera, width=width, height=height)
 
-    def marked_camera(self, ids: set[int]) -> str | None:
-        """One recent detector view that shows as many of the requested badges together as possible."""
+    def marked_cameras(self, ids: set[int]) -> list[str]:
+        """Fewest current views covering the visible choices. At a seam one camera showed only the farther chair."""
         p, now = self.perception, self._now()
         with p.lock:
             ids = {i for i in ids if (t := p.tracker.tracks.get(i)) and t.present and not t.rejected}
-            choices = ((len(ids.intersection(i for _, i in p.boxes[cam])), stamp, cam)
-                       for cam, (stamp, _) in p.detected.items() if 0 <= now - stamp <= SEEN_NOW)
-            count, _, camera = max(choices, default=(0, 0, None))
-        return camera if count else None
+            views = sorted(((stamp, cam, ids.intersection(i for _, i in p.boxes[cam]))
+                            for cam, (stamp, _) in p.detected.items() if 0 <= now - stamp <= SEEN_NOW), reverse=True)
+        visible = set().union(*(marks for _, _, marks in views))
+        for n in range(1, len(views) + 1):
+            for group in combinations(views, n):
+                if visible and visible == set().union(*(marks for _, _, marks in group)):
+                    return [cam for _, cam, _ in group]
+        return []
 
     def live_view(self, camera: str = "front_camera") -> np.ndarray | None:
         """The newest frame from one camera with the tracker's ids marked, for the live page."""

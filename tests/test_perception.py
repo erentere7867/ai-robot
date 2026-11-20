@@ -159,6 +159,23 @@ def test_depth_reads_the_near_face_of_an_open_thing():
     assert abs(math.hypot(x - cam.x, y - cam.y) - (2.0 + r)) < 0.15
 
 
+def test_visible_floor_contact_refines_depth_but_an_elevated_outline_does_not():
+    cam = RIG["front_camera"]
+    u, horizon = cam.width // 2, cam.height // 2
+    v = horizon + cam.focal * cam.z / 2.0  # the floor at 2 metres
+    depth = np.full((cam.height, cam.width), 1.8, dtype=np.float32)
+    depth[horizon, u] = np.inf  # no return right on the horizon
+    for bottom, supported in ((v, True), (horizon + 3, False)):
+        box = (u - 22, horizon - 35, u + 22, bottom)
+        with np.errstate(invalid="raise"):
+            raw = locate(cam, box, depth)
+            placed = locate(cam, box, depth, foot=(u, bottom))
+        if supported:
+            assert raw.x < placed.x < locate(cam, box, foot=(u, bottom)).x
+        else:
+            assert placed == raw
+
+
 def test_a_part_seen_past_the_picture_edge_joins_its_thing_and_neighbours_stay_apart():
     tr = Tracker()
     for t in (0.0, 0.5):
@@ -284,6 +301,39 @@ def test_separate_boxes_stay_separate_across_a_duplicate_merge_and_an_empty_fram
     tr.update([], 0.1)
     assert set(tr.tracks) == {first, other}
     assert tr.tracks[first].apart == {other} and tr.tracks[other].apart == {first}
+
+
+def test_parts_keep_a_known_footprint_but_a_small_neighbour_has_its_own_id():
+    tr = Tracker()
+    big = Detection("bag", 1.0, 0.0, 0.30, box=(10, 10, 60, 60), score=0.7)
+    tr.update([big], 0)
+    (_, parent), = tr.update([big], 0.2)
+    parts = [Detection("bag", x, 0, 0.05, box=b) for x, b in
+             ((0.82, (10, 15, 20, 58)), (1.15, (45, 15, 55, 57)))]
+    assert {t.id for _, t in tr.update(parts, 0.4)} == {parent.id}
+    assert parent.x == 1.0 and parent.radius == 0.30
+    small = Detection("bag", 1.35, 0, 0.07, box=(64, 33, 76, 47), score=0.95)
+    for now in (0.6, 0.8):
+        ids = {id(d): t.id for d, t in tr.update([small, big], now)}
+        assert ids[id(big)] == parent.id and ids[id(small)] != parent.id
+
+
+def test_cross_camera_range_error_can_move_a_part_along_its_ray_but_not_across_it():
+    full = Detection("rack", 0.0, 2.0, 0.23, camera="front", box=(10, 15, 70, 85))
+    for x, y, same in ((0.0, 1.5, True), (0.5, 2.0, False)):
+        leg = Detection("rack", x, y, 0.05, camera="rear", cut=True, box=(0, 20, 10, 85),
+                        sigma=0.4, normal=(1.0, 0.0))
+        for first, second in ((full, leg), (leg, full)):
+            tr = Tracker()
+            for k, d in enumerate((first, second, first, second)):
+                tr.update([d], k * 0.2)
+            assert len(tr.objects()) == (1 if same else 2)
+            if not same:
+                # After the turn the leg has a whole outline in front. Its noisy location alone would merge them.
+                reacquired = Detection("rack", 0.36, 2.0, 0.23, camera="front", sigma=0.4, box=(50, 15, 110, 85))
+                ids = {t.id for t in tr.objects()}
+                tr.update([reacquired], 1.0)
+                assert {t.id for t in tr.objects()} == ids
 
 
 def test_a_standing_person_stops_jumping_and_a_walking_one_is_followed():

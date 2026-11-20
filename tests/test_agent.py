@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from robot.agent.agent import Agent
+from robot.agent.api import NotFound
 from robot.agent.tools import Tools
 from robot.eval.suite import living_room, office
 from robot.mind.brain import Reply, ToolCall
@@ -65,17 +68,18 @@ def test_with_no_cameras_the_model_gets_the_list_and_pictures_only_when_it_looks
     assert any(p.get("type") == "image_url" for p in brain.seen[1][-1]["content"])  # after look
 
 
-@pytest.mark.parametrize("marked", [None, "rear_right_camera"])
+@pytest.mark.parametrize("marked", [[], ["rear_right_camera"], ["front_camera", "rear_right_camera"]])
 def test_an_ambiguous_target_is_explained_and_nothing_moves(marked):
     sim = SimRobot(office())
-    sim.marked_camera = lambda ids: marked if len(ids) >= 2 else None
+    sim.marked_cameras = lambda ids: marked if len(ids) >= 2 else []
     start = (sim.x, sim.y)
     brain = Scripted(call("go_to", target="box"), say("Which box?"), say("Which box?"))
     Agent(brain).do("Go to the box.", sim)
     result = tool_results(brain.seen[1])[0]
     if marked:
-        assert [p["text"] for p in result if p.get("text", "").endswith("camera:")] == ["rear-right camera:"]
-        assert sum(p["type"] == "image_url" for p in result) == 1
+        assert [p["text"] for p in result if p.get("text", "").endswith("camera:")] == [
+            cam.removesuffix("_camera").replace("_", "-") + " camera:" for cam in marked]
+        assert sum(p["type"] == "image_url" for p in result) == len(marked)
         result = result[0]["text"]
     assert result.startswith("Error:") and "could be any of" in result and "Use the id" in result
     assert (sim.x, sim.y) == start
@@ -87,6 +91,36 @@ def test_the_same_call_again_and_again_is_refused_with_a_note():
     brain = Scripted(turn, turn, turn, say("ok"), say("ok"))
     Agent(brain).do("Turn left.", sim)
     assert tool_results(brain.seen[3])[-1].startswith("Not run: you made this exact call 2 times")
+
+
+def test_a_distance_comparison_never_becomes_a_detector_label_or_starts_a_drive():
+    sim = SimRobot(office())
+    start, words = sim.pose(), sim.vocabulary.copy()
+    tools = Tools(sim)
+    for name, args in (("go_to", {"target": "the nearest box"}), ("search", {"what": "furthest bag", "near": "start"}),
+                       ("wait", {"seconds": 1, "until": "closest person"})):
+        result, ok = tools.run(name, args)
+        assert not ok and "just the object name" in result
+        assert sim.pose() == start and sim.vocabulary == words
+
+
+@pytest.mark.parametrize("gone", [True, False])
+def test_a_remembered_or_lost_id_does_not_confirm_arrival(monkeypatch, gone):
+    sim = SimRobot(living_room())
+    target, = sim.detect("chair")
+    lookup = sim.obj
+
+    def observed(i):
+        if not any(e.name == "face" for e in sim.trace.events):
+            return lookup(i)
+        if gone:
+            raise NotFound("no longer in view")
+        return replace(target, last_seen=4.0)
+
+    monkeypatch.setattr(sim, "obj", observed)
+    tools = Tools(sim)
+    result, ok = tools.run("go_to", {"target": str(target.id)})
+    assert not ok and "Target not confirmed" in result and tools.looked == ["front_camera"]
 
 
 def test_the_next_request_sees_what_the_last_one_did_and_where_it_began():

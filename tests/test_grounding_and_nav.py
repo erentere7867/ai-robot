@@ -435,9 +435,11 @@ def test_camera_for_ambiguous_ids_uses_distinct_visible_marks_not_old_or_rejecte
         detected={"front": (9.9, None), "left": (9.5, None), "right": (6.0, None)},
         boxes={"front": [((), 1), ((), 1), ((), 3)], "left": [((), 1), ((), 2)], "right": [((), 4)]},
     )
-    assert real.marked_camera({1, 2, 3}) == "left"
+    assert real.marked_cameras({1, 2, 3}) == ["left"]
     tracks[4] = SimpleNamespace(present=True, rejected=False)
-    assert real.marked_camera({3, 4}) is None
+    assert real.marked_cameras({3, 4}) == []
+    real.perception.detected["right"] = (10.0, None)
+    assert real.marked_cameras({1, 2, 4}) == ["right", "left"]
 
 
 def test_real_robot_wall_bounds_rejection():
@@ -557,7 +559,6 @@ def test_real_robot_outdoor_scene_does_not_reject_distant_tracks():
 
     # Distant object should NOT be rejected in an outdoor scene
     assert 1 in real.things
-
 
 
 

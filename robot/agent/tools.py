@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from robot.agent.api import NotFound, Object, PathBlocked, Pose, TargetLost, Timeout
+from robot.agent.api import NotFound, Object, PathBlocked, Pose, TargetLost, Timeout, geom
 from robot.sim.world import BEARINGS
 
 CAMERAS = {
@@ -27,6 +27,7 @@ CAMERA_NAMES = {"front_camera": "front", "rear_left_camera": "rear-left", "rear_
 ROBOT_RADIUS = 0.15  # metres, from the robot's centre to its edge
 RELATION = re.compile(r"\b(left of|right of|behind|in front of|front of|next to|beside|near|between|on top of|under"
                       r"neath|under|far side of|close to)\b")
+RANGE_ORDER = re.compile(r"\b(?:nearest|closest|farthest|furthest)\b", re.IGNORECASE)
 USER_WORDS = {"user", "me", "you", "the user", "person(user)", "human", "speaker", "my owner", "owner"}
 NO_TARGET = {"", "none", "null", "nothing"}
 NUMBER = re.compile(r"\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*"
@@ -143,6 +144,12 @@ def _where_words(o: Object) -> str:
     return f"{o.distance:.1f} m {o.side}"
 
 
+def _check_visual_name(text: str) -> None:
+    if RANGE_ORDER.search(text):
+        raise ToolError("a distance comparison is not a camera label. Call search with just the object name, "
+                        "then choose an ID by its measured distance")
+
+
 class Tools:
     """The tools bound to one robot for one task."""
 
@@ -212,6 +219,22 @@ class Tools:
                 f"began, {facing}.")
 
     # ---- targets ------------------------------------------------------------------------------------------------
+    def _choices(self, matches: list[Object]) -> str:
+        """Keep the measured range attached to the badge; pixel size is misleading on a wide camera."""
+        by_range = sorted(matches, key=lambda o: o.distance)
+        marked = getattr(self.robot, "marked_cameras", None)
+        if marked:
+            self.looked.extend(marked({o.id for o in matches}))
+        nearest = ", ".join(f"{o.label} {o.id}" for o in by_range
+                            if round(o.distance, 1) == round(by_range[0].distance, 1))
+        listed = "; ".join(f"{o.label} {o.id} ({_where_words(o)})" for o in by_range)
+        result = f"{listed}. Closest by estimated range from here: {nearest}."
+        if geom.dist(self.robot.pose(), self.began) >= 0.3:
+            # A search can move before it finds anything. What's close now need not be what was close when asked.
+            start = sorted((geom.dist(o, self.began), o.id) for o in matches)
+            result += " From the request start: " + "; ".join(f"ID {i} about {d:.1f} m" for d, i in start) + "."
+        return result
+
     def _resolve(self, target: str, *, people_only: bool = False) -> Any:
         """An id, 'user', a room or saved place, or a description, as something the robot can drive to."""
         r = self.robot
@@ -245,16 +268,13 @@ class Tools:
             raise ToolError(f"{text!r} describes a spot, not a thing. To go to a spot you can see, use go_toward "
                             "with the direction of the picture it is in and about how far; for a side of a thing use "
                             "go_to_side, to stop some metres from it use stop_near")
+        _check_visual_name(text)
         matches = list(r.where(text)) or list(r.detect(text))  # known already, or in view when looked for by name
         if not matches:
             raise ToolError(f"no {text!r} is known or in view. Use search({text!r}) to look for it")
         best = [o for o in matches if o.label == matches[0].label]
         if len(best) > 1:
-            marked_camera = getattr(r, "marked_camera", None)
-            if marked_camera and (camera := marked_camera({o.id for o in best})):
-                self.looked.append(camera)  # the earlier views may predate the detector being asked for this word
-            listed = "; ".join(f"{o.label} {o.id} ({_where_words(o)})" for o in sorted(best, key=lambda o: o.distance))
-            raise ToolError(f"{text!r} could be any of: {listed}. Use the id, or ask the user which one")
+            raise ToolError(f"{text!r} could be any of: {self._choices(best)} Use the id, or ask the user which one")
         return matches[0]
 
     def _name(self, t: Any) -> str:
@@ -267,13 +287,14 @@ class Tools:
 
     # ---- the tools ----------------------------------------------------------------------------------------------
     def _define(self) -> list[Tool]:
-        target = {"type": "string", "description": "an object id from the object list (like \"4\"), \"user\", "
-                                                   "a room or place name, or a description like \"red ball\""}
+        target = {"type": "string", "description": "an object ID, \"user\", a room or place, or a visual name "
+                                                   "like \"red ball\". Compare returned distances, not object names."}
         side = {"type": "string", "enum": ["left", "right"]}
         return [
             Tool("say", "Say something out loud now, while you keep working. Your final reply is spoken too.",
                  {"text": {"type": "string"}}, ("text",), self.say),
-            Tool("go_to", "Drive to a target, around obstacles, and stop right beside it, facing it.",
+            Tool("go_to", "Drive to a target and stop beside it, facing it. For an object, give its name even if "
+                          "it has no ID yet. Multiple matches return their IDs and distances before any drive.",
                  {"target": target}, ("target",), self.go_to, moves=True),
             Tool("go_toward", "Drive about some metres in a direction, around obstacles: to go somewhere you can see "
                               "in a picture but that is not one thing you can name. The front picture shows what is in "
@@ -319,7 +340,8 @@ class Tools:
                  {"target": target}, ("target",), self.keep_facing, moves=True),
             Tool("search", "Find something that is not in the object list: checks memory, then drives around the "
                            "area until the cameras see it.",
-                 {"what": {"type": "string", "description": "a short name of the thing, like \"red ball\" or \"keys\""},
+                 {"what": {"type": "string", "description": "a visual name, like \"red ball\" or \"keys\", "
+                                                           "without a distance comparison"},
                   "area": {"type": "string", "description": "\"here\" (this room), a room name, or \"everywhere\". "
                                                            "Search the room where it most likely is first."},
                   "near": {"type": "string", "description": "optional: a thing to start beside, where it likely is "
@@ -375,10 +397,18 @@ class Tools:
 
     def _arrived(self, t: Any) -> str:
         if isinstance(t, Object):
-            self.robot.face(t)
-            fresh = self.robot.obj(t.id)
-            gap = max(0.0, fresh.distance - t.radius - ROBOT_RADIUS)
-            return f"Arrived, facing {self._name(t)}, {gap:.1f} m from it ({fresh.distance:.1f} m to its centre)."
+            try:
+                self.robot.face(t)
+                fresh = self.robot.obj(t.id)
+                if fresh.last_seen > 0:
+                    raise NotFound(f"last seen {fresh.last_seen:g} s ago")
+            except NotFound as exc:
+                self.looked = list(CAMERAS["front"])
+                raise ToolError(f"drive finished {geom.dist(self.robot.pose(), t):.1f} m from the last mapped centre "
+                                f"of {t.label} {t.id}. Target not confirmed: {exc}. Check the front view") from exc
+            gap = max(0.0, fresh.distance - fresh.radius - ROBOT_RADIUS)
+            return (f"Drive finished. Facing {self._name(fresh)}, estimated gap {gap:.1f} m "
+                    f"({fresh.distance:.1f} m to centre).")
         return f"Arrived at {self._name(t)}."
 
     def move(self, metres: float, direction: str) -> str:
@@ -418,6 +448,7 @@ class Tools:
 
     def search(self, what: str, area: str = "here", near: str = "") -> str:
         self.found = None
+        _check_visual_name(what)
         if near:  # start beside it: "the table is by the sofa" is the model's to know, the looking is the robot's
             start = self._resolve(near)
             self.robot.go_to(start, distance=(start.radius + 0.5) if isinstance(start, Object) else 0.0)
@@ -428,9 +459,10 @@ class Tools:
             where = "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
             return f"Searched {where}: no {what} found.{looked}"
         self.found = found
-        others = [o for o in self.robot.where(what, area="everywhere") if o.id != found.id]
-        also = f" Also known: {'; '.join(f'{o.label} {o.id} ({_where_words(o)})' for o in others)}." if others else ""
-        return f"Found {found.label} {found.id}, {_where_words(found)}.{also}{looked}"
+        others = [o for o in self.robot.where(what, area=area or "here") if o.id != found.id]
+        if others:
+            return f"Found {found.label} {found.id}. Known matches: {self._choices([found, *others])}{looked}"
+        return f"Found {found.label} {found.id}, {_where_words(found)}.{looked}"
 
     def go_toward(self, direction: str, metres: float) -> str:
         before = self.robot.pose()
@@ -459,6 +491,7 @@ class Tools:
 
     def wait(self, seconds: float, until: str = "") -> str:
         if until:
+            _check_visual_name(until)
             seen = self.robot.wait_for(until, seconds=seconds)
             self.moved = True
             return f"{until} is in view: {seen.label} {seen.id}, {_where_words(seen)}." if seen else \
