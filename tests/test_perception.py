@@ -1,6 +1,7 @@
 """The perception pipeline's geometry and bookkeeping, without a detector or ROS: rig, locate, colour, tracker."""
 
 import math
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -8,6 +9,7 @@ from robot.perception import colour
 from robot.perception.locate import locate
 from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import GONE_AFTER, Detection, Track, Tracker
+from robot.ros.perceive import SyntheticScanPublisher
 
 
 def test_a_pixel_and_its_depth_give_back_the_point():
@@ -737,9 +739,23 @@ def test_locate_wide_angle_depth_overlap_consistency():
     assert 2.8 <= reach_actual <= 3.6
 
 
+def test_ranging_uses_the_same_camera_and_exposure_even_if_another_frame_is_newer():
+    scan = SyntheticScanPublisher(publish=False)
+
+    def stamp(ns):
+        return SimpleNamespace(sec=1_800_000_000, nanosec=ns)
+
+    front, rear = np.full((2, 2), 1.0), np.full((2, 2), 3.0)
+    scan.ingest_depth("front_camera", stamp(1), front)
+    scan.ingest_depth("rear_right_camera", stamp(2), rear)
+    scan.ingest_depth("front_camera", stamp(200_000_001), rear)
+    assert scan.depth_for("front_camera", stamp(1))[0] is front
+    assert scan.depth_for("rear_right_camera", stamp(2))[0] is rear
+    assert scan.depth_for("front_camera", stamp(2))[0] is None
+
+
 def test_perception_scan_surface_consistency():
     import threading
-    from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     from robot.perception.detector import Seen
@@ -771,7 +787,6 @@ def test_perception_scan_surface_consistency():
 
     stamp = SimpleNamespace(sec=1, nanosec=0)
     perc.frames = {"front_camera": (stamp, rgb)}
-    perc.cam_depths = {"front_camera": [(1.0, (stamp, depth))]}
     perc.scans = [(1.0, scan)]
     perc.scan = scan
 
@@ -782,7 +797,7 @@ def test_perception_scan_surface_consistency():
     perc.timings = []
     perc.counts = {}
     perc.depth_pairs = []
-    perc._depth_for = lambda name, stamp, pose: (depth, 0.0)
+    perc.scan_bridge.depth_for.return_value = (depth, 0.0)
     perc.detector = MagicMock(return_value=seen)
     perc.detector.estimate_depth.return_value = None
 

@@ -49,8 +49,12 @@ def _image(msg: Any) -> np.ndarray:
     return array[:, :, ::-1] if msg.encoding == "bgr8" else array
 
 
+def _nanoseconds(stamp: Any) -> int:
+    return stamp.sec * 1_000_000_000 + stamp.nanosec
+
+
 def _seconds(stamp: Any) -> float:
-    return stamp.sec + stamp.nanosec * 1e-9
+    return _nanoseconds(stamp) * 1e-9
 
 
 def _only(rgb: np.ndarray, box: tuple[int, int, int, int], others: list[tuple[int, int, int, int]]) -> np.ndarray:
@@ -73,8 +77,7 @@ def _only(rgb: np.ndarray, box: tuple[int, int, int, int], others: list[tuple[in
 
 
 def taken_with(buffer: deque, t: float, within: float) -> tuple[Any, float]:
-    """The item in a (stamp, item) buffer taken nearest to time t, and how much later it was taken; (None, 0) when
-    nothing is within `within` seconds."""
+    """Nearest item and signed stamp difference; no item outside the tolerance, (None, 0) for an empty buffer."""
     if not buffer:
         return None, 0.0
     stamp, item = min(list(buffer), key=lambda s: abs(s[0] - t))
@@ -220,8 +223,8 @@ class SyntheticScanPublisher:
 
     def __init__(self, node: Any = None, publish_topic: str = "/scan", publish: bool = True) -> None:
         self.publish = publish
-        self.cam_depths: dict[str, deque[tuple[float, tuple[Any, np.ndarray]]]] = {n: deque(maxlen=12) for n in RIG}
-        self.depths = self.cam_depths["front_camera"]
+        self.cam_depths: dict[str, deque[tuple[int, np.ndarray]]] = {n: deque(maxlen=12) for n in RIG}
+        self._depth_ready = threading.Condition()
         self.tof_grids: dict[str, np.ndarray] = {}
         self.hazards: dict[str, StepHazard] = {}
         self.tilts: deque[tuple[float, float, float]] = deque(maxlen=400)  # stamp s, roll, pitch (rad)
@@ -354,6 +357,15 @@ class SyntheticScanPublisher:
     def _depth(self, name: str, msg: Any) -> None:
         self.ingest_depth(name, msg.header.stamp, _image(msg))
 
+    def depth_for(self, name: str, stamp: Any) -> tuple[np.ndarray | None, float]:
+        """Depth for this exposure only: a 0.2 s old image was 9 degrees off during a turn.
+        The depth node copies the RGB stamp. Once it publishes a later frame, this one was skipped."""
+        buf, t = self.cam_depths[name], _nanoseconds(stamp)
+        with self._depth_ready:
+            self._depth_ready.wait_for(lambda: buf and buf[-1][0] >= t, timeout=0.15)
+            depth, gap = taken_with(buf, t, 0)
+        return depth, gap * 1e-9
+
     def ingest_depth(self, name: str, stamp: Any, depth: np.ndarray) -> tuple[np.ndarray, float, float] | None:
         """Keep a camera's metric depth (for ranging what the detector finds); when publishing, add its sector to
         /scan. Each sector is made at its own picture's moment and carried to the newest one by the odometry: the
@@ -361,8 +373,9 @@ class SyntheticScanPublisher:
         if name not in self.cam_depths:
             return None
         t = _seconds(stamp)
-        with self._lock:
-            self.cam_depths[name].append((t, (stamp, depth)))
+        with self._depth_ready:
+            self.cam_depths[name].append((_nanoseconds(stamp), depth))
+            self._depth_ready.notify_all()
         if not self.publish:
             return None
         roll, pitch = self.tilt_at(stamp)
@@ -411,8 +424,6 @@ class Perception:
         self.frames: dict[str, tuple[Any, np.ndarray]] = {}
         self.fresh: set[str] = set()
         # Share metric-calibrated 3-CSI depth, ToF, IMU tilt and synthetic /scan buffers with SyntheticScanPublisher.
-        self.cam_depths = self.scan_bridge.cam_depths
-        self.depths = self.scan_bridge.depths
         self.tof_grids = self.scan_bridge.tof_grids
         self.scans = self.scan_bridge.scans
         self.depth_pairs: deque[float] = deque(maxlen=500)  # 0 when a frame found its depth image, else how far off
@@ -531,38 +542,6 @@ class Perception:
             with self.lock:
                 self.tracker.verify(track, guess if yes else None, pixels(crop), sure=yes)
 
-    def _depth_for(self, name_or_stamp: Any, stamp_or_pose: Any = None,
-                   maybe_pose: tuple[float, float, float] | None = None) -> tuple[np.ndarray | None, float]:
-        """The depth image seen from where the colour frame was: taken within 30 ms of it, or taken while the robot
-        stood (moved under 1 cm and half a degree in between). The depth stream runs slower than the colour one,
-        so only one colour frame in four had a depth image of its own moment; standing still, any recent one serves,
-        while turning a mismatched one would read the wrong pixels. Waits briefly for a depth image still on its way."""
-        if maybe_pose is not None:
-            name, stamp, pose = name_or_stamp, stamp_or_pose, maybe_pose
-        elif isinstance(name_or_stamp, str):
-            name, stamp, pose = name_or_stamp, stamp_or_pose, (0.0, 0.0, 0.0)
-        else:
-            name, stamp, pose = "front_camera", name_or_stamp, stamp_or_pose
-        buf = self.cam_depths.get(name, self.depths)
-        t, waited = _seconds(stamp), time.monotonic()
-        while True:
-            depth, gap = taken_with(buf, t, 0.08)
-            if depth is not None:
-                return depth[1], gap
-            near, gap = taken_with(buf, t, 0.3)
-            if near is not None:
-                then = self.pose_at(near[0])
-                moved_little = (
-                    then is not None
-                    and math.dist(then[:2], pose[:2]) < 0.01
-                    and abs(math.atan2(math.sin(then[2] - pose[2]), math.cos(then[2] - pose[2]))) < math.radians(0.5)
-                )
-                if moved_little or abs(self.turn_rate) < 0.05:
-                    return near[1], gap
-            if time.monotonic() - waited > 0.15:
-                return None, gap
-            time.sleep(0.01)
-
     def process(self, name: str) -> None:
         stamp, rgb = self.frames[name]
         pose = self.pose_at(stamp)
@@ -575,8 +554,8 @@ class Perception:
         self.counts[name] = self.counts.get(name, 0) + 1
         t = _seconds(stamp)
         roll, pitch = self.tilt_at(stamp)
-        depth, gap = self._depth_for(name, stamp, pose)  # gap: how much later the depth estimate's frame was taken
-        self.depth_pairs.append(gap if depth is None else 0.0)  # for the report: misses and how far off
+        depth, gap = self.scan_bridge.depth_for(name, stamp)
+        self.depth_pairs.append(gap)
         if depth is not None and depth.shape != rgb.shape[:2]:  # estimated smaller: one value per block of pixels
             ky, kx = rgb.shape[0] // depth.shape[0], rgb.shape[1] // depth.shape[1]
             depth = np.repeat(np.repeat(depth, ky, axis=0), kx, axis=1)

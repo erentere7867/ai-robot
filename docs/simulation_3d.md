@@ -223,6 +223,23 @@ A separate turn-and-count request issued no motion calls and spoke an unfinished
 responses exhausted their generation budgets. The stationary control had 0/225 shared IDs in either shadow.
 Pictures, transcripts and reports: `runs/watched-1120/{before,after,distinct,turn,replay}`.
 
+#### Wide-angle handoff (`runs/handoff-depth-01`)
+
+- On a 21 s turn/drive/turn, six of 58 frames that placed an object from depth used another exposure. In one,
+  the robot had turned 8.9 degrees: a chair centre shifted 40 px in a box only 72 px wide. Object ranging now
+  matches camera and capture stamp, waiting at most 150 ms before using the existing floor/scan path. In the
+  20 s repeat 77/101 processed frames had matching depth; none used another exposure. Both drives had zero bumps.
+- At the dock the farther chair spanned 181 px and the nearer one 88 px, but their **angles** were 16.6 and
+  15.8 degrees. The pinhole correction already accounts for this. Across 23 off-axis chair sightings (>48 degrees),
+  median absolute centre-range error was 0.23 m with learned depth vs 0.03 m substituting judge depth offline.
+- YOLOE sometimes boxed two legs of **one** chair separately. On 16 re-rendered views, cylindrical input removed
+  both duplicate detections but missed a chair on another frame. On eight other saved plant views it found
+  four genuine instances instead of three but returned three unmatched boxes instead of one. No remap shipped.
+  The N3 model run stopped 0.67 m from the nearest edge with no bump; proximity still does not establish identity.
+- Remapping input to the same depth network also had mixed results. On 42 saved object masks the median
+  per-mask surface-range error fell from 0.46 to 0.30 m, but on 23 masks from this turn it rose from 0.14 to
+  0.15 m. This was an offline surface check, not a test of obstacle clearance; the depth input is unchanged.
+
 ## Hazards found
 
 - **Under the stairs.** Exploring `apt_0`, the robot drove under the open staircase, whose underside slopes down
