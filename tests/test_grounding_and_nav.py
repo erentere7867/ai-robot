@@ -631,3 +631,86 @@ def test_real_robot_outdoor_scene_does_not_reject_distant_tracks():
 
     # Distant object should NOT be rejected in an outdoor scene
     assert 1 in real.things
+
+
+def test_a_new_word_gets_enough_frames_of_its_own_before_nothing_counts_as_in_view(monkeypatch):
+    import time
+    from collections import Counter
+
+    from robot.perception.rig import RIG
+    from robot.ros.real import LOOKS
+
+    real = object.__new__(RealRobot)
+    vocabulary, used = ["person"], {n: ["person"] for n in RIG}  # each camera's frame in flight has the old words
+    looks = {n: Counter() for n in RIG}
+    steps = []
+
+    def step(v: float, w: float) -> None:  # one frame from each camera finishes; the next starts with the words now
+        steps.append(1)
+        for n in RIG:
+            looks[n].update(used[n])
+            used[n] = list(vocabulary)
+
+    real.perception = SimpleNamespace(looks=looks, detector=SimpleNamespace(watch=vocabulary.append))
+    real._call = real._perceive_objects = lambda *a, **k: None
+    real._step, real.brain, real.things, real._detected, real.memory = step, None, {}, set(), {}
+    assert real.detect("blue bicycle") == []
+    assert all(looks[n]["bicycle"] == LOOKS for n in RIG) and len(steps) == LOOKS + 1
+    monkeypatch.setattr("robot.ros.real.LOOK_S", 0.05)
+    real._step = lambda v, w: time.sleep(0.01)  # the vision server is down: no frame is looked at
+    with pytest.raises(RuntimeError, match="vision server"):
+        real.detect("chair")
+
+
+def test_go_toward_hands_go_to_a_point_it_plans_to():
+    from robot.eval.suite import two_rooms
+    from robot.sim.world import BEARINGS
+
+    sim = SimRobot(two_rooms())
+    refused = []
+    for x, y in ((i * 0.5, j * 0.5) for i in range(-8, 9) for j in range(-6, 7)):
+        if sim._occ(x, y, sim.inflated):
+            continue
+        sim.x, sim.y = x, y
+        for direction in BEARINGS:
+            goal, reach = sim._reach(sim.toward(direction, 1.5), 0.0)
+            if math.dist(goal, (x, y)) > reach and sim._plan(goal, reach) is None:
+                refused.append(((x, y), direction))
+    assert refused == []
+
+
+def test_a_thing_mapped_into_a_walls_margin_is_approached_from_the_nearest_floor():
+    from robot.sim.world import NEARBY
+
+    sim = SimRobot(Scene(10.0, 4.0, [], {}, walls=[((2.0, -2.0), (2.0, 2.0))]))
+    bike = Object(1, "bike", (2.4, 0.0), 2.4, 0.0, "ahead", 0.2, "", 0.0)  # ranged through it, onto the wall
+    goal, reach = sim._reach(bike, 0.0)
+    assert sim._plan(goal, reach) is None
+    path = sim._route(bike, goal, reach)
+    assert path and reach < math.dist(path[-1], goal) <= reach + NEARBY
+    far = Object(2, "bike", (4.5, 0.0), 4.5, 0.0, "ahead", 0.2, "", 0.0)  # well behind the wall: not this way
+    assert sim._route(far, far.position, reach) is None
+    with pytest.raises(PathBlocked):
+        sim._go(far, 0.0)
+
+
+def test_a_search_steps_back_from_a_likely_way_with_no_floor_to_see_the_thing_whole():
+    real = object.__new__(RealRobot)
+    SimRobot.__init__(real, Scene(10.0, 10.0, [], {}))
+    real.search_log, asked, floor = [], [], {"front_camera": []}
+
+    def spots(camera: str, **_: Any) -> tuple:
+        asked.append(camera)
+        return np.zeros((4, 4, 3), np.uint8), floor.get(camera, [(-2.0, 2.0)])
+
+    real.floor_spots = spots
+    real.brain = SimpleNamespace(yes_probability=lambda _: 0.95 if asked[-1] == "front_camera" else 0.07)
+    stop = real._next_stop("blue bicycle", None, [])  # right in front: the bicycle itself leaves no floor that way
+    assert isinstance(stop, Pose) and (round(stop.x, 2), round(stop.y, 2), stop.yaw) == (-1.0, 0.0, 0.0)
+    assert real.search_log[-1].endswith("stepped back to see front whole")
+    assert real._next_stop("blue bicycle", None, [(-1.0, 0.0)]) == (-2.0, 2.0)  # stepped back already: floor elsewhere
+    assert real.search_log[-1].endswith("went rear-left")
+    floor.update({"rear_left_camera": [], "rear_right_camera": []})
+    assert real._next_stop("blue bicycle", None, [(-1.0, 0.0)]) is None  # nowhere new to go: the search ends
+    floor["front_camera"] = [(1.5, 0.0), (3.0, 0.5)]
+    assert real._next_stop("blue bicycle", None, []) == (3.0, 0.5)  # floor that way: the farthest, as before

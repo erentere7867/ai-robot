@@ -283,9 +283,11 @@ class RosRobot(SimRobot):
         goal, reach = self._reach(target, distance)
         if math.dist(goal, (self.x, self.y)) <= reach:
             return None
-        path = self._plan(goal, reach)
+        path = self._route(target, goal, reach)
         if path is None:
             raise PathBlocked(f"no free path to ({goal[0]:.1f}, {goal[1]:.1f})")
+        if not path:  # already on the nearest floor there is
+            return None
         end = path[-1] if isinstance(target, Object) or self._occ(*goal, self.inflated) else goal
         if isinstance(target, Pose):
             return end, math.radians(target.yaw)

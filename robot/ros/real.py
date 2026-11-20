@@ -29,6 +29,8 @@ from robot.ros.robot import RosRobot
 from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing, visual_name
 
 SEEN_NOW = 1.5  # seconds: a track seen this recently is "in view now"
+LOOKS = 3  # frames each camera looks with a word before what it names counts as not in view: a thing takes two sightings
+LOOK_S = 6.0  # wall seconds at most for them: they took 1.8-2.1 s in the 3D apartment at 0.33 x real time
 COLOR_WORDS = (*sorted(COLORS), "unknown")
 SMALL = 0.15  # metres across from the middle: a thing this small is something to look at, not an obstacle to plan round
 ROOM_ASK_S = 8.0  # seconds between the vision model's looks at what kind of room the robot is in
@@ -37,6 +39,8 @@ SPOT_AHEAD = (0.7, 1.1, 1.6, 2.2, 3.0, 4.0)  # metres ahead of the camera, for t
 SPOT_ACROSS = 0.5  # metres between neighbouring spots across
 SPOT_GAP = 48  # pixels at least between two spots as seen in a 768-wide picture: spread across the view
 SEARCH_AWAY = 1.0  # metres: a search offers no dot this near a place it already looked from
+STEP_BACK = 1.0  # metres a search backs off from what is too near to name: YOLOE named the blue bicycle from the dock
+# (2.3 m) and 1.05 m from its centre, but beside it (0.2 m from its edge) in 1 of 2 front frames and in 0 of 8
 
 
 class RealRobot(RosRobot):
@@ -343,18 +347,25 @@ class RealRobot(RosRobot):
         return matches
 
     def detect(self, description: str) -> list[Object]:
-        """What matches the description in view now, looked for with its own words: each camera is looked at twice
-        after the detector takes them (a frame already being looked at had the old words)."""
+        """What matches the description in view now, looked for with its own words: each camera looks LOOKS times
+        with them before a thing counts as not in view. Waiting for two frames instead, whatever words they had, let
+        the first run with the old words; beside the blue bicycle only one frame looked for it, one sighting is not a
+        thing (it takes two), and go_to said no bicycle was in view with the body 0.19 m from it."""
         self._call()
+        word = visual_name(description)
         self._watch(description)
-        before = dict(self.perception.counts)
-        end = time.monotonic() + 3.0
-        while time.monotonic() < end and any(self.perception.counts.get(n, 0) < before.get(n, 0) + 2 for n in RIG):
+        looks = self.perception.looks
+        before = {n: looks.get(n, Counter())[word] for n in RIG}
+        end = time.monotonic() + LOOK_S
+        while word and time.monotonic() < end and any(looks.get(n, Counter())[word] < before[n] + LOOKS for n in RIG):
             self._step(0.0, 0.0)
+        if word and all(looks.get(n, Counter())[word] == before[n] for n in RIG):
+            # the vision server died twice in one session; the robot then answered "not in view" and searched blind
+            raise RuntimeError(f"no camera picture was looked at in {LOOK_S:g} s: is the vision server running, and "
+                               "is the robot localised?")
         end = time.monotonic() + 3.0  # and the vision model's check of what it found: a false "tv" is no target
-        label = visual_name(description)
         while self.brain is not None and time.monotonic() < end and any(
-            not t.verified and self._matching(label, [Thing(t.label, 0, 0, 0)])
+            not t.verified and self._matching(word, [Thing(t.label, 0, 0, 0)])
             for t in self.perception.objects() if t.present and not t.person
         ):
             self._step(0.0, 0.0)
@@ -420,12 +431,17 @@ class RealRobot(RosRobot):
         floor it can reach away from where it already looked, how likely going that way leads to the thing (a yes/no
         answer's probability); it drives to the farthest such floor in the likeliest direction. Asked to pick one of
         20-odd numbered dots across the three pictures instead, the 2B model took the last number offered nearly
-        every time ("dot 23 of 23", "dot 4 of 4") with reasons like "most likely at Dot July"."""
+        every time ("dot 23 of 23", "dot 4 of 4") with reasons like "most likely at Dot July".
+
+        Every camera is asked, also one with no floor to drive to that way: there the thing may be right in front,
+        too near for the detector to name. Beside the blue bicycle YOLOE found no bike in 24 frames, the vision model
+        said yes to that front picture with 95% (7% for the way the search then went), and only the cameras with floor
+        had been asked. Then the robot steps back, still facing that way, to see the thing whole."""
         options = []
         for cam in RIG:
             img, spots = self.floor_spots(cam, width=512, away=(*tried, *self._search_trail(), (self.x, self.y)),
                                           region=region)
-            if img is None or not spots:
+            if img is None:
                 continue
             p = self.brain.yes_probability(_with_image(data_url(img), (
                 f"This picture is from the camera of a small robot looking for {description} in a home. Would going "
@@ -433,12 +449,21 @@ class RealRobot(RosRobot):
             options.append((p, cam, spots))
         if not options:
             return None
+        named = ", ".join(f"{c.replace('_camera', '').replace('_', '-')} {q:.0%}" for q, c, _ in options)
         p, cam, spots = max(options, key=lambda o: o[0])
-        self.search_log.append(", ".join(f"{c.replace('_camera', '').replace('_', '-')} {q:.0%}" for q, c, _ in options)
-                               + f": went {cam.replace('_camera', '').replace('_', '-')}")
+        facing = self.yaw + RIG[cam].yaw
+        back = self._floor_toward(facing + math.pi, STEP_BACK)
+        if not spots and all(math.dist(back, a) >= STEP_BACK / 2 for a in (*tried, (self.x, self.y))):
+            stop, went = Pose(*back, math.degrees(facing)), "stepped back to see {} whole"
+        else:  # with no floor behind either (a stop that did not move came up 20 times), the likeliest way with floor
+            p, cam, spots = max((o for o in options if o[2]), key=lambda o: o[0], default=(0.0, cam, []))
+            stop, went = max(spots, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
+        if stop is None:
+            return None
+        self.search_log.append(f"{named}: {went.format(cam.replace('_camera', '').replace('_', '-'))}")
         self.trace.asked.append((round(self.t, 2), f"search {description}: which way", self.search_log[-1]))
         print(f"search {description!r}: {self.search_log[-1]}", flush=True)
-        return max(spots, key=lambda s: math.dist(s, (self.x, self.y)))  # the farthest: the most new floor in view
+        return stop  # floor: the farthest in that view, the most new floor to see
 
     def _clear_line(self, a: Point, b: Point, step: float = 0.1) -> bool:
         n = max(1, int(math.dist(a, b) / step))

@@ -845,7 +845,7 @@ def test_perception_scan_surface_consistency():
     perc.pose_at = lambda s: (0.0, 0.0, 0.0)
     perc.tilt_at = lambda s: (0.0, 0.0)
     perc.timings = []
-    perc.counts = {}
+    perc.looks = {}
     perc.depth_pairs = []
     perc.scan_bridge.depth_for.return_value = (depth, 0.0)
     perc.detector = MagicMock(return_value=seen)

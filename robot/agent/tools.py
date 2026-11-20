@@ -16,12 +16,16 @@ from typing import Any
 from robot.agent.api import NotFound, Object, PathBlocked, Pose, TargetLost, Timeout, geom
 from robot.sim.world import BEARINGS, visual_name
 
-CAMERAS = {
+CAMERAS = {  # every direction go_toward takes too: the model used each tool's words for the other ("front-right")
     "front": ("front_camera",),
+    "front-left": ("front_camera",),  # the front camera sees 70 degrees either way
+    "front-right": ("front_camera",),
     "rear-left": ("rear_left_camera",),
     "rear-right": ("rear_right_camera",),
-    "left": ("rear_left_camera",),
+    "left": ("rear_left_camera",),  # the rear cameras look 120 degrees round, 70 degrees either way
     "right": ("rear_right_camera",),
+    "behind-left": ("rear_left_camera",),
+    "behind-right": ("rear_right_camera",),
     "behind": ("rear_left_camera", "rear_right_camera"),
     "around": ("front_camera", "rear_left_camera", "rear_right_camera"),
 }
@@ -178,9 +182,12 @@ class Tools:
         tool = self._tools.get(name)
         if tool is None:
             return f"There is no tool {name!r}. Tools: {', '.join(self._tools)}.", False
+        self.found = None  # what this call found by searching
         try:
             checked = _check(tool, args)
             result = tool.run(**checked)
+            if self.found is not None and name != "search":
+                result = f"Searched for it: found {self.found.label} {self.found.id}. {result}"
         except ToolError as exc:
             return f"Error: {exc}.", False
         except NotFound as exc:
@@ -286,7 +293,12 @@ class Tools:
                 if candidates:
                     raise ToolError(f"I see {label}, but cannot confirm {text!r}. {self._choices(candidates)} "
                                     "Check the marked views and use an ID only if it matches, or ask the user")
-            raise ToolError(f"no {text!r} is known or in view. Use search({text!r}) to look for it")
+            # "go to the bicycle" means finding it first: answering "use search" cost the model a turn, and a small
+            # model need not know to
+            self.found = r.search(text)
+            if self.found is None:
+                raise ToolError(f"searched here and found no {text!r}. Search another room, or ask the user")
+            return self.found
         best = [o for o in matches if o.label == matches[0].label]
         if len(best) > 1:
             raise ToolError(f"{text!r} could be any of: {self._choices(best)} Use the id, or ask the user which one")
@@ -308,8 +320,9 @@ class Tools:
         return [
             Tool("say", "Say something out loud now, while you keep working. Your final reply is spoken too.",
                  {"text": {"type": "string"}}, ("text",), self.say),
-            Tool("go_to", "Park beside a target and face it. Use an ID or visual name. For a requested side or gap "
-                          "use go_to_side or stop_near. Parking beside something does not go underneath.",
+            Tool("go_to", "Park beside a target and face it. Use an ID or visual name; a name not yet seen is searched "
+                          "for first. For a requested side or gap use go_to_side or stop_near. Parking beside "
+                          "something does not go underneath.",
                  {"target": target}, ("target",), self.go_to, moves=True),
             Tool("go_toward", "Drive about some metres in a direction, around obstacles: to go somewhere you can see "
                               "in a picture but that is not one thing you can name. The front picture shows what is in "
@@ -468,18 +481,16 @@ class Tools:
             self.robot.wait(1.0)
 
     def search(self, what: str, area: str = "here", near: str = "") -> str:
-        self.found = None
         _check_visual_name(what)
         if near:  # start beside it: "the table is by the sofa" is the model's to know, the looking is the robot's
             start = self._resolve(near)
             self.robot.go_to(start, distance=(start.radius + 0.5) if isinstance(start, Object) else 0.0)
-        found = self.robot.search(what, area=area or "here")
+        self.found = found = self.robot.search(what, area=area or "here")
         log = getattr(self.robot, "search_log", [])
         looked = f" Where you looked: {'; '.join(log[-4:])}." if log else ""
         if found is None:
             where = "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
             return f"Searched {where}: no {what} found.{looked}"
-        self.found = found
         crop = getattr(self.robot, "target_crop", lambda _: None)(found.id)
         if crop is not None:
             self.pictures.append((f"Recorded detection crop for {found.label} ID {found.id} (not a live view):", crop))

@@ -16,7 +16,7 @@ import array
 import math
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import replace
 from typing import Any
 
@@ -431,7 +431,7 @@ class Perception:
         self.past: deque[tuple[float, np.ndarray]] = deque(maxlen=PAST_KEPT)  # front pictures, 2 a second
         self.boxes: dict[str, list[tuple[tuple[int, int, int, int], int]]] = {}  # camera -> latest (box, track id)
         self.timings: list[float] = []
-        self.counts: dict[str, int] = {}  # frames processed per camera
+        self.looks: dict[str, Counter] = {}  # frames processed per camera, by each word the detector looked for
         self.served: dict[str, float] = {}  # when each camera's frame was last taken for detection
         self.detected: dict[str, tuple[float, np.ndarray]] = {}  # camera -> capture time, RGB paired with its boxes
         # every sighting: monotonic time, camera, track, map x, y, how its range was found, robot x, y, depth lag (s)
@@ -549,9 +549,10 @@ class Perception:
             return
         cam = RIG[name]
         started = time.perf_counter()
+        words = list(getattr(self.detector, "vocabulary", ()))  # this frame's words: one asked for from now on is not
         seen = self.detector(rgb)
         self.timings = (self.timings + [time.perf_counter() - started])[-20:]
-        self.counts[name] = self.counts.get(name, 0) + 1
+        self.looks.setdefault(name, Counter()).update(words)
         t = _seconds(stamp)
         roll, pitch = self.tilt_at(stamp)
         depth, gap = self.scan_bridge.depth_for(name, stamp)
@@ -621,7 +622,7 @@ class Perception:
                 if (box[0] <= 4 or box[2] >= cam.width - 4) and tid in self.crops:
                     continue  # a part of the thing makes a poor picture of it; keep the whole one
                 self.crops[tid] = _only(rgb, box, [b for i, b in boxes.items() if i != tid])
-            watched = {canonical(w) for w in getattr(self.detector, "vocabulary", ())}
+            watched = {canonical(w) for w in words}
             for track in self.tracker.objects():  # negative evidence: viewed clearly, not seen, while looked for
                 if id(track) in matched or not track.present or track.person or canonical(track.label) not in watched:
                     continue  # (a ball seen while asked for is not gone because the detector stopped looking)

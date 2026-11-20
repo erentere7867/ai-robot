@@ -279,6 +279,53 @@ In a separate apartment run, "What do you see?" got one reply, then "Go to the b
 no search and no bumps. The chosen box matched instance 4 (IoU 0.98); the endpoint was 0.36 m from its edge,
 3.03 m from the other bike. This tests one viewpoint; it does not establish general colour recognition accuracy.
 
+#### A thing first asked for from right beside it (`runs/goto-unseen`, 20 November)
+
+In interactive session `220908-xKr5` the model drove `go_toward` to the blue bicycle, then `go_to("blue bicycle")`
+said none was known or in view; the search it was told to call drove 3.5 m away, and of the nine calls after it,
+two "blocked" answers were the harness's own. The probe (`runs/goto-unseen/probe.py`) repeats that from a fresh robot
+with no model: the same drive, then the tool call alone.
+
+- **Too few frames with the new word.** `detect` waited for two frames per camera, whatever words they were looked
+  at with; the first could still run with the old ones. One front frame named the bike, one sighting is not a thing
+  (two are), and `go_to` answered "not in view" with the body 0.19 m from the bike's edge. Each camera now looks
+  three times with the word.
+- **Too near to name.** From that close YOLOE named no bike in any of 24 frames (8 a camera, all with "bicycle"), yet
+  the vision model said yes to the front picture with 95% ("is the blue bicycle in this picture": 100%; 15% for a
+  picture without it). The search only asked about cameras with floor to drive to, which the bike itself took up
+  ahead, so it went rear-left on 7% and found the bike from afar (2 of 2 runs got there, in 63 and 124 s). It now
+  asks every camera, and when the likeliest has no floor steps back 1 m still facing that way: 4 of 4 runs did that
+  once (front 93-95%, the others 3-25%), saw one blue bike, and parked 0.22-0.26 m from its edge in 46-54 s.
+- **`go_to` searches for a name it does not know** instead of answering "use search": the model need not make that
+  extra turn, nor know to.
+- **Two "blocked" answers that were not.** go_toward accepted points the planner reached within 0.25 m, and go_to
+  then planned to within 0.1 m: 276 of 14,992 go_toward points on the apt_0 map (1.8%) were refused; go_toward
+  now accepts only what go_to will plan (0 refused). And a bike seen from about 4 m was mapped at (1.8, -2.3),
+  0.6 m into the wall's margin, where no floor lay within reach; `go_to` now drives to the nearest floor it can
+  reach when that is within a metre more (here 1.04 m from that centre, 0.51 m from the bike's later one). This
+  last one is checked on the map and in the 2D simulator, not yet in a 3D run.
+- **A step back that does not move must not repeat.** With no floor behind it either, a search asked the same
+  question from the same spot 20 times ("red wall", front 84%); it now takes the likeliest way with floor instead,
+  or ends.
+- **One set of direction words.** The model used `look`'s camera words for `go_toward` ("rear-right") and the
+  other way round (`look("front-right")`), each costing a turn; both tools now take both, each word mapped to a
+  camera that sees that way. Unit-tested only.
+- **A dead vision server fails plainly.** It died twice in this session with nothing in its log (a client
+  dropping its connection, the first guess, did not kill it); every frame then failed quietly, `detect` said
+  "not in view" and the depth node's scan stopped (no localisation). `detect` now raises when no picture was
+  looked at in 6 s. Why the server died is not known.
+
+With the model (`runs/goto-unseen-agent`, `-agent2`; one run each, so noisy): "Go to the blue bicycle." from the
+dock passed 3 of 4 (one or several calls); the fourth reached the bike (0.19 m inside its footprint) but went
+on calling tools until the 16-turn limit, after two approaches were cut off by "not there when the cameras last
+looked" while the bike was there: tracks of things YOLOE names in few frames are given up too early, the same
+message hit 6 of 23 tasks in `real2`, and some of those (false TVs) were right to go. Parked beside it first
+("drive about 1.5 m front-right", then "go to the blue bicycle") passed 2 of 2 with one `go_to`, though the
+shared detector still had "bike" from the earlier tasks (the probe above is the new-word case). Of the tasks
+this touches, N1 and S3 passed (S3 in 3 s, the model answering without a call); N5 and S1 failed as they have
+before (N5 passed 2 of the last 5 GPU runs): every "TV" known was a table or rug, and S1 kept choosing a "plant"
+never seen again when faced, with 21 bumps turning in place by the furniture (8 and 5 in its last two runs).
+
 #### When a navigation target disappears (interactive session `173110-YTOF`)
 
 `go_to("tv 25")` kept driving to a fixed point even after the track disappeared. Nav2's logged start and goal

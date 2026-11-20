@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from dataclasses import replace
 
@@ -9,12 +10,12 @@ import numpy as np
 import pytest
 
 from robot.agent.agent import Agent
-from robot.agent.api import NotFound, Preempted
+from robot.agent.api import NotFound, Pose, Preempted
 from robot.agent.tools import Tools
 from robot.eval.suite import living_room, office
 from robot.mind.brain import Reply, ToolCall
 from robot.perception.camera import data_url
-from robot.sim.world import Scene, SimRobot
+from robot.sim.world import Scene, SimRobot, Thing
 
 
 class Scripted:
@@ -251,6 +252,30 @@ def test_motion_progress_uses_validated_arguments(name, args, progress):
     result, ok = tools.run(name, args)
     assert ok
     assert f"\nThis request so far: {progress}." in result
+
+
+def test_go_to_a_name_not_yet_seen_searches_for_it_and_then_goes_there():
+    sim = SimRobot(Scene(16.0, 6.0, [Thing("ball", 6.0, 0.0, radius=0.15, color="red")], {}, start=Pose(-6.0, 0, 0)))
+    ball, = sim.things.values()
+    result, ok = Tools(sim).run("go_to", {"target": "red ball"})  # 12 m away: out of the cameras' range
+    assert ok and result.startswith(f"Searched for it: found ball {ball.id}. Drive finished.")
+    names = [e.name for e in sim.trace.events]
+    assert names.index("search") < names.index("go_to")
+    assert math.dist((sim.x, sim.y), (ball.x, ball.y)) < 1.0
+    missing, ok = Tools(sim).run("go_to", {"target": "elephant"})
+    assert not ok and "searched here and found no 'elephant'" in missing
+
+
+def test_look_and_go_toward_take_the_same_direction_words_and_look_with_a_camera_that_sees_that_way():
+    from robot.agent.tools import CAMERAS
+    from robot.perception.rig import RIG
+    from robot.sim.world import BEARINGS
+
+    assert set(CAMERAS) - {"around"} == set(BEARINGS)
+    for word, bearing in BEARINGS.items():
+        for camera in CAMERAS[word]:
+            off = (bearing - math.degrees(RIG[camera].yaw) + 180) % 360 - 180
+            assert abs(off) <= math.degrees(RIG[camera].hfov) / 2, (word, camera)
 
 
 def test_a_number_written_with_an_exponent_or_a_leading_dot_still_moves_the_robot():
