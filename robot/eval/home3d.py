@@ -67,22 +67,22 @@ def out_dir() -> Path:
 
 
 def keep_pictures(robot: Any, folder: Path) -> list[tuple[float, str]]:
-    """Save every picture the model is given (the agent takes them with camera_view) as numbered JPEGs, so what it
-    said it saw can be checked against what it was shown; the list fills with (simulated time, file name)."""
+    """Save camera views and object evidence as numbered JPEGs; the report shows which track produced a crop."""
     import cv2
 
     folder.mkdir(parents=True, exist_ok=True)
     view, kept = robot.camera_view, []
 
-    def saving(camera: str = "front_camera", width: int = 512, height: int = 288) -> Any:
-        frame = view(camera, width, height)
+    def save(label: str, frame: Any) -> Any:
         if frame is not None and getattr(frame, "size", 0):
-            name = f"{len(kept) + 1:03d}_{camera}.jpg"
+            name = f"{len(kept) + 1:03d}_{label}.jpg"
             cv2.imwrite(str(folder / name), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             kept.append((round(robot.t, 1), name))
         return frame
 
-    robot.camera_view = saving
+    robot.camera_view = lambda camera="front_camera", width=512, height=288: save(camera, view(camera, width, height))
+    if crop := getattr(robot, "target_crop", None):
+        robot.target_crop = lambda i: save(f"candidate_{i}", crop(i))
     return kept
 
 

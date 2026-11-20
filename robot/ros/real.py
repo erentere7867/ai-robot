@@ -13,6 +13,7 @@ import queue
 import threading
 import time
 from collections import Counter
+from itertools import combinations
 from typing import Any
 
 import numpy as np
@@ -22,11 +23,13 @@ from robot.mind.brain import _with_image
 from robot.mind.memory import ANCHOR_LABELS, CANONICAL_SYNONYMS
 from robot.perception.camera import data_url
 from robot.perception.rig import RIG, to_map
+from robot.perception.tracker import pixels
 from robot.ros.perceive import Perception
 from robot.ros.robot import RosRobot
-from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing
+from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing, visual_name
 
 SEEN_NOW = 1.5  # seconds: a track seen this recently is "in view now"
+COLOR_WORDS = (*sorted(COLORS), "unknown")
 SMALL = 0.15  # metres across from the middle: a thing this small is something to look at, not an obstacle to plan round
 ROOM_ASK_S = 8.0  # seconds between the vision model's looks at what kind of room the robot is in
 ROOM_ANSWERS = 5  # answers kept per room; more change nothing
@@ -248,11 +251,31 @@ class RealRobot(RosRobot):
 
     def camera_view(self, camera: str = "front_camera", width: int = 512, height: int = 288) -> np.ndarray | None:
         """The latest real frame from one camera with the tracker's ids marked, as the vision model sees it."""
-        return self.perception.render_annotated_view(camera=camera, width=width, height=height)
+        return self.perception.render_annotated_view(camera, width, height, self._now() - SEEN_NOW)
+
+    def marked_cameras(self, ids: set[int]) -> list[str]:
+        """Fewest current views covering the visible choices. At a seam one camera showed only the farther chair."""
+        p, now = self.perception, self._now()
+        with p.lock:
+            ids = {i for i in ids if (t := p.tracker.tracks.get(i)) and t.present and not t.rejected}
+            views = sorted(((stamp, cam, ids.intersection(i for _, i in p.boxes[cam]))
+                            for cam, (stamp, _) in p.detected.items() if 0 <= now - stamp <= SEEN_NOW), reverse=True)
+        visible = set().union(*(marks for _, _, marks in views))
+        for n in range(1, len(views) + 1):
+            for group in combinations(views, n):
+                if visible and visible == set().union(*(marks for _, _, marks in group)):
+                    return [cam for _, cam, _ in group]
+        return []
+
+    def target_crop(self, object_id: int) -> np.ndarray | None:
+        p = self.perception
+        with p.lock:
+            track = p.tracker.tracks.get(p.tracker.current(object_id))
+            return p.crops.get(track.id) if track and track.present and not track.rejected else None
 
     def live_view(self, camera: str = "front_camera") -> np.ndarray | None:
-        """The newest frame from one camera with the tracker's ids marked, for the live page."""
-        return self.perception.render_annotated_view(camera=camera, width=640, height=360, newest=True)
+        """The same exposure/ID pairing as the model, resized for the live page."""
+        return self.perception.render_annotated_view(camera, 640, 360, self._now() - SEEN_NOW)
 
     def obj(self, id: Any) -> Object:  # noqa: A002 - the name programs use
         """An object by any id it has had: two sightings found to be one thing share the older id from then on. An
@@ -264,7 +287,7 @@ class RealRobot(RosRobot):
         with self.perception.lock:
             now = self.perception.tracker.current(given)
             track = self.perception.tracker.tracks.get(now)
-        if track is not None and now not in self.things:
+        if track is not None:
             if track.rejected:
                 raise NotFound(f"object {given} was not a {track.label} after all: a closer look found none there")
             if not track.present:
@@ -279,12 +302,45 @@ class RealRobot(RosRobot):
         return True
 
     def _watch(self, description: str) -> None:
-        phrase = " ".join(w for w in description.lower().split() if w not in COLORS)
+        phrase = visual_name(description)
         if phrase:
             self.perception.detector.watch(phrase)
 
     def _in_view(self) -> list[Thing]:
         return self._visible()
+
+    def _matching(self, description: str, things: list[Thing]) -> list[Thing]:
+        wanted = set(description.lower().split()) & COLORS
+        if not wanted or self.brain is None:
+            return super()._matching(description, things)
+        if "grey" in wanted or "gray" in wanted:
+            wanted.update(("grey", "gray"))
+        matches = []
+        p = self.perception
+        for thing in super()._matching(visual_name(description), things):
+            with p.lock:
+                track = p.tracker.tracks.get(thing.id)
+                if track is None or track.rejected or not track.present:
+                    continue
+                crop, color = p.crops.get(thing.id), track.visual_color
+                recheck = crop is not None and (not color or pixels(crop) >= 2 * track.color_from)
+            if recheck:
+                # Most of a bicycle box was wall or tyres. Ask about its colour, not the median pixel;
+                # only when a tool needs the attribute, and never while holding the camera worker's lock.
+                question = (f"What colour would a person call the {thing.label} in the middle of this picture? "
+                            "Ignore the background. Answer with one colour or unknown.")
+                scores = self.brain.decide(_with_image(data_url(crop), question), choices=COLOR_WORDS)
+                scores["grey"] += scores.pop("gray")
+                word = max(scores, key=scores.get)
+                color = word if scores[word] > 0.5 else "unknown"
+                with p.lock:
+                    if p.tracker.tracks.get(thing.id) is not track or track.rejected or not track.present:
+                        continue
+                    track.visual_color, track.color_from = color, pixels(crop)
+            if color in wanted:
+                thing.color = color
+                matches.append(thing)
+        return matches
 
     def detect(self, description: str) -> list[Object]:
         """What matches the description in view now, looked for with its own words: each camera is looked at twice
@@ -296,8 +352,11 @@ class RealRobot(RosRobot):
         while time.monotonic() < end and any(self.perception.counts.get(n, 0) < before.get(n, 0) + 2 for n in RIG):
             self._step(0.0, 0.0)
         end = time.monotonic() + 3.0  # and the vision model's check of what it found: a false "tv" is no target
-        while time.monotonic() < end and any(not t.verified and self._matching(description, [Thing(t.label, 0, 0, 0)])
-                                             for t in self.perception.objects() if t.present and not t.person):
+        label = visual_name(description)
+        while self.brain is not None and time.monotonic() < end and any(
+            not t.verified and self._matching(label, [Thing(t.label, 0, 0, 0)])
+            for t in self.perception.objects() if t.present and not t.person
+        ):
             self._step(0.0, 0.0)
         self._perceive_objects()
         found = self._matching(description, self._in_view())
@@ -392,14 +451,16 @@ class RealRobot(RosRobot):
             return []
         now = past[-1][0]
         recent = [(t, rgb) for t, rgb in past if now - t <= seconds]
-        picks = [recent[round(i * (len(recent) - 1) / max(1, count - 1))] for i in range(min(count, len(recent)))]
-        return [(now - t, rgb) for t, rgb in dict.fromkeys(picks)]
+        if len(recent) > count:
+            recent = [recent[round(i * (len(recent) - 1) / max(1, count - 1))] for i in range(count)]
+        return [(now - t, rgb) for t, rgb in recent]
 
     # ---- the vision model on what the cameras saw ----------------------------------------------------------------
     def _image_of(self, target: Any) -> str | None:
         target = self._target(target) if target is not None else None
-        crop = self.perception.crops.get(target.id) if isinstance(target, Object) else None
-        if crop is None:
+        if isinstance(target, Object):
+            crop = self.target_crop(target.id)
+        else:
             frame = self.perception.frames.get("front_camera")
             crop = frame[1] if frame else None
         return data_url(crop) if crop is not None and crop.size else None
@@ -421,6 +482,10 @@ class RealRobot(RosRobot):
         return answer
 
     # ---- the user's answers --------------------------------------------------------------------------------------
+    def _say(self, text: str) -> None:
+        # Speech is played by the client. The 2D word timer kept a 161-word answer busy for ~147 wall seconds in 3D.
+        self.trace.said.append((round(self.t, 2), text))
+
     def _listen(self, seconds: float) -> str | None:
         self.trace.listened.append(round(self.t, 2))
         self.waiting = True

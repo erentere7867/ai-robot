@@ -36,6 +36,7 @@ from robot.agent.api import (
     xy,
 )
 from robot.body.controller import BodyController
+from robot.perception.tracker import canonical
 
 RES = 0.05  # occupancy cell, m
 SEARCH_STOPS = 20  # most places one search drives to before it gives up
@@ -95,6 +96,14 @@ SYNONYMS = {
 def _words(text: str) -> set[str]:
     words = re.findall(r"[a-z]+", text.lower())
     return {w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in words}
+
+
+def visual_name(description: str) -> str:
+    """The object name used for detection; colour is measured separately on the candidate."""
+    words = description.lower().split()
+    if words and words[0] in ("a", "an", "the"):
+        words = words[1:]
+    return " ".join(w for w in words if w not in COLORS)
 
 
 @dataclass
@@ -757,11 +766,15 @@ class SimRobot:
         tx, ty = self._reach(target, 0.0)[0]
         self._rotate(wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw))
 
-    def go_to(self, target: Point | Pose | Object | str, distance: float = 0.0) -> None:
-        self._call("go_to", target=target, distance=distance)
-        self._go(self._target(target), float(distance))
+    def go_to(self, target: Point | Pose | Object | str, distance: float = 0.0, *, side: str = "") -> None:
+        self._call("go_to", target=target, distance=distance, side=side)
+        self._go(self._target(target), float(distance), side=side)
 
-    def _go(self, target: Point | Pose | Object, distance: float) -> None:
+    def _destination(self, target: Point | Pose | Object, distance: float, side: str) -> tuple:
+        return (self.spot(target, side, distance), 0.0) if side else (target, distance)
+
+    def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
+        target, distance = self._destination(target, distance, side)
         goal, reach = self._reach(target, distance)
         if math.dist(goal, (self.x, self.y)) <= reach:
             if isinstance(target, Pose):
@@ -1081,6 +1094,12 @@ class SimRobot:
         found = [t for t in things if self._detectable(t) and t.score(description) and (not colors or t.color in colors)]
         if found:
             return sorted(found, key=lambda t: -t.score(description))
+
+        name = canonical(visual_name(description))
+        found = [t for t in things if self._detectable(t) and canonical(t.label) == name
+                 and (not colors or t.color in colors)]
+        if found:
+            return found
 
         # Synonym fallback if direct matching yielded no results
         desc_words = _words(description)

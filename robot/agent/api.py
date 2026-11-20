@@ -176,8 +176,8 @@ class Robot(Protocol):
     def face(self, target: Target, background: bool = False) -> None:
         """Turn toward target."""
 
-    def go_to(self, target: Target, distance: float = 0.0) -> None:
-        """Drive there round obstacles, stopping distance m short."""
+    def go_to(self, target: Target, distance: float = 0.0, *, side: str = "") -> None:
+        """Approach within distance of the centre, or choose a side with distance measured edge to edge."""
 
     def drive(self, *, metres_per_second: float, degrees_per_second: float = 0.0, seconds: float) -> None:
         """Raw speed; + degrees_per_second turns left."""
