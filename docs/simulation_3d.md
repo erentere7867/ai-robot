@@ -13,7 +13,10 @@ the robot; the judge alone reads it.
 | Everything else | the robot's own code: robot_localization EKF (wheels + gyro), the depth node, slam_toolbox or AMCL, Nav2, YOLOE-26, the tracker, the agent | the same |
 
 Sensor errors are modelled where the real parts have them: wheels misjudge distance by about 1% and report 5% too
-much turning on the spot (tyres scrub), the gyro has a fixed bias, the ToF zones are noisy. The judge gets
+much turning on the spot (tyres scrub), the gyro has a fixed bias, the ToF zones are noisy. Like the MCU, the
+simulated driver estimates gyro bias from readings while the motors are uncommanded and both encoders are still.
+Without calibration a parked robot's heading drifted 53 degrees in a 220-second replay, enough to put a visible
+target inside a mapped obstacle. Calibration reduced that to 0.5 degrees on the same readings. The judge gets
 `/ground_truth` (where the body really is), a bump count, and the apartment's objects; the robot never does.
 
 Simulated time runs at `--rtf` times wall time (default 0.33). On this PC the robot's software runs on the CPU (YOLOE
