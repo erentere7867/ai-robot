@@ -335,7 +335,7 @@ Faded objects are remembered.</div>
 
 
 <section>
-<h2>Said</h2>
+<h2>Earlier speech</h2>
 <ul id="said"></ul>
 <h3>Problems</h3>
 <ul id="problems"></ul>
@@ -495,10 +495,10 @@ $('todo').textContent=s.todo||'(no to-do list)';
 $('todo').className=s.todo?'':'muted';
 $('thought').textContent=s.thought||'(none)';
 $('searching').innerHTML=(s.searching||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">no search yet</li>';
-const steps=s.steps||[];
+const steps=(s.steps||[]).filter(it=>!String(it).startsWith('reply:'));
 $('steps').innerHTML=steps.map((it,idx)=>`<li class="${idx===steps.length-1?'now':''}${String(it).startsWith('thought:')?' thought':''}">${esc(it)}</li>`).join('')||'<li class="muted">none yet</li>';
-$('said').innerHTML=(s.said||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">nothing yet</li>';
 const saidArr=s.said||[];
+$('said').innerHTML=saidArr.slice(0,-1).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">none</li>';
 if(saidArr.length>0){
 let lastSaid=saidArr[saidArr.length-1]||'';
 lastSaid=lastSaid.replace(/^["'“]/,'').replace(/["'”]$/,'').trim();

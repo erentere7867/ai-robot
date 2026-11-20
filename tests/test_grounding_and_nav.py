@@ -7,10 +7,12 @@ from threading import Lock
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 
 from robot.agent.api import NotFound, Object, PathBlocked, Pose
 from robot.interfaces.live import PAGE
+from robot.perception.tracker import Track, Tracker
 from robot.ros.real import RealRobot
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
@@ -88,6 +90,26 @@ def test_synonym_fallback_when_exact_match_absent():
     cup = Thing("cup", 1.0, 0.0, radius=0.1, color="red")
     sim3 = SimRobot(_make_scene([cup]))
     assert sim3._named("mug").label == "cup"
+
+
+def test_colour_request_uses_the_named_track_crop_not_the_background():
+    real = object.__new__(RealRobot)
+    tracker = Tracker()
+    track = Track(7, "bike", 1.1, -0.5, 0.3, 0, 0, hits=4)
+    tracker.tracks[track.id] = track
+    thing = Thing("bike", track.x, track.y, color="brown", id=7)
+    real.perception = SimpleNamespace(lock=Lock(), tracker=tracker, crops={7: np.zeros((36, 36, 3), np.uint8)})
+    questions = []
+
+    def decide(messages, choices):
+        questions.append(messages[0]["content"][-1]["text"])
+        return {w: float(w == "blue") for w in choices}
+
+    real.brain = SimpleNamespace(decide=decide)
+    assert not real._matching("red bicycle", [thing])
+    assert real._matching("the blue bicycle", [thing]) == [thing]
+    assert track.color == thing.color == "blue"
+    assert len(questions) == 1 and "red" not in questions[0] and "blue" not in questions[0]
 
 
 def test_exact_match_prioritized_over_synonyms():
@@ -559,6 +581,5 @@ def test_real_robot_outdoor_scene_does_not_reject_distant_tracks():
 
     # Distant object should NOT be rejected in an outdoor scene
     assert 1 in real.things
-
 
 

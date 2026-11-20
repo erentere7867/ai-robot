@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 
 from robot.agent.agent import Agent
-from robot.agent.api import NotFound
+from robot.agent.api import NotFound, Preempted
 from robot.agent.tools import Tools
 from robot.eval.suite import living_room, office
 from robot.mind.brain import Reply, ToolCall
@@ -46,8 +46,32 @@ def test_a_result_comes_back_and_a_plain_reply_ends_the_task_after_one_check():
     assert tool_results(brain.seen[1])[0].startswith("Turned 90 degrees left.\nThis request so far: turned 90 degrees left")
     assert "Before you finish" in brain.seen[2][-1]["content"]  # the stop hook asked once
     assert [t for _, t in sim.trace.said] == ["Turned left."]
+    assert [line for line in record.lines() if line.startswith("reply:")] == ['reply: "Turned left."']
     first = brain.seen[0][1]["content"]
     assert any(p.get("type") == "image_url" for p in first)  # the model sees the camera, not only a list
+
+
+def test_a_camera_answer_is_delivered_once_and_only_that_answer_is_remembered():
+    sim = SimRobot(living_room())
+    brain = Scripted(say("A brown chair."), say("You're welcome."))
+    agent = Agent(brain)
+    agent.do("What do you see?", sim)
+    agent.do("Thanks!", sim)
+    assert len(brain.seen) == 2 and [text for _, text in sim.trace.said] == ["A brown chair.", "You're welcome."]
+    history = brain.seen[1][1]["content"][0]["text"]
+    assert history.count("A brown chair.") == 1
+
+
+def test_stopping_during_search_keeps_the_interrupted_call_in_the_trace(monkeypatch):
+    sim = SimRobot(living_room())
+
+    def stopped(*args, **kwargs):
+        raise Preempted("stopped")
+
+    monkeypatch.setattr(sim, "search", stopped)
+    record = Agent(Scripted(call("search", what="bag"))).do("Find the bag.", sim)
+    assert record.outcome == "preempted"
+    assert record.steps[-1].calls == [("search", {"what": "bag"}, "Interrupted before returning a result.", False)]
 
 
 def test_reasoning_only_after_news_skips_the_turns_after_calls_that_worked():

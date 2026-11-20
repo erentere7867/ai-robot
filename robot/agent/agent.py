@@ -259,7 +259,7 @@ class Agent:
                 self._push(thought="(thinking...)")
                 t0, began = time.perf_counter(), round(float(getattr(robot, "t", 0.0)), 1)
                 reply = self.brain.chat(messages, tools.schemas(), think=think)
-                step = Step(reply.text, model_s=round(time.perf_counter() - t0, 3), tokens=reply.write_tokens,
+                step = Step("", model_s=round(time.perf_counter() - t0, 3), tokens=reply.write_tokens,
                             thought=reply.thought.strip(), t=began)
                 record.steps.append(step)
                 self._push(steps=record.lines(thoughts=True), thought=step.thought or "(no reasoning this turn)")
@@ -274,19 +274,18 @@ class Agent:
                 if not reply.tool_calls:
                     heard = self._drain()
                     if heard:  # the user spoke while the model was answering: carry on with their words
-                        if reply.text and speak:
-                            robot.say(speakable(reply.text))
                         messages.append({"role": "user", "content": "".join(f'The user says: "{h}"\n'
                                                                             for h in heard).strip()})
                         think = self.think
                         continue
-                    if self.review and not reviewed:  # a stop hook: check once, then finish ("I'll head back", no move)
+                    if self.review and not reviewed and any(s.calls for s in record.steps):
                         reviewed = True
                         messages.append({"role": "user", "content": self._review(instruction, record, tools)})
                         think = self._budget(news=False)
                         continue
                     if reply.text and speak:
                         robot.say(speakable(reply.text))
+                    step.said = reply.text  # drafts stay in this model conversation, not in speech or the next request
                     last_said = reply.text or last_said
                     return self._finish(robot, record, "done", last_said)
 
@@ -304,7 +303,11 @@ class Agent:
                     else:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
                         self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
-                        result, ok = self._run(robot, tools, call.name, call.args, record)
+                        try:
+                            result, ok = self._run(robot, tools, call.name, call.args, record)
+                        except Preempted:
+                            step.calls.append((call.name, call.args, "Interrupted before returning a result.", False))
+                            raise
                         failed = not ok
                         if call.name == "say" and ok:
                             last_said = str(call.args.get("text", ""))

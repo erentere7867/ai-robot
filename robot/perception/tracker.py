@@ -105,14 +105,15 @@ class Track:
     apart: set[int] = field(default_factory=set, repr=False, compare=False)
     camera: str = ""
     normal: tuple[float, float] | None = None
-
+    visual_color: str = ""  # named from the object crop when a request actually needs its colour
+    color_from: int = 0
     def predict(self, dt: float) -> tuple[float, float]:
         """Predicted 2D position (x, y) at dt seconds into the future."""
         return self.x + self.vx * dt, self.y + self.vy * dt
 
     @property
     def color(self) -> str:
-        return self.colors.most_common(1)[0][0] if self.colors else ""
+        return self.visual_color or (self.colors.most_common(1)[0][0] if self.colors else "")
 
     @property
     def confirmed(self) -> bool:

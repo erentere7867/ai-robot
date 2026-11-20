@@ -266,6 +266,16 @@ Pictures, transcripts and reports: `runs/watched-1120/{before,after,distinct,tur
   views. Only 2 and 3 beams hit the respective chairs at the dock. This says nothing about reflectance, noise,
   a different mounting height, or obstacles outside that plane.
 
+#### Visible object described by colour (`runs/blue-grounding-SuyM`)
+
+An interactive request for a blue bicycle activated YOLOE for "bicycle", but the tracker stored "bike" and its
+box centre read brown. Replaying the dock views with YOLOE's masks gave black, not blue: tyres and background
+outnumber the frame pixels. A lookup now matches the tracker's canonical name and asks for the colour of the crop
+without suggesting the requested answer. It caches that answer on the track, not on every camera frame.
+In a separate apartment run, "What do you see?" got one reply, then "Go to the blue bicycle" took one drive,
+no search and no bumps. The chosen box matched instance 4 (IoU 0.98); the endpoint was 0.36 m from its edge,
+3.03 m from the other bike. This tests one viewpoint; it does not establish general colour recognition accuracy.
+
 ## Hazards found
 
 - **Under the stairs.** Exploring `apt_0`, the robot drove under the open staircase, whose underside slopes down

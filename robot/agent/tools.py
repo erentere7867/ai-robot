@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from robot.agent.api import NotFound, Object, PathBlocked, Pose, TargetLost, Timeout, geom
-from robot.sim.world import BEARINGS
+from robot.sim.world import BEARINGS, visual_name
 
 CAMERAS = {
     "front": ("front_camera",),
@@ -271,6 +271,12 @@ class Tools:
         _check_visual_name(text)
         matches = list(r.where(text)) or list(r.detect(text))  # known already, or in view when looked for by name
         if not matches:
+            label = visual_name(low)
+            if label and label != low:
+                candidates = [o for o in r.where(label) if o.last_seen <= 1.5]
+                if candidates:
+                    raise ToolError(f"I see {label}, but cannot confirm {text!r}. {self._choices(candidates)} "
+                                    "Check the marked views and use an ID only if it matches, or ask the user")
             raise ToolError(f"no {text!r} is known or in view. Use search({text!r}) to look for it")
         best = [o for o in matches if o.label == matches[0].label]
         if len(best) > 1:
