@@ -17,7 +17,7 @@ async function dashboard() {
     let send = () => ({ok: true});
     let sends = 0;
     vm.runInNewContext(script + '\ndraw = () => {};', {
-        document: {getElementById: ui, addEventListener() {}},
+        document: {getElementById: ui, addEventListener() {}, body: {classList: {toggle() {}}}},
         AbortController,
         IntersectionObserver: class { observe() {} },
         setTimeout(callback, delay) {
@@ -129,4 +129,30 @@ test('a stalled send times out and leaves the draft available', async () => {
     assert.equal(page.ui('cmd').value, draft);
     assert.equal(page.ui('send').disabled, false);
     assert.match(page.ui('send-error').textContent, /confirm.*sent/i);
+});
+
+test('a suite case disables every command control and explains interactive mode', async () => {
+    const page = await dashboard();
+    page.state(() => ({ok: true, json: async () => ({read_only: true, scene: 'O3', scenes: ['O3']})}));
+    await page.tick(350);
+    assert.equal(page.ui('read-only').hidden, false);
+    assert.match(page.ui('read-only').textContent, /Watching suite case O3.*read-only.*without --case/);
+    for (const id of ['cmd', 'send', 'stop', 'scene', 'talk']) assert.equal(page.ui(id).disabled, true, id);
+    page.ui('cmd').value = draft;
+    await page.submit();
+    assert.equal(page.sends(), 0);
+    page.state(() => ({ok: true, json: async () => ({read_only: false})}));
+    await page.tick(350);
+    assert.equal(page.ui('read-only').hidden, true);
+    for (const id of ['cmd', 'send', 'stop', 'scene', 'talk']) assert.equal(page.ui(id).disabled, false, id);
+});
+
+test('a read-only refusal explains why and preserves the draft', async () => {
+    const page = await dashboard();
+    const error = 'This page only watches one suite case. Run the demo without --case to give commands.';
+    page.send(() => ({ok: false, status: 409, json: async () => ({ok: false, error})}));
+    page.ui('cmd').value = draft;
+    await page.submit();
+    assert.equal(page.ui('cmd').value, draft);
+    assert.equal(page.ui('send-error').textContent, error);
 });

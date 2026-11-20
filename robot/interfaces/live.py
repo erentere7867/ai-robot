@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlparse
 
 @dataclass
 class State:
+    read_only: bool = False
     status: str = "idle"  # idle, thinking, acting, done, failed, stopped
     instruction: str = ""
     posture: str = "neutral"
@@ -210,14 +211,17 @@ class Live:
                     self._send(PAGE.encode("utf-8"), "text/html; charset=utf-8")
 
             def do_POST(self) -> None:  # noqa: N802
-                if self.path.startswith("/voice") and live.ears is not None:
+                kind = self.path.split("?")[0].strip("/")
+                if live.state.read_only and kind in ("instruct", "stop", "scene", "voice"):
+                    self._send(READ_ONLY, "application/json", 409)
+                    return
+                if kind == "voice" and live.ears is not None:
                     audio = self._read_body(8_000_000)
                     if audio:
                         threading.Thread(target=live.hear, args=(audio,), daemon=True).start()
                     self._send(b'{"ok":true}', "application/json")
                     return
                 raw = self._read_body(4096)
-                kind = self.path.split("?")[0].strip("/")
                 if kind in ("instruct", "stop", "scene"):
                     text = command_text(raw)
                     if text is None:
@@ -237,6 +241,10 @@ class Live:
 
 
 REFUSED = json.dumps({"ok": False, "error": 'Send a JSON object like {"text": "go to the kitchen"}.'}).encode()
+READ_ONLY = json.dumps({
+    "ok": False,
+    "error": "This page only watches one suite case. Run python -m robot.interfaces.demo without --case to give commands.",
+}).encode()
 
 
 def command_text(raw: bytes) -> str | None:
@@ -283,6 +291,10 @@ form{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 input,select,button{font:inherit;border-radius:8px;border:1px solid var(--line);padding:8px 12px;background:var(--bg);
 color:var(--ink)}input{flex:1;min-width:200px}button{cursor:pointer;background:var(--accent);color:#fff;border:0}
 #send:disabled{opacity:.65;cursor:wait}
+input:disabled,select:disabled,button:disabled{opacity:.55;cursor:not-allowed}
+body.read-only #send{cursor:not-allowed}
+.read-only-notice{margin-top:10px;padding:10px 14px;border:1px solid var(--line);border-left:4px solid var(--accent);
+border-radius:8px;background:var(--bg);font-size:14px;color:var(--ink)}
 button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .cams figure{margin:0}.cams img{width:100%;border-radius:8px;background:var(--bg)}.cams figcaption{font-size:13px;color:var(--muted)}
 .hint{font-size:13px;color:var(--muted);margin-top:6px}
@@ -300,9 +312,10 @@ button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-colum
 <span id="chime" class="badge" hidden></span>
 <span id="rooms" class="muted"></span>
 </div>
+<div id="read-only" class="read-only-notice" role="status" hidden></div>
 <form id="form">
 <input id="cmd" placeholder="e.g. Circle the table twice, then come back to me" autocomplete="off"
- aria-label="Robot command" aria-describedby="send-error">
+ aria-label="Robot command" aria-describedby="read-only send-error">
 <button type="submit" id="send">Send</button>
 <button type="button" class="stop" id="stop">Stop</button>
 <button type="button" id="talk" hidden title="Hold and speak">Hold to talk</button>
@@ -354,6 +367,7 @@ Faded objects are remembered.</div>
 const $=id=>document.getElementById(id);
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 const post=(p,text,signal)=>fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text}),signal});
+let readOnly=false;
 $('form').onsubmit=async e=>{
 e.preventDefault();
 const input=$('cmd'),send=$('send'),error=$('send-error'),draft=input.value,text=draft.trim();
@@ -364,14 +378,17 @@ send.textContent='Sending…';
 error.textContent='';
 try{
 const r=await post('/instruct',text,ctrl.signal);
-if(!r.ok)throw new Error('Command was not acknowledged');
+if(!r.ok){
+if(r.status===409){error.textContent=(await r.json()).error;return}
+throw new Error('Command was not acknowledged');
+}
 if(input.value===draft)input.value='';
 }catch{
 error.textContent='Couldn’t confirm the command was sent. Your draft is still here.';
 }finally{
 clearTimeout(timer);
 send.textContent='Send';
-send.disabled=false;
+send.disabled=readOnly;
 }
 };
 $('stop').onclick=()=>post('/stop','').catch(()=>{});
@@ -486,6 +503,12 @@ if(status.textContent!==text)status.textContent=text;
 status.className='status '+style;
 }
 function render(s,picksSeen){
+readOnly=!!s.read_only;
+$('read-only').hidden=!readOnly;
+$('read-only').textContent=readOnly?`Watching suite case ${s.scene} — read-only. Run python -m robot.interfaces.demo without --case to give commands.`:'';
+document.body.classList.toggle('read-only',readOnly);
+for(const id of ['cmd','stop','talk'])$(id).disabled=readOnly;
+$('send').disabled=readOnly||$('send').textContent==='Sending…';
 $('instruction').textContent=s.instruction||'Tell the robot what to do';
 showStatus(s.status||'idle');
 $('posture').textContent='posture: '+(s.posture||'neutral');
@@ -529,8 +552,8 @@ $('scene').innerHTML=(s.scenes||[]).map(n=>`<option>${esc(n)}</option>`).join(''
 if(picksSeen===picksSent){
 const room=s.scene_loading||s.scene||'';
 if($('scene').value!==room)$('scene').value=room;
-$('scene').disabled=!!s.scene_loading;
 }
+$('scene').disabled=readOnly||!!s.scene_loading;
 draw(s);
 voice(s);
 cams(s);

@@ -3,7 +3,7 @@
     python -m robot.interfaces.demo                     # the 3D apartment on the robot's real software (WSL, ROS,
                                                         # Habitat; llama-server on 8081): slower than real time
     python -m robot.interfaces.demo --scene "two rooms" # a fast 2D room instead
-    python -m robot.interfaces.demo --case O3           # watch one 2D suite case
+    python -m robot.interfaces.demo --case O3           # watch one 2D suite case (read-only; no commands)
     python -m robot.interfaces.demo --cameras all       # send all three cameras with each request
 
 Then open http://127.0.0.1:8765. Type an instruction and press Enter. While a task runs, whatever you type joins
@@ -166,6 +166,8 @@ def main() -> None:
     args = parser.parse_args()
 
     live = Live()
+    if args.case:
+        live.update(read_only=True)
     live.serve(args.port, host=args.host)
     from robot.interfaces.voice import attach
 
