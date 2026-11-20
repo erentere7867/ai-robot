@@ -479,7 +479,7 @@ g.beginPath();g.moveTo(X(x),Y(y));g.lineTo(X(x+.35*Math.cos(a)),Y(y+.35*Math.sin
 g.strokeStyle=ink;g.lineWidth=3;g.stroke();
 }
 
-let scenesKey='';
+let scenesKey='',stepsKey='',historyKey='';
 function showStatus(text,style=text){
 const status=$('status');
 if(status.textContent!==text)status.textContent=text;
@@ -496,7 +496,14 @@ $('todo').className=s.todo?'':'muted';
 $('thought').textContent=s.thought||'(none)';
 $('searching').innerHTML=(s.searching||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">no search yet</li>';
 const steps=(s.steps||[]).filter(it=>!String(it).startsWith('reply:'));
-$('steps').innerHTML=steps.map((it,idx)=>`<li class="${idx===steps.length-1?'now':''}${String(it).startsWith('thought:')?' thought':''}">${esc(it)}</li>`).join('')||'<li class="muted">none yet</li>';
+const stepKey=JSON.stringify(steps);
+if(stepKey!==stepsKey){
+stepsKey=stepKey;
+let turn=0;
+$('steps').innerHTML=steps.map((it,idx)=>String(it).startsWith('thought:')
+ ? `<li class="thought"><details><summary>Model turn ${++turn}</summary>${esc(it.slice(8))}</details></li>`
+ : `<li class="${idx===steps.length-1?'now':''}">${esc(it)}</li>`).join('')||'<li class="muted">none yet</li>';
+}
 const saidArr=s.said||[];
 $('said').innerHTML=saidArr.slice(0,-1).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">none</li>';
 if(saidArr.length>0){
@@ -506,7 +513,14 @@ if(lastSaid){$('reply').hidden=false;$('reply-text').textContent=lastSaid}
 else{$('reply').hidden=true}
 }else{$('reply').hidden=true}
 $('problems').innerHTML=(s.problems||[]).map(t=>`<li>${esc(t)}</li>`).join('')||'<li class="muted">none</li>';
-$('history').innerHTML=(s.history||[]).slice().reverse().map(h=>`<li><b>${esc(h.outcome)}</b> ${esc(h.instruction)}</li>`).join('')||'<li class="muted">nothing yet</li>';
+const history=s.history||[],nextHistory=JSON.stringify(history);
+if(nextHistory!==historyKey){
+historyKey=nextHistory;
+$('history').innerHTML=history.slice().reverse().map(h=>{
+const title=`<b>${esc(h.outcome)}</b> ${esc(h.instruction)}`;
+return h.steps?.length?`<li><details><summary>${title}</summary><ol>${h.steps.map(x=>`<li>${esc(x)}</li>`).join('')}</ol></details></li>`:`<li>${title}</li>`;
+}).join('')||'<li class="muted">nothing yet</li>';
+}
 const key=(s.scenes||[]).join('|');
 if(key!==scenesKey){
 scenesKey=key;

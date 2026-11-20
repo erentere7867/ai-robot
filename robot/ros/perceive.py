@@ -637,22 +637,20 @@ class Perception:
                     continue
                 self.tracker.missed(track, now)
 
-    def render_annotated_view(self, camera: str = "front_camera", width: int = 0, height: int = 0,
-                              newest: bool = False) -> np.ndarray | None:
-        """A frame from `camera` with the tracker's ids on its boxes: the frame the detector last ran on, so the boxes
-        fit it (what the model gets), or with `newest` the newest frame (for people watching: the boxes may trail
-        a little while the robot turns)."""
+    def render_annotated_view(self, camera: str, width: int, height: int, min_stamp: float) -> np.ndarray | None:
+        """Show badges only on their own recent exposure. If detection stalls, show current unmarked RGB instead."""
         with self.lock:
-            frame = None if newest else self.detected.get(camera)
-            if frame is None:
+            frame = self.detected.get(camera)
+            if frame is not None and frame[0] >= min_stamp:
+                rgb = frame[1]
+                raw_boxes = list(self.boxes.get(camera, ()))
+            else:
                 frame = self.frames.get(camera)
-            rgb = frame[1] if frame is not None else None
-            raw_boxes = list(self.boxes.get(camera, ()))
+                if frame is None or _seconds(frame[0]) < min_stamp:
+                    return None
+                rgb, raw_boxes = frame[1], []
             labels_by_id = {t.id: t.label for t in self.tracker.tracks.values()}
             rejected = {t.id for t in self.tracker.tracks.values() if t.rejected}
-        if rgb is None:
-            return None
-
         orig_h, orig_w = rgb.shape[:2]
         target_w = width if width > 0 else orig_w
         target_h = height if height > 0 else (int(round(target_w * 9 / 16)) if width > 0 else orig_h)

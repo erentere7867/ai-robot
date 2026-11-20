@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 from robot.agent.agent import Agent
@@ -11,6 +13,7 @@ from robot.agent.api import NotFound, Preempted
 from robot.agent.tools import Tools
 from robot.eval.suite import living_room, office
 from robot.mind.brain import Reply, ToolCall
+from robot.perception.camera import data_url
 from robot.sim.world import Scene, SimRobot
 
 
@@ -21,7 +24,7 @@ class Scripted:
         self.replies, self.seen, self.thinks = list(replies), [], []
 
     def chat(self, messages, tools, think=0, **_):  # noqa: ANN001, ANN003, ANN201
-        self.seen.append([dict(m) for m in messages])
+        self.seen.append(deepcopy(messages))  # the live context later trims older images in place
         self.thinks.append(think)
         return self.replies.pop(0)
 
@@ -115,6 +118,64 @@ def test_the_same_call_again_and_again_is_refused_with_a_note():
     brain = Scripted(turn, turn, turn, say("ok"), say("ok"))
     Agent(brain).do("Turn left.", sim)
     assert tool_results(brain.seen[3])[-1].startswith("Not run: you made this exact call 2 times")
+
+
+def test_repeated_look_samples_the_requested_camera_again_while_stationary(monkeypatch):
+    sim = SimRobot(living_room())
+    reads = []
+
+    def frame(camera, width, height):
+        reads.append(camera)
+        return np.full((20, 20, 3), len(reads), dtype=np.uint8)
+
+    monkeypatch.setattr(sim, "camera_view", frame)
+    brain = Scripted(*(call("look", direction=d) for d in ("rear right", "rear_left", "front", "front", "front")),
+                     say("Done."))
+    Agent(brain, review=False).do("Check the cameras.", sim)
+    assert reads[3:] == ["rear_right_camera", "rear_left_camera", "front_camera", "front_camera", "front_camera"]
+    urls = [tool_results(turn)[-1][-1]["image_url"]["url"] for turn in brain.seen[1:]]
+    assert len(set(urls)) == 5 and (sim.x, sim.y) == (0.0, 0.0)
+
+
+def test_search_returns_its_crop_before_a_queued_drive(monkeypatch):
+    sim = SimRobot(living_room())
+    seen, = sim.detect("chair")
+    crop = np.full((18, 15, 3), 67, dtype=np.uint8)
+    monkeypatch.setattr(sim, "target_crop", lambda i: crop if i == seen.id else None, raising=False)
+    monkeypatch.setattr(sim, "marked_cameras", lambda ids: [], raising=False)  # no badge in the latest frames
+    both = Reply("", tool_calls=[ToolCall("find", "search", {"what": "chair"}),
+                                 ToolCall("drive", "go_to", {"target": str(seen.id)})])
+    brain = Scripted(both, say("I see it."))
+    Agent(brain, cameras="none", review=False).do("Find the chair.", sim)
+    find, drive = tool_results(brain.seen[1])
+    assert "candidate" in find[0]["text"] and f"ID {seen.id}" in find[-2]["text"]
+    assert find[-1]["image_url"]["url"] == data_url(crop) and "Not run" in drive
+    assert not any(e.name == "go_to" for e in sim.trace.events)
+
+
+def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
+    sim = SimRobot(living_room())
+    cut = call("move", metres=1)
+    cut.raw = {"choices": [{"finish_reason": "length"}]}
+    record = Agent(Scripted(cut)).do("Drive a metre.", sim)
+    assert record.outcome == "failed" and "cut off" in sim.trace.said[-1][1]
+    assert not any(e.name == "move" for e in sim.trace.events)
+
+
+def test_a_side_and_an_edge_gap_compose_without_losing_the_target_id():
+    sim = SimRobot(living_room())
+    chair, = sim.detect("chair")
+    tools = Tools(sim)
+    before = sim.pose()
+    ambiguous, ok = tools.run("go_to", {"target": "right chair"})
+    assert not ok and "viewpoint" in ambiguous and sim.pose() == before
+    refused, ok = tools.run("go_to_side", {"target": str(chair.id), "side": "under"})
+    assert not ok and "clearance" in refused and sim.pose() == before
+    endpoint = sim.spot(chair, "behind", distance=0.75)
+    _, ok = tools.run("go_to_side", {"target": str(chair.id), "side": "behind", "distance": 0.75})
+    assert ok and np.linalg.norm(np.asarray(endpoint) - (sim.x, sim.y)) < 0.2
+    dispatch, = [e for e in sim.trace.events if e.name == "go_to"]
+    assert dispatch.args["target"].id == chair.id
 
 
 def test_a_distance_comparison_never_becomes_a_detector_label_or_starts_a_drive():

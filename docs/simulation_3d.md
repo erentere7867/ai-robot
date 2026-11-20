@@ -276,6 +276,21 @@ In a separate apartment run, "What do you see?" got one reply, then "Go to the b
 no search and no bumps. The chosen box matched instance 4 (IoU 0.98); the endpoint was 0.36 m from its edge,
 3.03 m from the other bike. This tests one viewpoint; it does not establish general colour recognition accuracy.
 
+#### When a navigation target disappears (interactive session `173110-YTOF`)
+
+`go_to("tv 25")` kept driving to a fixed point even after the track disappeared. Nav2's logged start and goal
+were 7.23 m apart. Replanning those points on the saved inflated map gave a 13.12 m route; 35 of 101 samples
+on the straight segment were blocked. That explains a detour, not why the robot believed a TV was there.
+The later lookup of ID 25 explicitly reported clear views without the object. The session did not keep its original
+crop, so neither an initial false label nor a bad map position can be ruled out. Nav2 eventually reported failure.
+
+In `guarded-final-IWne` a controlled verifier withdrawal after 0.15 m of an actual apartment drive cancelled the
+accepted Nav2 goal, with no bump. The estimated pose moved another 0.10 m in the next 0.75 simulated seconds:
+goal cancellation is not an instantaneous physical stop. In `view-goal-Q5jq` the right-hand chair's actual crop
+and the rear-right image with both badges reached the model. Despite that, the model substituted a normal approach
+for a request to go underneath. The bounded TV repeat also failed to find the real TV. These results validate
+the evidence and cancellation paths, **not** safe under-furniture navigation or reliable recognition of screens.
+
 ## Hazards found
 
 - **Under the stairs.** Exploring `apt_0`, the robot drove under the open staircase, whose underside slopes down

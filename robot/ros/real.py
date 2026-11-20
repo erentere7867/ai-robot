@@ -251,7 +251,7 @@ class RealRobot(RosRobot):
 
     def camera_view(self, camera: str = "front_camera", width: int = 512, height: int = 288) -> np.ndarray | None:
         """The latest real frame from one camera with the tracker's ids marked, as the vision model sees it."""
-        return self.perception.render_annotated_view(camera=camera, width=width, height=height)
+        return self.perception.render_annotated_view(camera, width, height, self._now() - SEEN_NOW)
 
     def marked_cameras(self, ids: set[int]) -> list[str]:
         """Fewest current views covering the visible choices. At a seam one camera showed only the farther chair."""
@@ -267,9 +267,15 @@ class RealRobot(RosRobot):
                     return [cam for _, cam, _ in group]
         return []
 
+    def target_crop(self, object_id: int) -> np.ndarray | None:
+        p = self.perception
+        with p.lock:
+            track = p.tracker.tracks.get(p.tracker.current(object_id))
+            return p.crops.get(track.id) if track and track.present and not track.rejected else None
+
     def live_view(self, camera: str = "front_camera") -> np.ndarray | None:
-        """The newest frame from one camera with the tracker's ids marked, for the live page."""
-        return self.perception.render_annotated_view(camera=camera, width=640, height=360, newest=True)
+        """The same exposure/ID pairing as the model, resized for the live page."""
+        return self.perception.render_annotated_view(camera, 640, 360, self._now() - SEEN_NOW)
 
     def obj(self, id: Any) -> Object:  # noqa: A002 - the name programs use
         """An object by any id it has had: two sightings found to be one thing share the older id from then on. An
@@ -281,7 +287,7 @@ class RealRobot(RosRobot):
         with self.perception.lock:
             now = self.perception.tracker.current(given)
             track = self.perception.tracker.tracks.get(now)
-        if track is not None and now not in self.things:
+        if track is not None:
             if track.rejected:
                 raise NotFound(f"object {given} was not a {track.label} after all: a closer look found none there")
             if not track.present:
@@ -445,14 +451,16 @@ class RealRobot(RosRobot):
             return []
         now = past[-1][0]
         recent = [(t, rgb) for t, rgb in past if now - t <= seconds]
-        picks = [recent[round(i * (len(recent) - 1) / max(1, count - 1))] for i in range(min(count, len(recent)))]
-        return [(now - t, rgb) for t, rgb in dict.fromkeys(picks)]
+        if len(recent) > count:
+            recent = [recent[round(i * (len(recent) - 1) / max(1, count - 1))] for i in range(count)]
+        return [(now - t, rgb) for t, rgb in recent]
 
     # ---- the vision model on what the cameras saw ----------------------------------------------------------------
     def _image_of(self, target: Any) -> str | None:
         target = self._target(target) if target is not None else None
-        crop = self.perception.crops.get(target.id) if isinstance(target, Object) else None
-        if crop is None:
+        if isinstance(target, Object):
+            crop = self.target_crop(target.id)
+        else:
             frame = self.perception.frames.get("front_camera")
             crop = frame[1] if frame else None
         return data_url(crop) if crop is not None and crop.size else None

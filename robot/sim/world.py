@@ -766,11 +766,15 @@ class SimRobot:
         tx, ty = self._reach(target, 0.0)[0]
         self._rotate(wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw))
 
-    def go_to(self, target: Point | Pose | Object | str, distance: float = 0.0) -> None:
-        self._call("go_to", target=target, distance=distance)
-        self._go(self._target(target), float(distance))
+    def go_to(self, target: Point | Pose | Object | str, distance: float = 0.0, *, side: str = "") -> None:
+        self._call("go_to", target=target, distance=distance, side=side)
+        self._go(self._target(target), float(distance), side=side)
 
-    def _go(self, target: Point | Pose | Object, distance: float) -> None:
+    def _destination(self, target: Point | Pose | Object, distance: float, side: str) -> tuple:
+        return (self.spot(target, side, distance), 0.0) if side else (target, distance)
+
+    def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
+        target, distance = self._destination(target, distance, side)
         goal, reach = self._reach(target, distance)
         if math.dist(goal, (self.x, self.y)) <= reach:
             if isinstance(target, Pose):

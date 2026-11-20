@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import Future
 from threading import Lock
 from types import SimpleNamespace
 from typing import Any
@@ -10,9 +11,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from robot.agent.api import NotFound, Object, PathBlocked, Pose
+from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted, TargetLost
 from robot.interfaces.live import PAGE
 from robot.perception.tracker import Track, Tracker
+from robot.ros.perceive import Perception
 from robot.ros.real import RealRobot
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
@@ -179,6 +181,41 @@ def test_ros_robot_goal_point_heading_faces_object():
     # Robot must arrive facing the target object (3.0, 0.0) from (end_x, end_y)
     expected_yaw = math.atan2(0.0 - end_y, 3.0 - end_x)
     assert abs(arrival_yaw - expected_yaw) < 1e-3
+
+
+@pytest.mark.parametrize("when", ["before acceptance", "while driving"])
+def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
+    robot = MockRosRobot(_make_scene([Thing("bag", 1.5, 0.0)]))
+    target, = robot.detect("bag")
+    sent, result = Future(), Future()
+    cancelled, velocities = [], []
+
+    def cancel():
+        cancelled.append(True)
+        result.set_result(SimpleNamespace(status=5))
+
+    handle = SimpleNamespace(accepted=True, cancel_goal_async=cancel, get_result_async=lambda: result)
+    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True,
+                                                        send_goal_async=lambda goal: sent)}
+    robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
+    robot._publish = lambda v, w: velocities.append((v, w))
+
+    def step(v, w):
+        if when == "before acceptance":
+            raise Preempted("stop")
+        robot.things.pop(target.id)  # perception withdrew the ID after Nav2 accepted it
+
+    robot._step = step
+    if when == "while driving":
+        sent.set_result(handle)
+        with pytest.raises(TargetLost, match="stopped approaching"):
+            RosRobot._act(robot, "navigate_to_pose", watch=target)
+        assert velocities[-1] == (0.0, 0.0) and robot._goal is None
+    else:
+        with pytest.raises(Preempted):
+            RosRobot._act(robot, "navigate_to_pose", watch=target)
+        sent.set_result(handle)
+    assert cancelled == [True]
 
 
 def test_ros_robot_go_arrival_tolerance_absorbs_nav2_abort():
@@ -464,6 +501,19 @@ def test_camera_for_ambiguous_ids_uses_distinct_visible_marks_not_old_or_rejecte
     assert real.marked_cameras({1, 2, 4}) == ["right", "left"]
 
 
+def test_a_stale_detection_cannot_put_its_badge_on_a_new_exposure():
+    p = object.__new__(Perception)
+    p.lock, p.tracker = Lock(), Tracker()
+    cam = "front_camera"
+    p.tracker.tracks[1] = Track(1, "bag", 1, 0, 0.2, 0, 0)
+    current = np.full((90, 160, 3), 73, dtype=np.uint8)
+    p.detected = {cam: (2.0, np.zeros_like(current))}
+    p.frames = {cam: (SimpleNamespace(sec=8, nanosec=0), current)}
+    p.boxes = {cam: [((10, 12, 45, 70), 1)]}
+    assert np.array_equal(p.render_annotated_view(cam, 160, 90, 7.0), current)
+    assert p.render_annotated_view(cam, 160, 90, 9.0) is None
+
+
 def test_real_robot_wall_bounds_rejection():
     from unittest.mock import MagicMock
 
@@ -581,5 +631,3 @@ def test_real_robot_outdoor_scene_does_not_reject_distant_tracks():
 
     # Distant object should NOT be rejected in an outdoor scene
     assert 1 in real.things
-
-

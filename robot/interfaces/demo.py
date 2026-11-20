@@ -80,7 +80,8 @@ def show_cameras(live: Live, holder: Holder) -> None:
         if holder.sim is None or name not in CAMERAS:
             return None
         view = getattr(holder.sim, "live_view", holder.sim.camera_view)  # the newest frame, where the robot has one
-        return encode_png(view(name))
+        rgb = view(name)
+        return encode_png(rgb) if rgb is not None else None
 
     live.camera = frame
     live.update(cameras=list(CAMERAS))
@@ -123,7 +124,8 @@ def drive(live: Live, agent: Agent, holder: Holder, new_scene: Any = None, *,
             live.update(status="failed", problems=[str(exc)])
             return
         live.show_world(holder.sim)
-        live.update(history=(live.state.history + [{"instruction": text, "outcome": record.outcome}])[-12:])
+        entry = {"instruction": text, "outcome": record.outcome, "steps": record.lines()}
+        live.update(history=(live.state.history + [entry])[-12:])
         print(f"{record.outcome:<9} {text}", flush=True)
 
     while stop_event is None or not stop_event.is_set():
