@@ -158,6 +158,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", help="run this suite case and keep the page open")
     parser.add_argument("--scene", choices=SCENES, default="3D apartment")
+    parser.add_argument("--host", default="127.0.0.1", help="dashboard bind address; use 0.0.0.0 on a trusted LAN")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--brain", default="http://127.0.0.1:8081", help="llama-server URL")
     parser.add_argument("--cameras", choices=("front", "all"), default="all")
@@ -165,11 +166,11 @@ def main() -> None:
     args = parser.parse_args()
 
     live = Live()
-    live.serve(args.port)
+    live.serve(args.port, host=args.host)
     from robot.interfaces.voice import attach
 
     attach(live)
-    print(f"Open http://127.0.0.1:{args.port}", flush=True)
+    print(f"Dashboard listening on {args.host}:{args.port}", flush=True)
     brain = Brain(args.brain)
     if not brain.healthy():
         print(f"llama-server is not answering on {args.brain}; start it first (tools/linux/brain.sh)", flush=True)

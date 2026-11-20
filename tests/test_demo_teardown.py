@@ -37,7 +37,7 @@ def round_trips(monkeypatch, *, fail=False):
     monkeypatch.setattr("sys.argv", ["demo"])
     live = Live()
     monkeypatch.setattr(demo, "Live", lambda: live)
-    monkeypatch.setattr(live, "serve", lambda port: None)
+    monkeypatch.setattr(live, "serve", lambda port, host: None)
     monkeypatch.setattr(voice, "attach", lambda live: None)
     monkeypatch.setattr(demo, "Brain", lambda url: SimpleNamespace(healthy=lambda: True))
     monkeypatch.setattr(demo, "Agent", lambda *args, **kwargs: SimpleNamespace(forget=Mock()))
