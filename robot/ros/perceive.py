@@ -422,7 +422,7 @@ class Perception:
         self.timings: list[float] = []
         self.counts: dict[str, int] = {}  # frames processed per camera
         self.served: dict[str, float] = {}  # when each camera's frame was last taken for detection
-        self.detected: dict[str, np.ndarray] = {}  # camera -> the frame the detector last ran on
+        self.detected: dict[str, tuple[float, np.ndarray]] = {}  # camera -> capture time, RGB paired with its boxes
         # every sighting: monotonic time, camera, track, map x, y, how its range was found, robot x, y, depth lag (s)
         self.sightings: deque[tuple] = deque(maxlen=2000)
         self.tilts = self.scan_bridge.tilts
@@ -626,7 +626,7 @@ class Perception:
             pairs = self.tracker.update(detections, now)
             matched = {id(t) for _, t in pairs}
             self.boxes[name] = [(boxes[id(det)], track.id) for det, track in pairs]
-            self.detected[name] = rgb  # the picture those boxes belong to (the newest may be a later one)
+            self.detected[name] = (t, rgb)
             self.sightings.extend((now, name, track.id, det.x, det.y, hows[id(det)], pose[0], pose[1], gap)
                                   for det, track in pairs)
             for det, track in pairs:  # pairs come sorted by score: find each detection's own box
@@ -658,10 +658,10 @@ class Perception:
         fit it (what the model gets), or with `newest` the newest frame (for people watching: the boxes may trail
         a little while the robot turns)."""
         with self.lock:
-            rgb = None if newest else self.detected.get(camera)
-            if rgb is None:
+            frame = None if newest else self.detected.get(camera)
+            if frame is None:
                 frame = self.frames.get(camera)
-                rgb = frame[1] if frame is not None else None
+            rgb = frame[1] if frame is not None else None
             raw_boxes = list(self.boxes.get(camera, ()))
             labels_by_id = {t.id: t.label for t in self.tracker.tracks.values()}
             rejected = {t.id for t in self.tracker.tracks.values() if t.rejected}

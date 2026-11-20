@@ -250,6 +250,16 @@ class RealRobot(RosRobot):
         """The latest real frame from one camera with the tracker's ids marked, as the vision model sees it."""
         return self.perception.render_annotated_view(camera=camera, width=width, height=height)
 
+    def marked_camera(self, ids: set[int]) -> str | None:
+        """One recent detector view that shows as many of the requested badges together as possible."""
+        p, now = self.perception, self._now()
+        with p.lock:
+            ids = {i for i in ids if (t := p.tracker.tracks.get(i)) and t.present and not t.rejected}
+            choices = ((len(ids.intersection(i for _, i in p.boxes[cam])), stamp, cam)
+                       for cam, (stamp, _) in p.detected.items() if 0 <= now - stamp <= SEEN_NOW)
+            count, _, camera = max(choices, default=(0, 0, None))
+        return camera if count else None
+
     def live_view(self, camera: str = "front_camera") -> np.ndarray | None:
         """The newest frame from one camera with the tracker's ids marked, for the live page."""
         return self.perception.render_annotated_view(camera=camera, width=640, height=360, newest=True)

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import math
+from threading import Lock
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from robot.agent.api import NotFound, Object, PathBlocked, Pose
 from robot.interfaces.live import PAGE
+from robot.ros.real import RealRobot
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
 
@@ -423,11 +426,24 @@ def test_wheels_that_do_not_follow_the_drive_put_the_touched_spot_in_the_scan():
     assert np.all(np.isnan(scan._contact_part(t + 200.0, (0.0, 0.0, 0.0))[2]))  # forgotten after CONTACT_KEEP
 
 
+def test_camera_for_ambiguous_ids_uses_distinct_visible_marks_not_old_or_rejected_ones():
+    real = object.__new__(RealRobot)
+    real._now = lambda: 10.0
+    tracks = {i: SimpleNamespace(present=True, rejected=i == 3) for i in (1, 2, 3)}
+    real.perception = SimpleNamespace(
+        lock=Lock(), tracker=SimpleNamespace(tracks=tracks),
+        detected={"front": (9.9, None), "left": (9.5, None), "right": (6.0, None)},
+        boxes={"front": [((), 1), ((), 1), ((), 3)], "left": [((), 1), ((), 2)], "right": [((), 4)]},
+    )
+    assert real.marked_camera({1, 2, 3}) == "left"
+    tracks[4] = SimpleNamespace(present=True, rejected=False)
+    assert real.marked_camera({3, 4}) is None
+
+
 def test_real_robot_wall_bounds_rejection():
     from unittest.mock import MagicMock
 
     from robot.perception.tracker import Track
-    from robot.ros.real import RealRobot
 
     # Scene 10x10 -> bounds are +/- 4.88 (width/2 - 0.12)
     scene = _make_scene()
@@ -541,7 +557,6 @@ def test_real_robot_outdoor_scene_does_not_reject_distant_tracks():
 
     # Distant object should NOT be rejected in an outdoor scene
     assert 1 in real.things
-
 
 
 

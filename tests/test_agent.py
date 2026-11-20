@@ -65,12 +65,18 @@ def test_with_no_cameras_the_model_gets_the_list_and_pictures_only_when_it_looks
     assert any(p.get("type") == "image_url" for p in brain.seen[1][-1]["content"])  # after look
 
 
-def test_an_ambiguous_target_is_explained_and_nothing_moves():
+@pytest.mark.parametrize("marked", [None, "rear_right_camera"])
+def test_an_ambiguous_target_is_explained_and_nothing_moves(marked):
     sim = SimRobot(office())
+    sim.marked_camera = lambda ids: marked if len(ids) >= 2 else None
     start = (sim.x, sim.y)
     brain = Scripted(call("go_to", target="box"), say("Which box?"), say("Which box?"))
     Agent(brain).do("Go to the box.", sim)
     result = tool_results(brain.seen[1])[0]
+    if marked:
+        assert [p["text"] for p in result if p.get("text", "").endswith("camera:")] == ["rear-right camera:"]
+        assert sum(p["type"] == "image_url" for p in result) == 1
+        result = result[0]["text"]
     assert result.startswith("Error:") and "could be any of" in result and "Use the id" in result
     assert (sim.x, sim.y) == start
 

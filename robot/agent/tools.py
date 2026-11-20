@@ -250,6 +250,9 @@ class Tools:
             raise ToolError(f"no {text!r} is known or in view. Use search({text!r}) to look for it")
         best = [o for o in matches if o.label == matches[0].label]
         if len(best) > 1:
+            marked_camera = getattr(r, "marked_camera", None)
+            if marked_camera and (camera := marked_camera({o.id for o in best})):
+                self.looked.append(camera)  # the earlier views may predate the detector being asked for this word
             listed = "; ".join(f"{o.label} {o.id} ({_where_words(o)})" for o in sorted(best, key=lambda o: o.distance))
             raise ToolError(f"{text!r} could be any of: {listed}. Use the id, or ask the user which one")
         return matches[0]
