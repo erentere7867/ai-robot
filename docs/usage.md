@@ -63,6 +63,12 @@ To control the simulator from a second device on a trusted LAN, pass `--host 0.0
 or `python -m robot.interfaces.demo`. Open `http://<PC-LAN-IP>:8765` on that device, not `0.0.0.0`.
 The dashboard has no authentication. Keep it off public networks; without the flag it listens only on loopback.
 
+If model turns suddenly slow down on the RX 6600, check `eval time` in `%TEMP%\sprocket-llama.log` (generation,
+not `prompt eval time`). In one apartment session it fell from about 60 to 10 tokens/s while llama-server held
+1.9 GiB of shared GPU memory. Restarting llama-server alone did not help. With the demo stopped, stop **both**
+Windows servers, start `tools\brain.ps1`, wait until ready, then start `tools\win\vision.ps1` and the demo.
+With the original full-GPU settings, a three-camera turn then generated 541 tokens at 59 tokens/s.
+
 ## Tests and lint (in WSL, from the repo)
 
 How to test a change, and how to set up a plain Linux machine for it: [testing.md](testing.md).
