@@ -30,7 +30,7 @@ from robot.perception.locate import lidar_range, locate
 from robot.perception.overlay import draw_set_of_mark
 from robot.perception.pose import estimate_pose_from_keypoints
 from robot.perception.rig import RIG, to_map, to_robot
-from robot.perception.tracker import Detection, Track, Tracker, canonical, look, pixels
+from robot.perception.tracker import GONE_AFTER, Detection, Track, Tracker, canonical, look, pixels
 from robot.ros.model import BODY_R, TOF
 
 TOPICS = {name: f"/{name}/image" for name in RIG}  # the camera drivers' colour pictures
@@ -38,6 +38,7 @@ DEPTH_TOPICS = {name: f"/{name}/depth" for name in RIG}  # the depth node's esti
 TOF_TOPICS = {"front": "/tof/front", "rear": "/tof/rear"}  # 8x8 grids from the MCU, metres
 SEE_FAR = 3.5  # beyond this a miss is not evidence: the detector may simply not resolve it
 PAST_EVERY, PAST_KEPT = 0.5, 60  # seconds between kept front pictures, and how many: the last 30 s, to look back on
+PLACE_SLACK = 0.3  # metres round a mapped place the vision model is shown when the detector stops finding a thing
 _, _, _TOF_HEIGHT, _TOF_PITCH, _TOF_HFOV, _ = TOF["front"]
 
 
@@ -74,6 +75,25 @@ def _only(rgb: np.ndarray, box: tuple[int, int, int, int], others: list[tuple[in
         if a < c and b < d:
             crop[b:d, a:c] = 128
     return crop
+
+
+def is_there(brain: Any, picture: np.ndarray, label: str) -> bool:
+    """The vision model's yes to a thing in the middle of a picture."""
+    question = f"Is there a {label} in the middle of this picture? Answer yes or no."
+    return brain.yes_probability(_with_image(data_url(picture), question)) >= 0.5
+
+
+def place_picture(rgb: np.ndarray, cam: Any, bx: float, by: float, radius: float) -> np.ndarray | None:
+    """The part of a picture where a thing mapped at robot-frame (bx, by) should be, PLACE_SLACK metres wider each
+    way for its mapped place being a little off; None where it falls outside the picture."""
+    cam = cam.at(rgb.shape[1], rgb.shape[0])
+    middle = cam.project(bx, by, radius)  # half way up a thing about as tall as it is wide
+    if middle is None:
+        return None
+    half = cam.focal * (radius + PLACE_SLACK) / max(0.1, math.hypot(bx - cam.x, by - cam.y))
+    (u, v), (h, w) = middle, rgb.shape[:2]
+    x1, x2, y1, y2 = int(max(0, u - half)), int(min(w, u + half)), int(max(0, v - half)), int(min(h, v + half))
+    return rgb[y1:y2, x1:x2].copy() if x2 - x1 >= 16 and y2 - y1 >= 16 else None
 
 
 def taken_with(buffer: deque, t: float, within: float) -> tuple[Any, float]:
@@ -428,6 +448,7 @@ class Perception:
         self.scans = self.scan_bridge.scans
         self.depth_pairs: deque[float] = deque(maxlen=500)  # 0 when a frame found its depth image, else how far off
         self.crops: dict[int, np.ndarray] = {}
+        self.doubts: dict[int, tuple[str, np.ndarray]] = {}  # track id -> its label and the picture of its place
         self.past: deque[tuple[float, np.ndarray]] = deque(maxlen=PAST_KEPT)  # front pictures, 2 a second
         self.boxes: dict[str, list[tuple[tuple[int, int, int, int], int]]] = {}  # camera -> latest (box, track id)
         self.timings: list[float] = []
@@ -521,26 +542,43 @@ class Perception:
                 print(f"perception: {name}: {exc}", flush=True)
 
     def _verify_loop(self) -> None:
+        """The vision model's yes or no on a picture, for a new thing the detector named (yes keeps it, no drops it:
+        YOLOE fires on an asked word too easily, black panels as "tv", 12% of ball-free pictures as "ball"; renaming
+        a no to another of the few asked words instead turned a false "tv" into a "sofa"), and for a thing the
+        detector stopped finding where it is mapped, shown that place (no: gone; yes: still there). On the detector's
+        misses alone the robot gave up real things mid-approach, seen up close or from aside: a bike seen 110 times,
+        a plant 53 times, beanbags; false ones it named from afar (a table as "tv") go as before, on the model's no."""
         while not self._stop:
+            # New things first: tools drive to them, and a doubted thing stays until it is answered. Asked after the
+            # doubts, the bike YOLOE called an umbrella (the model's yes to that crop: 0%) was driven to unchecked.
             with self.lock:
                 track = self.tracker.to_name(self.crops)
-                crop = self.crops.get(track.id) if track is not None else None
-            if track is None:
+                doubt = next(iter(self.doubts), None) if track is None else None
+                if track is not None:
+                    label = track.votes.most_common(1)[0][0] if track.votes else track.label
+                    picture = self.crops[track.id]
+                elif doubt is not None:
+                    label, picture = self.doubts[doubt]
+            if doubt is None and track is None:
                 time.sleep(0.2)
                 continue
-            guess = track.votes.most_common(1)[0][0] if track.votes else track.label
-            # the vision model checks the detector's word on the crop: yes keeps it, no drops the thing. YOLOE fires
-            # on an asked word too easily (black panels as "tv", 12% of ball-free pictures as "ball"); renaming a
-            # no to another of the few asked words instead turned a false "tv" into a "sofa"
             try:
-                question = f"Is there a {guess} in the middle of this picture? Answer yes or no."
-                yes = self.brain.yes_probability(_with_image(data_url(crop), question)) >= 0.5
+                yes = is_there(self.brain, picture, label)
             except Exception as exc:  # noqa: BLE001 - unchecked when the model is unreachable: asked again later
-                print(f"perception: checking {track.label} {track.id}: {exc}", flush=True)
+                print(f"perception: checking {label}: {exc}", flush=True)
                 time.sleep(1.0)
                 continue
             with self.lock:
-                self.tracker.verify(track, guess if yes else None, pixels(crop), sure=yes)
+                if track is not None:
+                    self.tracker.verify(track, label if yes else None, pixels(picture), sure=yes)
+                    continue
+                del self.doubts[doubt]
+                doubted = self.tracker.tracks.get(doubt)
+                if doubted is not None and doubted.misses >= GONE_AFTER:  # not seen again while the model looked
+                    if yes:
+                        doubted.misses = 0
+                    else:
+                        doubted.present = False
 
     def process(self, name: str) -> None:
         stamp, rgb = self.frames[name]
@@ -636,7 +674,12 @@ class Perception:
                 scan_r = lidar_range(self.scan, math.atan2(by, bx))
                 if scan_r is not None and scan_r < dist - track.radius - 0.3:  # something nearer hides it
                     continue
-                self.tracker.missed(track, now)
+                if self.tracker.missed(track, now):
+                    where = place_picture(rgb, cam, bx, by, track.radius) if self.brain is not None else None
+                    if where is None:
+                        track.present = False
+                    else:
+                        self.doubts.setdefault(track.id, (track.label, where))
 
     def render_annotated_view(self, camera: str, width: int, height: int, min_stamp: float) -> np.ndarray | None:
         """Show badges only on their own recent exposure. If detection stalls, show current unmarked RGB instead."""

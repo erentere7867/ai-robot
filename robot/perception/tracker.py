@@ -355,13 +355,13 @@ class Tracker:
                     if track is o:
                         pairs[k] = (d, t)
 
-    def missed(self, track: Track, now: float | None = None) -> None:
-        """A camera looked clearly at where `track` should be and did not see it. Gone after GONE_AFTER such misses
-        in a row, and, given `now`, GONE_S since anything last saw it: misses come from all three cameras, and two of
-        them each missing a flickering plant for a few frames took it off the map a second after a search found it."""
+    def missed(self, track: Track, now: float | None = None) -> bool:
+        """A camera looked clearly at where `track` should be and did not see it: True once the detector's misses say
+        it is gone, GONE_AFTER in a row and, given `now`, GONE_S since anything last saw it (misses come from all three
+        cameras, and two of them each missing a flickering plant for a few frames took it off the map a second after
+        a search found it). Whether it is gone is the caller's to decide (perception asks the vision model first)."""
         track.misses += 1
-        if track.misses >= GONE_AFTER and (now is None or now - track.last_seen >= GONE_S):
-            track.present = False
+        return track.misses >= GONE_AFTER and (now is None or now - track.last_seen >= GONE_S)
 
     def verify(self, track: Track, label: str | None, pixels: int = 0, sure: bool = False) -> None:
         """The vision model's name for the track's crop of `pixels` pixels; None means it saw no object. Its word

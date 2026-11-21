@@ -692,6 +692,10 @@ class SimRobot:
             return self._object(t, where, when)
         raise NotFound(f"object {id} has not been seen")
 
+    def sees_now(self, target: Object) -> bool:
+        """Is the thing in view now, where it is mapped (an arrival is confirmed by it)."""
+        return target.last_seen <= 0
+
     # ---- motion -------------------------------------------------------------------------------------------------
     def toward(self, direction: str, metres: float) -> Point:
         """A floor point the planner can reach, `metres` away in a direction from the robot's own (front, front-left,

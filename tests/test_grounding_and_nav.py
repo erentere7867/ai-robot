@@ -218,6 +218,33 @@ def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
     assert cancelled == [True]
 
 
+def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled():
+    from robot.ros.robot import PROGRESS_S
+
+    robot = MockRosRobot(_make_scene())
+    sent, result, cancelled = Future(), Future(), []
+
+    def cancel():
+        cancelled.append(robot.t)
+        result.set_result(SimpleNamespace(status=5))
+
+    sent.set_result(SimpleNamespace(accepted=True, cancel_goal_async=cancel, get_result_async=lambda: result))
+    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True,
+                                                        send_goal_async=lambda goal: sent)}
+    robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
+    robot._publish = lambda v, w: None
+
+    def step(v, w):  # Nav2 backs up, spins and replans: a second passes and the robot is no nearer
+        robot.t += 1.0
+        robot.x = 0.3 * math.sin(robot.t)
+
+    robot._step = step
+    goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
+    with pytest.raises(PathBlocked, match="no nearer"):
+        RosRobot._act(robot, "navigate_to_pose", pose=goal)
+    assert len(cancelled) == 1 and PROGRESS_S < cancelled[0] <= PROGRESS_S + 2
+
+
 def test_ros_robot_go_arrival_tolerance_absorbs_nav2_abort():
     scene = _make_scene()
     robot = MockRosRobot(scene)
@@ -697,20 +724,46 @@ def test_a_thing_mapped_into_a_walls_margin_is_approached_from_the_nearest_floor
 def test_a_search_steps_back_from_a_likely_way_with_no_floor_to_see_the_thing_whole():
     real = object.__new__(RealRobot)
     SimRobot.__init__(real, Scene(10.0, 10.0, [], {}))
-    real.search_log, asked, floor = [], [], {"front_camera": []}
+    real.search_log, asked, floor, real._stepped_back = [], [], {"front_camera": []}, False
 
     def spots(camera: str, **_: Any) -> tuple:
         asked.append(camera)
         return np.zeros((4, 4, 3), np.uint8), floor.get(camera, [(-2.0, 2.0)])
 
     real.floor_spots = spots
-    real.brain = SimpleNamespace(yes_probability=lambda _: 0.95 if asked[-1] == "front_camera" else 0.07)
+    odds = {"front_camera": 0.95}
+    real.brain = SimpleNamespace(yes_probability=lambda _: odds.get(asked[-1], 0.07))
     stop = real._next_stop("blue bicycle", None, [])  # right in front: the bicycle itself leaves no floor that way
     assert isinstance(stop, Pose) and (round(stop.x, 2), round(stop.y, 2), stop.yaw) == (-1.0, 0.0, 0.0)
     assert real.search_log[-1].endswith("stepped back to see front whole")
+    assert real._next_stop("blue bicycle", None, []) == (-2.0, 2.0)  # once a search: no second step back
+    real._stepped_back = False
+    odds["front_camera"] = 0.3  # likeliest, but unlikely: nothing worth backing off to see
+    assert real._next_stop("blue bicycle", None, []) == (-2.0, 2.0) and real.search_log[-1].endswith("went rear-left")
+    odds["front_camera"] = 0.95
     assert real._next_stop("blue bicycle", None, [(-1.0, 0.0)]) == (-2.0, 2.0)  # stepped back already: floor elsewhere
     assert real.search_log[-1].endswith("went rear-left")
     floor.update({"rear_left_camera": [], "rear_right_camera": []})
     assert real._next_stop("blue bicycle", None, [(-1.0, 0.0)]) is None  # nowhere new to go: the search ends
     floor["front_camera"] = [(1.5, 0.0), (3.0, 0.5)]
     assert real._next_stop("blue bicycle", None, []) == (3.0, 0.5)  # floor that way: the farthest, as before
+
+
+@pytest.mark.parametrize(("seen_ago", "answer", "confirmed"), [(0.4, None, True), (6.6, 0.9, True), (6.6, 0.1, False)])
+def test_an_arrival_is_confirmed_by_the_detector_or_the_vision_model_on_the_things_place(seen_ago, answer, confirmed):
+    from robot.perception.rig import RIG
+
+    real = object.__new__(RealRobot)
+    cam = RIG["front_camera"]
+    real.perception = SimpleNamespace(frames={"front_camera": (0, np.zeros((cam.height, cam.width, 3), np.uint8))})
+    real._pose_at = lambda stamp: (0.0, 0.0, 0.0)
+    asked = []
+
+    def yes_probability(messages: list) -> float:
+        asked.append(messages[0]["content"][-1]["text"])
+        return answer
+
+    real.brain = SimpleNamespace(yes_probability=yes_probability)
+    beanbag = Object(3, "beanbag", (1.0, 0.0), 1.0, 0.0, "ahead", 0.5, "grey", seen_ago)  # parked facing it, 1 m off
+    assert real.sees_now(beanbag) is confirmed
+    assert asked == ([] if answer is None else ["Is there a beanbag in the middle of this picture? Answer yes or no."])

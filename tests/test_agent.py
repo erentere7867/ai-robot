@@ -257,6 +257,8 @@ def test_motion_progress_uses_validated_arguments(name, args, progress):
 def test_go_to_a_name_not_yet_seen_searches_for_it_and_then_goes_there():
     sim = SimRobot(Scene(16.0, 6.0, [Thing("ball", 6.0, 0.0, radius=0.15, color="red")], {}, start=Pose(-6.0, 0, 0)))
     ball, = sim.things.values()
+    turn_only, ok = Tools(sim).run("face", {"target": "red ball"})  # facing never drives off to look
+    assert not ok and "look('around'" in turn_only and not any(e.name == "search" for e in sim.trace.events)
     result, ok = Tools(sim).run("go_to", {"target": "red ball"})  # 12 m away: out of the cameras' range
     assert ok and result.startswith(f"Searched for it: found ball {ball.id}. Drive finished.")
     names = [e.name for e in sim.trace.events]

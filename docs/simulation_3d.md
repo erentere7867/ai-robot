@@ -326,6 +326,53 @@ this touches, N1 and S3 passed (S3 in 3 s, the model answering without a call); 
 before (N5 passed 2 of the last 5 GPU runs): every "TV" known was a table or rug, and S1 kept choosing a "plant"
 never seen again when faced, with 21 bumps turning in place by the furniture (8 and 5 in its last two runs).
 
+#### Requests nobody tuned on (`runs/explore-1` to `-5`, 21 November)
+
+Eight new requests in apt_0 (`runs/explore/new_tasks.py`: the beanbag, the umbrella, the shoes, the kitchen, facing
+the sofa, the monitor, the middle of the rug, the stool), each checked against the layout's truth, run, read, fixed
+and run again. What made the robot look dumb, in the order found:
+
+- **Real things given up as gone.** "Go to the beanbag" made six `go_to` calls; five ended "object N was not there
+  when the cameras last looked" while the model saw the beanbags in its pictures, and the task ran out of time 3.6 m
+  from them with 26 bumps. Six detector misses in a row had made a track gone. The vision model now looks first at
+  the part of the picture where the thing is mapped (`place_picture`): no makes it gone, yes keeps it. Reports had
+  2 real things (a bike seen 110 times, a plant 53) and 2 false TVs dropped this way; sightings did not tell them
+  apart (the false TVs were seen 60-103 times), the model's answer can (below). Afterwards no real thing was
+  dropped; a false umbrella (a beanbag) and false shoes (a towel) were, on the model's no.
+- **Arrivals refused.** Parked about 1 m from a real beanbag, `go_to` answered "target not confirmed" seven times:
+  it wanted a detector sighting from the last instant, and YOLOE had not named the beanbag for 6-160 s. The
+  vision model's yes on the thing's place now confirms an arrival too (`sees_now`). The same request then took 5
+  turns and 39 s instead of 16 turns and 196 s, ending 0.86 m from a beanbag's edge: as near as the robot's map
+  allows, the beanbags standing in floor it mapped as taken (the check wants 0.75 m).
+- **A goal Nav2 could not reach.** A search stop free on the robot's map but not on Nav2's costmap kept Nav2 backing
+  up, spinning and replanning along one 2 m stretch for 490 simulated seconds. A Nav2 goal that brings the robot no
+  0.25 m nearer in 30 simulated seconds is now given up as blocked; the search then goes on elsewhere.
+- **New things checked last.** With the "gone?" questions ahead of naming new things on the vision model's one
+  queue, the bike YOLOE called an umbrella was driven to before it was checked; the model's yes to that crop is 0%
+  (real beanbags 100%, a beanbag called an umbrella 3%). New things are now named first.
+- **Step backs that cannot help.** The search stepped back on a 17% yes, and backed away from "kitchen" again and
+  again (90-100% yes ahead, nothing YOLOE can name). It now steps back only on a yes of at least half, once a search.
+- **"area" taken for a direction** (`search(area="rear-right")`, in two tasks): its description now says the
+  search looks every way itself.
+- **"Turn to face the sofa" drove off.** The search for a name not in view, added to `go_to` above, ran for every
+  tool that takes a target; `face("sofa")` with the sofa 4.9 m off and unnamed drove away to look for it. Only
+  the tools that go to the thing search now; `face` and `keep_facing` answer that it is not in view.
+
+With all of it, "turn to face the sofa" took one call and 11 s, and "go to the stool" one call and 15 s, to one of
+the bar-height seats by the bike that the vision model had called "stool-like chairs" and the layout calls chairs
+(a check that names one kind of thing, not the robot, failed there). What these fixes do not reach is what the robot can
+name and place at all, and three of the eight failed on it while the vision model kept answering 72-100% that the
+thing lay ahead: things YOLOE does not name from 22 cm, a place that is not one thing, and a flat thing on the floor.
+It never found the umbrella or the four shoes (it passed 1 m from the umbrella) and named 13 other things "shoes"
+(towels, cloths, a chest of drawers, a rack, a chair, the bike, the TV), some of which the vision model's yes let
+through; it never named "computer monitor" or "monitor" (that task passed only because time ran out with the robot
+0.75 m from it); the open-plan flat is one room to the robot (named "office" by the vision model), so "go to the
+kitchen" became a search for a kitchen-shaped thing; and a rug is dropped as floor by design (`locate`). Only the
+detector turns a sighting into a place to drive to; the vision model, which sees these, cannot. Words left in the
+shared detector from earlier tasks also fill the object list ("sofa": 9 tracks for 1 sofa). Bumps, 7 contacts and
+42 ticks in one task, all came from turning in place by the coffee and desk tables, whose legs and frames the depth
+network does not see (the hazard below).
+
 #### When a navigation target disappears (interactive session `173110-YTOF`)
 
 `go_to("tv 25")` kept driving to a fixed point even after the track disappeared. Nav2's logged start and goal

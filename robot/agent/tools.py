@@ -246,8 +246,10 @@ class Tools:
             result += " From the request start: " + "; ".join(f"ID {i} about {d:.1f} m" for d, i in start) + "."
         return result
 
-    def _resolve(self, target: str, *, people_only: bool = False) -> Any:
-        """An id, 'user', a room or saved place, or a description, as something the robot can drive to."""
+    def _resolve(self, target: str, *, people_only: bool = False, find: bool = True) -> Any:
+        """An id, 'user', a room or saved place, or a description, as something the robot can drive to; `find`: a
+        description neither known nor in view is searched for, which drives (not for "turn to face the sofa": it
+        drove off to look for the sofa)."""
         r = self.robot
         text = str(target).strip().strip("'\"")
         low = re.sub(r"^(the|a|an|my)\s+", "", text.lower()).strip()
@@ -293,6 +295,9 @@ class Tools:
                 if candidates:
                     raise ToolError(f"I see {label}, but cannot confirm {text!r}. {self._choices(candidates)} "
                                     "Check the marked views and use an ID only if it matches, or ask the user")
+            if not find:
+                raise ToolError(f"no {text!r} is known or in view. Use look('around', {text!r}) to look without "
+                                "driving, or search to drive round looking for it")
             # "go to the bicycle" means finding it first: answering "use search" cost the model a turn, and a small
             # model need not know to
             self.found = r.search(text)
@@ -374,8 +379,9 @@ class Tools:
                            "area until the cameras see it.",
                  {"what": {"type": "string", "description": "a visual name, like \"red ball\" or \"keys\", "
                                                            "without a distance comparison"},
-                  "area": {"type": "string", "description": "\"here\" (this room), a room name, or \"everywhere\". "
-                                                           "Search the room where it most likely is first."},
+                  "area": {"type": "string", "description": "\"here\" (this room), a room name, or \"everywhere\", not "
+                                                           "a direction: the search looks every way itself. Search "
+                                                           "the room where it most likely is first."},
                   "near": {"type": "string", "description": "optional: a thing to start beside, where it likely is "
                                                            "(an id or a name, like \"sofa 4\")"}},
                  ("what",), self.search, moves=True),
@@ -434,7 +440,7 @@ class Tools:
             try:
                 self.robot.face(t)
                 fresh = self.robot.obj(t.id)
-                if fresh.last_seen > 0:
+                if not self.robot.sees_now(fresh):
                     raise NotFound(f"last seen {fresh.last_seen:g} s ago")
             except NotFound as exc:
                 self.looked = list(CAMERAS["front"])
@@ -470,12 +476,12 @@ class Tools:
         return f"Followed for {seconds:g} s." if seconds else "Stopped following."
 
     def face(self, target: str) -> str:
-        t = self._resolve(target)
+        t = self._resolve(target, find=False)
         self.robot.face(t)
         return f"Facing {self._name(t)}."
 
     def keep_facing(self, target: str) -> str:
-        t = self._resolve(target)
+        t = self._resolve(target, find=False)
         self.robot.face(t, background=True)
         while True:  # until "stop", or words from the user, preempt it
             self.robot.wait(1.0)

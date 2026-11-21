@@ -22,9 +22,9 @@ from robot.agent.api import Matches, NotFound, Object, Point, Pose
 from robot.mind.brain import _with_image
 from robot.mind.memory import ANCHOR_LABELS, CANONICAL_SYNONYMS
 from robot.perception.camera import data_url
-from robot.perception.rig import RIG, to_map
+from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import pixels
-from robot.ros.perceive import Perception
+from robot.ros.perceive import Perception, is_there, place_picture
 from robot.ros.robot import RosRobot
 from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing, visual_name
 
@@ -299,6 +299,19 @@ class RealRobot(RosRobot):
                                "place; it may have been moved")
         return super().obj(now)
 
+    def sees_now(self, target: Object) -> bool:
+        """Seen by the detector a moment ago, or else by the vision model in the part of the front picture where the
+        thing is mapped. Parked facing a real beanbag 1 m away, YOLOE had not named it for 6-160 s, and all seven
+        arrivals were refused as "not confirmed" until the task ran out of turns 0.86 m from it."""
+        if target.last_seen <= SEEN_NOW:
+            return True
+        frame = self.perception.frames.get("front_camera")
+        pose = self._pose_at(frame[0]) if frame is not None else None
+        if pose is None or self.brain is None:
+            return False
+        where = place_picture(frame[1], RIG["front_camera"], *to_robot(pose, *target.position), target.radius)
+        return where is not None and is_there(self.brain, where, target.label)
+
     def _visible(self) -> list[Thing]:
         return [self.things[i] for i in self._detected if i in self.things]
 
@@ -414,6 +427,7 @@ class RealRobot(RosRobot):
     def search(self, description: str, area: str = "here") -> Object | None:
         self.search_log = []
         self._search_from = len(self.trace.poses)  # where this search's own trail begins
+        self._stepped_back = False  # once a search: a second step back backed away from "kitchen" again and again
         return super().search(description, area)
 
     def _search_trail(self, every: float = 0.5) -> list[Point]:
@@ -453,9 +467,11 @@ class RealRobot(RosRobot):
         p, cam, spots = max(options, key=lambda o: o[0])
         facing = self.yaw + RIG[cam].yaw
         back = self._floor_toward(facing + math.pi, STEP_BACK)
-        if not spots and all(math.dist(back, a) >= STEP_BACK / 2 for a in (*tried, (self.x, self.y))):
-            stop, went = Pose(*back, math.degrees(facing)), "stepped back to see {} whole"
-        else:  # with no floor behind either (a stop that did not move came up 20 times), the likeliest way with floor
+        if not spots and p >= 0.5 and not self._stepped_back and all(
+                math.dist(back, a) >= STEP_BACK / 2 for a in (*tried, (self.x, self.y))):
+            stop, went, self._stepped_back = Pose(*back, math.degrees(facing)), "stepped back to see {} whole", True
+        else:  # the likeliest way with floor: nothing likely right there (a step back on a 17% yes saw nothing), or
+            # no floor behind either (a stop that did not move came up 20 times)
             p, cam, spots = max((o for o in options if o[2]), key=lambda o: o[0], default=(0.0, cam, []))
             stop, went = max(spots, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
         if stop is None:

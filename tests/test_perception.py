@@ -68,9 +68,8 @@ def test_the_tracker_keeps_ids_merges_views_and_forgets_on_evidence():
     objects = tr.objects()
     assert [t.label for t in objects] == ["sofa"] and objects[0].hits == 2  # the chair needs a second sighting
     sofa = objects[0]
-    for _ in range(GONE_AFTER):
-        tr.missed(sofa)
-    assert not sofa.present
+    assert [tr.missed(sofa) for _ in range(GONE_AFTER)] == [False] * (GONE_AFTER - 1) + [True]
+    sofa.present = False  # perception's to decide, once the vision model has looked at its place too
     tr.update([Detection("sofa", 1.05, 1.0, 0.5)], 2.0)
     assert sofa.present and len(tr.tracks) == 2
 
@@ -737,7 +736,7 @@ def test_the_vision_models_no_drops_a_detection():
     perc._stop = False
     perc.lock = threading.Lock()
     perc.tracker = Tracker()
-    perc.crops = {}
+    perc.crops, perc.doubts = {}, {}
     perc.detector = MagicMock()
     perc.detector.vocabulary = ["chair", "table", "cup"]
 
@@ -802,6 +801,48 @@ def test_ranging_uses_the_same_camera_and_exposure_even_if_another_frame_is_newe
     assert scan.depth_for("front_camera", stamp(1))[0] is front
     assert scan.depth_for("rear_right_camera", stamp(2))[0] is rear
     assert scan.depth_for("front_camera", stamp(2))[0] is None
+
+
+def test_a_thing_the_detector_stops_finding_is_gone_only_when_the_vision_model_agrees():
+    import threading
+    import time
+    from unittest.mock import MagicMock
+
+    from robot.ros.perceive import Perception
+
+    def perception(answer: float) -> tuple:
+        perc = object.__new__(Perception)
+        perc.lock, perc.tracker, perc._stop = threading.Lock(), Tracker(), False
+        perc.pose_sigma, perc.scan_bridge = (0.05, 0.05), MagicMock(turn_rate=0.0)
+        perc.scan_bridge.depth_for.return_value = (None, 0.0)
+        perc.boxes, perc.detected, perc.sightings, perc.crops, perc.doubts = {}, {}, [], {}, {}
+        perc.timings, perc.looks, perc.depth_pairs, perc.scans, perc.scan = [], {}, [], [], None
+        perc.pose_at, perc.tilt_at = (lambda s: (0.0, 0.0, 0.0)), (lambda s: (0.0, 0.0))
+        perc.detector = MagicMock(return_value=[], vocabulary=["person", "bike"])  # it finds no bike any more
+        cam = RIG["front_camera"]
+        perc.frames = {"front_camera": (SimpleNamespace(sec=1, nanosec=0), np.zeros((cam.height, cam.width, 3),
+                                                                                   np.uint8))}
+        bike = Track(1, "bike", 2.0, 0.0, 0.4, 0.0, time.monotonic() - 10.0, hits=5)  # 2 m ahead, last seen 10 s ago
+        perc.tracker.tracks[1] = bike
+        asked = []
+
+        def yes_probability(messages: list) -> float:
+            asked.append(messages[0]["content"][-1]["text"])
+            perc._stop = True  # one look, then the loop ends
+            return answer
+
+        perc.brain = SimpleNamespace(yes_probability=yes_probability)
+        return perc, bike, asked
+
+    for answer, present in ((0.9, True), (0.1, False)):
+        perc, bike, asked = perception(answer)
+        for _ in range(GONE_AFTER):
+            perc.process("front_camera")
+        assert bike.present and list(perc.doubts) == [1]  # the detector's misses alone do not make it gone
+        assert perc.doubts[1][1].shape[0] >= 16  # the model is shown the part of the picture where it should be
+        perc._verify_loop()
+        assert asked == ["Is there a bike in the middle of this picture? Answer yes or no."]
+        assert bike.present is present and not perc.doubts
 
 
 def test_perception_scan_surface_consistency():

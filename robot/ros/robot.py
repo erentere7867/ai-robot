@@ -29,6 +29,9 @@ from robot.interfaces.voice import chime as synth_chime
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
 DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
+# A Nav2 goal that has not brought the robot PROGRESS_M nearer in PROGRESS_S simulated seconds is given up: a search
+# stop Nav2 could not reach kept it backing up, spinning and replanning along one 2 m stretch for 490 s.
+PROGRESS_S, PROGRESS_M = 30.0, 0.25
 
 
 class RosRobot(SimRobot):
@@ -224,22 +227,30 @@ class RosRobot(SimRobot):
             raise PathBlocked(f"{name} refused the goal")
         self._goal, result = handle, handle.get_result_async()
         next_check = 0.0
+        to = (fields["pose"].pose.position.x, fields["pose"].pose.position.y) if "pose" in fields else None
+        best, since = math.inf, self.t
         try:
             while not result.done():
                 self._step(0.0, 0.0)
                 if watch is not None and time.monotonic() >= next_check:
                     self._check_goal(watch)
                     next_check = time.monotonic() + 0.2
+                if to is not None:  # Nav2 retries and recovers for as long as it likes; a goal that gets no nearer ends
+                    gap = math.dist(to, (self.x, self.y))
+                    if gap < best - PROGRESS_M:
+                        best, since = gap, self.t
+                    elif self.t - since > PROGRESS_S:
+                        raise PathBlocked(f"no nearer to ({to[0]:.1f}, {to[1]:.1f}) in {PROGRESS_S:g} s")
         except BaseException as exc:
             handle.cancel_goal_async()
             self._publish(0.0, 0.0)
-            if isinstance(exc, TargetLost):
+            if isinstance(exc, (TargetLost, PathBlocked)):
                 # Do not hand the model another motion turn while the old controller can still drive.
                 deadline = time.monotonic() + 2.0
                 while not result.done() and time.monotonic() < deadline:
                     time.sleep(0.02)
                 if not result.done():
-                    raise SafetyStop("Nav2 did not confirm the lost target's goal had stopped") from exc
+                    raise SafetyStop(f"Nav2 did not confirm that the {name} goal it was told to drop had stopped") from exc
             raise
         finally:
             self._goal = None
