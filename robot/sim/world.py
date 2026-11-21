@@ -639,6 +639,8 @@ class SimRobot:
         if isinstance(target, Object):
             thing = self.things.get(target.id)
             live = self._where(thing) if thing and thing.person else None
+            if target.radius == 0.0:  # flat floor target (e.g. rug): drive onto it, or to nearest free floor beside it
+                return goal, max(stop_dist, 0.2)
             return live or goal, max(stop_dist, target.radius + RADIUS + STOP_ZONE + 0.05)
         if self._occ(*goal, self.inflated):
             return goal, max(stop_dist, 0.4)
@@ -859,7 +861,7 @@ class SimRobot:
         self._halt()
 
     # ---- skills -------------------------------------------------------------------------------------------------
-    def search(self, description: str, area: str = "here") -> Object | None:
+    def search(self, description: str, area: str = "here", *, toward: str = "") -> Object | None:
         """In view now: done, without moving. Otherwise memory first, checked in person; then camera coverage,
         viewpoint by viewpoint, until it is in view."""
         self._call("search", description=description, area=area)
@@ -884,6 +886,18 @@ class SimRobot:
                 return found
             self.memory.pop(o.id, None)  # looked at its place with a clear view and it is not there
         tried: list[Point] = []  # where it drove to look, or could not reach
+        if toward and toward in BEARINGS:
+            hint = self._floor_toward(self.yaw + math.radians(BEARINGS[toward]), 3.0)
+            if math.dist(hint, (self.x, self.y)) >= 0.8 and (not region or self._room_at(*hint) == region):
+                tried.append(hint)
+                try:
+                    self._go(hint, 0.0)
+                except PathBlocked:
+                    pass
+                found = self._found(description, started)
+                if found:
+                    self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
+                    return found
         for _ in range(SEARCH_STOPS):
             stop = self._next_stop(description, region, tried)
             if stop is None:

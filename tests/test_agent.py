@@ -45,7 +45,7 @@ def tool_results(messages: list[dict]) -> list[str]:
 def test_a_result_comes_back_and_a_plain_reply_ends_the_task_after_one_check():
     sim = SimRobot(living_room())
     brain = Scripted(call("turn", degrees=90, direction="left"), say("Done!"), say("Turned left."))
-    record = Agent(brain).do("Turn left 90 degrees.", sim)
+    record = Agent(brain, review=True).do("Turn left 90 degrees.", sim)
     assert record.outcome == "done"
     assert tool_results(brain.seen[1])[0].startswith("Turned 90 degrees left.\nThis request so far: turned 90 degrees left")
     assert "Before you finish" in brain.seen[2][-1]["content"]  # the stop hook asked once
@@ -53,6 +53,27 @@ def test_a_result_comes_back_and_a_plain_reply_ends_the_task_after_one_check():
     assert [line for line in record.lines() if line.startswith("reply:")] == ['reply: "Turned left."']
     first = brain.seen[0][1]["content"]
     assert any(p.get("type") == "image_url" for p in first)  # the model sees the camera, not only a list
+
+
+def test_by_default_a_completed_action_answers_once_and_does_not_repeat_say():
+    sim = SimRobot(living_room())
+    brain = Scripted(call("turn", degrees=90, direction="left"), say("Turned left."))
+    record = Agent(brain).do("Turn left 90 degrees.", sim)
+    assert record.outcome == "done" and len(brain.seen) == 2 and brain.thinks == [128, 128]
+    assert [t for _, t in sim.trace.said] == ["Turned left."]
+
+    # If the model calls say() and then ends with plain text, speech is still delivered once; a second say() is blocked.
+    sim2 = SimRobot(living_room())
+    brain2 = Scripted(call("say", text="Already there."), call("say", text="Really there."), say("Done."))
+    Agent(brain2).do("Say hi.", sim2)
+    assert [t for _, t in sim2.trace.said] == ["Already there."]
+    assert tool_results(brain2.seen[2])[-1].startswith("Not run: you already spoke")
+
+    # Open to-do steps still trigger a single review check even when review=False.
+    sim3 = SimRobot(living_room())
+    brain3 = Scripted(call("todo", steps=["step 1", "step 2"]), say("Done."), say("Finished both."))
+    Agent(brain3).do("Do two things.", sim3)
+    assert "Open to-do steps: step 1; step 2" in brain3.seen[2][-1]["content"]
 
 
 def test_a_camera_answer_is_delivered_once_and_only_that_answer_is_remembered():
@@ -82,7 +103,7 @@ def test_reasoning_only_after_news_skips_the_turns_after_calls_that_worked():
     sim = SimRobot(office())
     brain = Scripted(call("turn", degrees=90, direction="left"), call("go_to", target="box"), say("Which box?"),
                      say("Which box?"))
-    Agent(brain, think="medium", think_when="news").do("Turn left, then go to the box.", sim)
+    Agent(brain, think="medium", review=True, think_when="news").do("Turn left, then go to the box.", sim)
     assert brain.thinks == [512, 0, 512, 0]  # the request; after a turn that worked; after an error; the review
 
 
@@ -211,19 +232,24 @@ def test_a_remembered_or_lost_id_does_not_confirm_arrival(monkeypatch, gone):
 
 def test_the_next_request_sees_what_the_last_one_did_and_where_it_began():
     sim = SimRobot(living_room())
-    brain = Scripted(call("move", metres=1, direction="forward"), say("Done."), say("Moved."),
-                     say("I'm back."), say("Back."))
+    brain = Scripted(call("move", metres=1, direction="forward"), say("Moved."),
+                     call("go_to", target="where you were before"), say("Back."))
     agent = Agent(brain)
     agent.do("Go forward a metre.", sim)
     agent.do("Come back.", sim)
     assert "Places you can go_to by name: start (where this request began, 1.0 m behind)" \
         in tool_results(brain.seen[1])[0]  # a move's result says where the request began, from the new spot
-    second = brain.seen[3]  # the first turn of "Come back." (the first request took three: act, reply, review)
+    second = brain.seen[2]  # the first turn of "Come back." (the first request took two: act, reply)
     assert [m["role"] for m in second] == ["system", "user"]  # one user turn: the last request is told, not replayed
     text = " ".join(p.get("text", "") for p in second[1]["content"])
     assert "move(metres=1, direction='forward') -> Moved 1 m forward." in text  # step by step, results included
+    assert "ended 1.0 m from where that request began" in text
     assert "where you were before (where the request before began, 1.0 m behind)" in text
     assert text.endswith('The user says: "Come back."')
+    # After arriving back at "where you were before", "start" is hidden so it doesn't lure the robot back out.
+    returned = tool_results(brain.seen[3])[0]
+    assert "where you were before (where the request before began, here)" in returned
+    assert "start (where this request began" not in returned
 
 
 def test_stop_never_waits_for_the_model():

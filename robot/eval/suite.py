@@ -333,7 +333,7 @@ CASES = _cases()
 
 
 def run_case(case: Case, brain: Any, *, noise: float = 0.0, max_time: float = 600.0,
-             cameras: str = "front", see_after_moves: bool = False, think: str = "medium") -> tuple[bool, Any, SimRobot]:
+             cameras: str = "front", see_after_moves: bool = False, think: str = "low") -> tuple[bool, Any, SimRobot]:
     """Run one case with the agent on the 2D world and judge it with the case's check."""
     from robot.agent.agent import Agent
 
@@ -354,7 +354,7 @@ def run_case(case: Case, brain: Any, *, noise: float = 0.0, max_time: float = 60
 
 def run_suite(tag: str, only: list[str] | tuple[str, ...] = (), *, brain: Any = None, noise: float = 0.0,
               brain_url: str = "http://127.0.0.1:8081", cameras: str = "front", see_after_moves: bool = False,
-              think: str = "medium",
+              think: str = "low",
               out_dir: Any = None) -> list[dict[str, Any]]:
     """Run the cases with the agent and write one JSON line per case."""
     import json
@@ -410,7 +410,7 @@ def main() -> None:
     parser.add_argument("--tag", default="agent")
     parser.add_argument("--only", nargs="*", default=[])
     parser.add_argument("--noise", type=float, default=0.0, help="detector noise, 0 (perfect) to 1 (poor)")
-    parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="medium", help="how long the model may reason before each turn")
+    parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="low", help="how long the model may reason before each turn")
     parser.add_argument("--cameras", choices=("front", "all"), default="all",
                         help="pictures sent with each request: the front camera, or all three")
     parser.add_argument("--see-after-moves", action="store_true", help="fresh pictures after every move too")

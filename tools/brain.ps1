@@ -22,7 +22,7 @@ if (Test-Ready) { "the model is already running on port 8081"; return }
 
 $log = Join-Path $env:TEMP "sprocket-llama.log"
 $serverArgs = @("-m", "`"$model`"", "--mmproj", "`"$proj`"", "-ngl", "99", "-c", "32768", "-np", "2", "--jinja",
-                "--host", "127.0.0.1", "--port", "8081")
+                "--reasoning-budget", "128", "--host", "127.0.0.1", "--port", "8081")
 Start-Process -FilePath $exe -ArgumentList $serverArgs -WindowStyle Hidden -RedirectStandardError $log
 "starting LFM3-VL-2B with $exe..."
 for ($i = 0; $i -lt 90; $i++) {

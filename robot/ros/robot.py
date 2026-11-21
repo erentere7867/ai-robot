@@ -125,6 +125,11 @@ class RosRobot(SimRobot):
                 self.t = self._now() - self.t0
             except Exception:
                 pass
+        if hasattr(self, "tf"):
+            try:
+                self._read_pose()
+            except Exception:
+                pass
         super().begin()
         self.trace.poses = self.trace.poses[-500:]
 
@@ -193,7 +198,10 @@ class RosRobot(SimRobot):
             current = self.obj(target.id)
         except NotFound as exc:
             raise TargetLost(f"stopped approaching {target.label} {target.id}: {exc}") from exc
-        if current.label != target.label or math.dist(current.position, target.position) > target.radius + current.radius:
+        # Match Tracker.gate (0.6 m): small objects (e.g. shoes, r=0.04-0.11 m) routinely refine depth by 0.16-0.26 m
+        # while approaching, which falsely aborted 4 consecutive go_to calls against 2*r (0.08-0.22 m).
+        limit = max(0.6, target.radius + current.radius)
+        if current.label != target.label or math.dist(current.position, target.position) > limit:
             raise TargetLost(f"stopped: the label or mapped footprint of {target.label} {target.id} changed")
 
     def _act(self, name: str, *, watch: Object | None = None, **fields: Any) -> None:
@@ -330,9 +338,9 @@ class RosRobot(SimRobot):
                 self._act("navigate_to_pose", watch=watch, pose=self._pose_msg(gx, gy, yaw))
             except PathBlocked:
                 self._sync()
-                if math.dist(goal, (self.x, self.y)) > reach + 0.35:
+                if math.dist(goal, (self.x, self.y)) > reach + 0.35 and math.dist((gx, gy), (self.x, self.y)) > 0.35:
                     raise
-                self._face_goal(goal)  # stopped just short: close enough, and facing it
+                self._face_goal(goal)  # stopped just short (or at nearest free cell beside furniture): face it
         if isinstance(target, Pose):
             self._rotate(wrap(math.radians(target.yaw) - self.yaw))
 

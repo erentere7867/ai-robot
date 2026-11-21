@@ -388,6 +388,86 @@ and the rear-right image with both badges reached the model. Despite that, the m
 for a request to go underneath. The bounded TV repeat also failed to find the real TV. These results validate
 the evidence and cancellation paths, **not** safe under-furniture navigation or reliable recognition of screens.
 
+#### Driving to things the vision model sees but YOLOE cannot (`vlm-locate`, 21 November)
+
+When YOLOE returns no match for a requested thing, room area or floor surface (`RealRobot.detect`), the robot now
+asks the vision model (`LFM3-VL-2B`) across its cameras, locates the target via yes/no crops (`locate_in_picture`),
+ranges the crop (`locate_crop`), and registers a `visual=True` track that `go_to` and `sees_now` handle like any
+other object — with no word lists, routers or per-object code.
+
+- **768 px gate and overlapping yes/no crops (`robot/ros/perceive.py`).** Whole-image `see_probability` at 768 px
+  (~0.35 s/frame) scored 98–100% on monitor, kitchen, rug, umbrella and shoes where 512 px scored 5–47%. To find
+  where without numbered dots (which the 2B model picks last), `locate_in_picture` asks yes/no on overlapping
+  thirds `(0–40%, 30–70%, 60–100%)`. Wide targets spanning contiguous positive thirds take the probability-weighted
+  centre (cut close-up rug centre error from 0.78 m to 0.36 m); narrow targets split the best third into
+  0.65-overlapping halves (non-overlapping halves sliced a centred umbrella at `u=0.50` from 96% to 4%/4%, while
+  0.65 overlap gave 100%/99%), then an upper/lower split on a 0.30-span strip (`on_floor` only when
+  `v_bot >= 0.5 and v_top < 0.35`, so standing objects like an umbrella at 89%/100% stay 3D). Offline benchmark on
+  30 random `apt_0` frames (210 pairs): **0/145 (0.0%) false positives**; blank-wall hallucinations (71% whole)
+  dropped to 1%/0% on crops.
+- **Coarse-crop and flat-floor ranging (`robot/perception/locate.py`).** `locate_crop` samples the middle 50% of
+  columns at the 25th depth percentile for standing/elevated targets (cutting `dock -> kitchen` edge error from
+  1.50 m to 0.00 m) and records median elevation `z`. Floor-flat targets require ≥60% below-horizon floor pixels
+  (`<= 0.06 m`) and weight floor pixels by `r^2` (exact flat-floor perspective Jacobian `dr ∝ r^2 dv`) over
+  `[0.4, 3.5] m`: unweighted median fell at 0.72 m near the feet, linear `r` at 0.88 m, `r^2` to 3.0 m at 0.69 m
+  (1.02 m after Nav2's 0.25 m tolerance), and `r^2` to 3.5 m plus the score-weighted `[2 cams]` centroid landed
+  `big rug 1` dead centre on `rug 0`.
+- **Mid-leg snapshots, visible-side approach and arrival confirmation (`robot/ros/real.py`).** During a search,
+  `_trail_views` snapshots every 0.25 m (4 m window) catch targets visible only in narrow corridor gaps (the
+  umbrella is visible over ~0.30 m along the hallway); mid-leg scans require `>= 0.80` to correct for testing up
+  to 48 frames/stop (distant false hits scored 54–69%, real passes 97–100%). Standing visual tracks store
+  `spotted_from` at the spotting camera's map coordinates so `_spotted_standpoint` and `_go` approach from the
+  unobstructed side (stepping straight onto it with `drive_on_heading` if Nav2's 0.25 m tolerance stops 0.10–0.40 m
+  short behind a wall corner). `sees_now` waits up to 1 s for a fresh post-`face()` frame, confirms elevated
+  targets (`z > 0.45 m`, e.g. desk monitor invisible `< 1.15 m`, 76–89% at 1.5–1.7 m) via a closer approach
+  snapshot, and confirms floor-flat targets (`radius == 0.0`) via the floor half when furniture sits on top of the
+  surface (whole frame 47.3% with cabinet above, floor half `is_there=True`).
+- **Frontier search, leaner harness and tracker fixes (`robot/ros/real.py`, `robot/agent/`, `robot/perception/tracker.py`,
+  `robot/ros/robot.py`).** Wiring `RealRobot.walls = grid` and ranking `_unseen()` frontiers by A* path length
+  capped to 3.2 m legs (`_frontier_step`) when no camera has `>= 50%` lead cut a full `apt_0` sweep from 14+
+  living-room zigzags (406 s, 26 bumps) to 4–5 stops (~93 s to umbrella, 0 bumps). Default reasoning is now `low`
+  (`--reasoning-budget 128`, median model turn 5.5–5.8 s); `review=False` default (auto-reviewing open `todo`
+  steps) and `say` deduplication removed double replies; refreshing TF pose in `RosRobot.begin()` and prioritizing
+  `"where you were before"` fixed `"come back"`; `MAX_OBJECTS=8`, `MAX_IMAGES=3`, lean stationary `look`,
+  `search(..., toward=...)`, and `blocked_tools` (hiding any tool that hit `Not run:` until the robot moves) cut
+  context bloat and stopped `look`/`look_back` repeat loops. `RosRobot._check_goal` now matches `Tracker.gate`
+  (`max(0.6, r1 + r2)` — previously `2*r = 0.08–0.22 m` falsely aborted 4 consecutive `go_to` calls on small shoes
+  refining depth by 0.16–0.26 m); `Tracker._merge` skips absent tracks and preserves `verified`/`sure`/`visual`;
+  `RealRobot.obj` refreshes `_perceive_objects()` on worker-thread merge races; and `home3d.says_no` fixed `\bn't\b`
+  which could never match contractions like `"don't"`.
+- **What did not work (dropped).** Close-range floor refinement in `RealRobot._go` averaged bare wood behind the
+  rug out to 3.5 m and drove *off* the rug in 2/2 runs (deleted, -40 lines). Rejecting `[2 cams]` centroids on
+  occupied cells dropped dock `[2 cams]` because a cabinet sits on `rug 0`'s centre. Backing `_spotted_standpoint`
+  out to `reach + 0.25` (0.90 m) stopped 1.13–1.15 m from E2's umbrella (tightened to `reach`). Euclidean-only
+  frontier selection jumped 12 m blind through walls.
+
+Measured 3D results in `apt_0` (repeated, `think=low`, 0.33x real time):
+
+- **Close-up blue bicycle probe (`runs/goto-unseen/probe.py`, `vlm-probe`, 3 trials):** **3/3 PASS** in
+  16.8–33.9 s with 0 search stops (gaps `0.35`, `-0.23`, `-0.00 m`; before: 46–54 s with a step-back search).
+- **Unseen requests (`runs/explore/new_tasks.py`, repeated across `vlm-r3a`, `vlm-f1`, `vlm-finalA`, `vlm-finalB`):**
+  - `E4` (kitchen): **4/4 PASS** (19.8–39.6 s, 2–4 turns, **0 bumps**, `-0.16` to `-0.59 m` inside counter edge;
+    before: FAIL).
+  - `E6` (computer monitor): **4/4 PASS** (13.9–15.5 s, 2 turns, **0 bumps**, `0.55–0.58 m`; before: timeout luck).
+  - `E3` (shoes): **2/4 PASS** (`113.8 s / 0.32 m` and `177.4 s / 0.38 m / 0 bumps`; before: FAIL with 13 false
+    YOLOE shoes). The 2 misses were YOLOE calling a hanging cloth `shoes` (1.35 m) and a pole occluding the rack
+    at 3.4 m (2.54 m).
+  - `E2` (umbrella): passed in `vlm-low3`, reached `0.84 m` (`vlm-fast3`, 0 bumps) and `1.13–1.15 m` in 3–5 turns
+    / 0 bumps (`vlm-final1`, `vlm-f1`) once spotted on Stop 4; remaining variance is the ~0.30 m corridor visibility
+    window and YOLOE occasionally hallucinating an umbrella on the chest of drawers/bike (rejected by `sees_now`).
+  - `E7` (middle of big rug): **0/4 on `middle_of(0.9)` check, 3/3 on-rug in 22.8–31.1 s / 2 turns / 0 bumps**
+    (`vlm-f1`, `vlm-finalA`, `vlm-finalB`), landing `-0.24` to `-0.28 m` *inside* `rug 0` at `0.97–0.98 m` from its
+    geometric centre — flush against the 0.83 m-radius wooden cabinet covering `rug 0`'s dock-facing centre (raw
+    un-inflated Habitat navmesh there only reaches `0.71 m`; before: `locate()` dropped rugs completely).
+- **Non-regressions and false-positive checks (`vlm-reg`, `vlm-home`):** `E1` (beanbag, 21.0 s, 0 bumps), `E5`
+  (face sofa, 8.2 s, 0 bumps), `N1` (sofa, 20.1 s, 0 bumps) and `S2` (dog, absent, 3.0 s, 0 bumps) all **PASS**.
+  `S3` (elephant, absent) searched 7 stops with **0 false detections** (0–12% across all views, 0 bumps) and
+  replied `"I don't see any elephant..."` (failed only due to the `\bn't\b` regex bug in `says_no`, now fixed).
+  `R2` Turn 2 (`"Come back."`) succeeded in 1 tool call (`go_to('where you were before')`), ending 0.28 m from start
+  (Turn 1 hit YOLOE's pre-existing TV flicker). `E8` (stool, 0 bumps) hit YOLOE's chair-as-stool without visual
+  fallback; `S1` (plant, 0 bumps) genuinely spotted and drove to the foot of the stairs below the real upstairs
+  potted plant (`010_candidate_33.jpg`).
+
 ## Hazards found
 
 - **Under the stairs.** Exploring `apt_0`, the robot drove under the open staircase, whose underside slopes down

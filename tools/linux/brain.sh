@@ -24,7 +24,7 @@ else bin=build/bin/llama-server; gpu=""; where=CPU; fi
 # Half the cores: the robot's other software (YOLOE, depth, Habitat, Nav2) needs the rest, and llama.cpp slows down
 # badly when its threads wait for a core. On 4 cores without a GPU, task M1's model turns took 275, 124 and 201 s with
 # 4 threads (the client gives up at 180 s) and 176, 56 and 62 s with 2.
-nohup "$bin" -m "$MODEL" --mmproj "$MMPROJ" $gpu -c 32768 -np 2 --jinja --swa-full --port 8081 \
+nohup "$bin" -m "$MODEL" --mmproj "$MMPROJ" $gpu -c 32768 -np 2 --jinja --swa-full --reasoning-budget 128 --port 8081 \
   -t $((($(nproc) + 1) / 2)) > ~/llama-wsl.log 2>&1 &
 echo "starting LFM3-VL-2B on the $where ($MODEL)..."
 for _ in $(seq 1 120); do curl -s http://127.0.0.1:8081/health | grep -q ok && break; sleep 2; done

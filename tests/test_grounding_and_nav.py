@@ -767,3 +767,255 @@ def test_an_arrival_is_confirmed_by_the_detector_or_the_vision_model_on_the_thin
     beanbag = Object(3, "beanbag", (1.0, 0.0), 1.0, 0.0, "ahead", 0.5, "grey", seen_ago)  # parked facing it, 1 m off
     assert real.sees_now(beanbag) is confirmed
     assert asked == ([] if answer is None else ["Is there a beanbag in the middle of this picture? Answer yes or no."])
+
+
+def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_confirms_or_drops():
+    from collections import Counter, deque
+
+    from robot.perception.rig import RIG
+
+    real = object.__new__(RealRobot)
+    SimRobot.__init__(real, _make_scene())
+    real._ready = True
+    real.store, real._cleared_tracks, real._habit_recorded, real._rooms, real._named_at = None, set(), {}, [], 0.0
+    real.speaker_profile, real._user = None, None
+    tracker = Tracker()
+    cam = RIG["front_camera"]
+    rgb = np.zeros((cam.height, cam.width, 3), dtype=np.uint8)
+    rgb[80:320, 480:780] = 255
+    depth = np.full((360, 640), 2.0, dtype=np.float32)
+    stamp = SimpleNamespace(sec=1, nanosec=0)
+    looks = {n: Counter() for n in RIG}
+    real.perception = SimpleNamespace(
+        lock=Lock(), tracker=tracker, crops={}, looks=looks, scans=deque(), scan=None,
+        frames={"front_camera": (stamp, rgb)},
+        scan_bridge=SimpleNamespace(cam_depths={"front_camera": deque([(1_000_000_000, depth)])}),
+        detector=SimpleNamespace(watch=lambda w: None),
+        objects=lambda: [t for t in tracker.objects()],
+    )
+    real._pose_at = lambda s: (0.0, 0.0, 0.0)
+
+    def step(v: float, w: float) -> None:
+        for n in RIG:
+            looks[n]["computer monitor"] += 1
+
+    real._step = step
+    # Vision model says yes wherever the white patch is present
+    import base64
+
+    import cv2
+
+    def yes_prob(messages):
+        url = messages[0]["content"][0]["image_url"]["url"]
+        arr = cv2.imdecode(np.frombuffer(base64.b64decode(url.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
+        return min(0.98, 0.05 + 12.0 * float((arr > 200).mean()))
+
+    real.brain = SimpleNamespace(yes_probability=yes_prob)
+    found = real.detect("computer monitor")
+    assert len(found) == 1 and found[0].label == "computer monitor" and 1.7 <= found[0].distance <= 2.3
+    tid = found[0].id
+    assert tracker.tracks[tid].visual is True and tid in real.perception.crops
+
+    # Second call updates the existing track instead of duplicating it
+    found2 = real.detect("computer monitor")
+    assert len(found2) == 1 and found2[0].id == tid and len(tracker.tracks) == 1
+
+    # On arrival (last_seen > SEEN_NOW), visual target confirms against the 768px front picture
+    stale = Object(tid, "computer monitor", found[0].position, found[0].distance, 0.0, "ahead", 0.25, "", 5.0)
+    assert real.sees_now(stale) is True and tracker.tracks[tid].present is True
+
+    # If the picture no longer shows it up close, sees_now rejects and withdraws the visual track
+    real.perception.frames["front_camera"] = (stamp, np.zeros_like(rgb))
+    assert real.sees_now(stale) is False and tracker.tracks[tid].present is False
+
+
+    # Elevated visual target occluded nose-close (e.g. monitor on desk) confirms via closer approach snapshot
+    tracker.tracks[tid].present = True
+    tracker.tracks[tid].z = 0.85
+    tracker.tracks[tid].spotted_from = (0.0, 0.0)
+    real._trail_views = deque([(tracker.tracks[tid].first_seen + 1.0, (0.4, 0.0, 0.0),
+                                {"front_camera": (stamp, rgb, depth, (0.4, 0.0, 0.0))})])
+    assert real.sees_now(stale) is True and tracker.tracks[tid].present is True
+
+    # Mid-leg corridor search recovers a target passed between stops from _trail_views
+    real._searching, real._search_snap_after = True, 0.0
+    real.perception.frames["front_camera"] = (stamp, np.zeros_like(rgb))
+    real._trail_views = deque([(1.0, (1.0, 0.0, 0.0),
+                                {"front_camera": (stamp, rgb, depth, (1.0, 0.0, 0.0))})])
+    passed = real._see_target("umbrella")
+    assert passed is not None and passed.label == "umbrella" and passed.x > 2.5
+
+    # Visible-side approach: when spotted from (1.0, 0.0) and now around the side at (2.8, 1.0), return toward spotted
+    umb = Object(passed.id, "umbrella", (passed.x, passed.y), 1.0, 0.0, "ahead", 0.2, "", 0.0)
+    tracker.tracks[passed.id].spotted_from = (passed.x - 0.8, passed.y)
+    real.x, real.y, real.yaw = passed.x, passed.y - 1.0, 0.0
+    gp = real._goal_point(umb, 0.0)
+    assert gp is not None and math.dist(gp[0], (passed.x - 0.8, passed.y)) < 0.2
+
+
+def test_floor_flat_visual_object_drives_onto_free_floor():
+    sim = SimRobot(_make_scene())
+    rug = Object(1, "rug", (2.0, 0.0), 2.0, 0.0, "ahead", 0.0, "", 0.0)
+    _, reach_rug = sim._reach(rug, 0.0)
+    assert reach_rug == 0.2
+    chair = Object(2, "chair", (2.0, 0.0), 2.0, 0.0, "ahead", 0.2, "", 0.0)
+    _, reach_chair = sim._reach(chair, 0.0)
+    assert reach_chair > 0.6
+
+
+def test_search_uses_unseen_map_frontiers_instead_of_zigzagging_when_no_camera_has_a_lead():
+    # Two-room scene with an interior dividing wall so the far room is genuinely uncovered until visited.
+    scene = Scene(12.0, 6.0, [], {}, walls=[((0.0, -3.0), (0.0, 1.0))], start=Pose(-3.0, 0.0, 0.0))
+    real = object.__new__(RealRobot)
+    SimRobot.__init__(real, scene)
+    real.search_log, real._stepped_back, real._searching = [], False, True
+    real.coverage = np.zeros_like(real.occupied)
+    real._cover()
+    real.floor_spots = lambda camera, **_: (np.zeros((4, 4, 3), np.uint8), [(-1.5, 0.0)])  # already-covered spot
+    real.brain = SimpleNamespace(yes_probability=lambda _: 0.15)  # no visual lead in any camera
+    stop = real._next_stop("umbrella", None, [])
+    assert stop is not None and stop[0] > -3.0 and stop != (-1.5, 0.0)
+    assert math.dist(stop, (-3.0, 0.0)) <= 3.3  # capped to a <=3.2 m path hop along the way around the wall
+    assert real.search_log[-1].endswith("explored unseen area")
+
+
+def test_search_toward_and_lean_stationary_look():
+    from robot.agent.agent import Agent
+    from robot.agent.tools import Tools
+    from robot.mind.brain import Reply, ToolCall
+
+    scene = Scene(10.0, 6.0, [Thing("mug", 3.5, 0.0, radius=0.1)], {}, start=Pose(-3.0, 0.0, 0.0))
+    sim = SimRobot(scene)
+    tools = Tools(sim)
+    out, ok = tools.run("search", {"what": "mug", "area": "everywhere", "toward": "front"})
+    assert ok and "Found candidate mug" in out and sim.x > -1.0
+
+    # Stationary look(what=...) returns only matching detections + pictures without re-dumping full scene text.
+    seen_msgs = []
+    replies = [
+        Reply("", tool_calls=[ToolCall("c1", "look", {"direction": "front", "what": "mug"})]),
+        Reply("I see the mug."),
+    ]
+    brain = SimpleNamespace(chat=lambda m, *a, **kw: (seen_msgs.append(list(m)), replies.pop(0))[1])
+    Agent(brain, cameras="front").do("Check the mug.", sim)
+    tool_msg = [m for m in seen_msgs[1] if m["role"] == "tool"][-1]["content"]
+    assert isinstance(tool_msg, list)
+    assert "Seen: mug" in tool_msg[0]["text"]
+    assert not any("What you sense now:" in p.get("text", "") for p in tool_msg if isinstance(p, dict))
+
+    # After 3 stationary look(..., what=...) calls, "look" is hidden from schemas until the robot moves.
+    schema_names: list[list[str]] = []
+    replies2 = [
+        Reply("", tool_calls=[ToolCall("l1", "look", {"direction": "front", "what": "mug"})]),
+        Reply("", tool_calls=[ToolCall("l2", "look", {"direction": "rear-left", "what": "mug"})]),
+        Reply("", tool_calls=[ToolCall("l3", "look", {"direction": "rear-right", "what": "mug"})]),
+        Reply("Done."),
+    ]
+    brain2 = SimpleNamespace(
+        chat=lambda m, schemas, **kw: (schema_names.append([s["function"]["name"] for s in schemas]), replies2.pop(0))[1]
+    )
+    Agent(brain2, cameras="front").do("Find the mug.", sim)
+    assert "look" in schema_names[0] and "look" in schema_names[2] and "look" not in schema_names[3]
+
+
+def test_small_object_depth_refinement_and_arrived_reached_wording():
+    from robot.agent.tools import Tools
+
+    # RosRobot._check_goal tolerates <=0.6 m same-label depth drift on small objects (r=0.06 m), rejects >0.6 m or rename
+    robot = MockRosRobot(_make_scene())
+    shoe = Object(20, "shoes", (2.28, 4.39), 1.5, 0.0, "ahead", 0.06, "black", 0.0)
+    robot.things[20] = Thing("shoes", 2.50, 4.55, radius=0.06)  # 0.27 m drift (> 2*r = 0.12 m, <= 0.6 m gate)
+    robot.things[20].id = 20
+    robot.memory[20] = ((2.50, 4.55), 0.0)
+    RosRobot._check_goal(robot, shoe)  # must not raise
+    robot.memory[20] = ((3.10, 4.55), 0.0)  # 0.84 m drift -> TargetLost
+    with pytest.raises(TargetLost, match="mapped footprint"):
+        RosRobot._check_goal(robot, shoe)
+
+    # Tools._arrived says "Facing" when stopped farther away (>0.6 m gap), "Reached" within normal stopping gap
+    sim = SimRobot(Scene(10.0, 6.0, [Thing("umbrella", 3.0, 0.0, radius=0.15)], {}, start=Pose(0.0, 0.0, 0.0)))
+    tools = Tools(sim)
+    out_far, ok = tools.run("stop_near", {"target": "umbrella", "metres": 1.2})
+    assert ok and "Facing umbrella" in out_far and "Reached" not in out_far
+    out_near, ok = tools.run("go_to", {"target": "umbrella"})
+    assert ok and "Reached umbrella" in out_near
+
+
+def test_floor_sees_now_and_spotted_standpoint_pull_in():
+    import threading
+
+    from robot.perception.tracker import Track, Tracker
+
+    real = object.__new__(RealRobot)
+    SimRobot.__init__(real, _make_scene())
+    tracker = Tracker()
+    tracker.tracks[1] = Track(1, "big rug", 0.6, 0.0, 0.0, 0.0, 0.0, hits=2, verified=True, sure=True, visual=True)
+    rgb = np.zeros((432, 768, 3), dtype=np.uint8)
+    stamp = SimpleNamespace(sec=1, nanosec=0)
+    real.perception = SimpleNamespace(lock=threading.Lock(), tracker=tracker, frames={"front_camera": (stamp, rgb)})
+    real._pose_at = lambda _: (0.0, 0.0, 0.0)
+    orig_calls = []
+
+    def brain_yes(msgs):
+        q = msgs[0]["content"][1]["text"]
+        orig_calls.append(q)
+        if "in the middle of this picture" in q:
+            return 0.1 if len(orig_calls) == 1 else 0.9  # 1st: narrow crop fails; 3rd: floor half succeeds
+        return 0.47  # 2nd: whole 768px frame fails (cabinet dominates top half)
+
+    real.brain = SimpleNamespace(yes_probability=brain_yes)
+    rug = Object(1, "big rug", (0.6, 0.0), 0.6, 0.0, "ahead", 0.0, "", 10.0)
+    assert real.sees_now(rug) is True and tracker.tracks[1].present is True
+
+    # RealRobot._go steps straight onto _spotted_standpoint when Nav2 stops 0.25 m short
+    tracker.tracks[2] = Track(2, "umbrella", 2.0, 0.0, 0.15, 0.0, 0.0, hits=2, verified=True, sure=True, visual=True,
+                              spotted_from=(1.3, 0.0))
+    umb = Object(2, "umbrella", (2.0, 0.0), 0.8, 0.0, "ahead", 0.15, "", 0.0)
+    cand = real._spotted_standpoint(umb, 0.0)
+    assert cand is not None
+    real.x, real.y, real.yaw = cand[0] - 0.25, cand[1], 0.0
+    moved: list[float] = []
+    real._rotate = lambda a: setattr(real, "yaw", real.yaw + a)
+    real._move = lambda d: (moved.append(d), setattr(real, "x", real.x + d * math.cos(real.yaw)))[0]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(RosRobot, "_go", lambda self, *a, **kw: None)
+        real._go(umb, 0.0)
+    assert len(moved) == 1 and 0.20 <= moved[0] <= 0.30
+
+    # RealRobot.obj refreshes self.things when perception merges track 15 -> 11 between _perceive_objects() syncs
+    t11 = Track(11, "shoes", 2.0, 0.0, 0.1, 0.0, 0.0, hits=1, verified=False, sure=False)
+    t15 = Track(15, "shoes", 2.05, 0.0, 0.1, 0.0, 0.0, hits=2, verified=True, sure=True, visual=True)
+    tracker.tracks[11], tracker.tracks[15] = t11, t15
+    tracker._merge([])
+    assert tracker.current(15) == 11 and t11.verified and t11.sure and t11.visual and t11.confirmed
+    synced = []
+    real.things.pop(11, None)
+    real._perceive_objects = lambda: (synced.append(1), real.things.__setitem__(11, Thing("shoes", 2.0, 0.0, 0.1, id=11)),
+                                      real.memory.__setitem__(11, ((2.0, 0.0), 0.0)))
+    got = real.obj(15)
+    assert got.id == 11 and synced == [1]
+
+
+def test_says_no_contractions_and_search_near_direction_or_here():
+    from robot.agent.tools import Tools
+    from robot.eval.home3d import says_no
+
+    assert says_no("I'm sorry, but I don't see any elephant here.")
+    assert says_no("I don\u2019t see one.")
+    assert not says_no("Yes, I don't think it moved.")
+
+    scene = Scene(10.0, 6.0, [Thing("mug", 3.5, 0.0, radius=0.1)], {}, start=Pose(-3.0, 0.0, 0.0))
+    sim = SimRobot(scene)
+    seen_detects: list[str] = []
+    orig_detect = sim.detect
+    sim.detect = lambda desc: (seen_detects.append(desc), orig_detect(desc))[1]
+    tools = Tools(sim)
+    out, ok = tools.run("search", {"what": "mug", "near": "front"})
+    assert ok and "Found candidate mug" in out and "front" not in seen_detects
+    seen_detects.clear()
+    tools.run("search", {"what": "mug", "near": "here"})
+    assert "here" not in seen_detects
+
+
+
+

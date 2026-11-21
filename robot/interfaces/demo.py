@@ -162,7 +162,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--brain", default="http://127.0.0.1:8081", help="llama-server URL")
     parser.add_argument("--cameras", choices=("front", "all"), default="all")
-    parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="medium", help="how long the model may reason before each turn")
+    parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="low", help="how long the model may reason before each turn")
     args = parser.parse_args()
 
     live = Live()

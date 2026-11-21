@@ -24,7 +24,7 @@ import numpy as np
 
 from robot.mind.brain import _with_image
 from robot.perception import colour
-from robot.perception.camera import data_url
+from robot.perception.camera import data_url, resize_rgb
 from robot.perception.depth import StepHazard, classify_tof_grid, synthetic_scan, tof_scan
 from robot.perception.locate import lidar_range, locate
 from robot.perception.overlay import draw_set_of_mark
@@ -81,6 +81,63 @@ def is_there(brain: Any, picture: np.ndarray, label: str) -> bool:
     """The vision model's yes to a thing in the middle of a picture."""
     question = f"Is there a {label} in the middle of this picture? Answer yes or no."
     return brain.yes_probability(_with_image(data_url(picture), question)) >= 0.5
+
+
+def see_probability(brain: Any, picture: np.ndarray, label: str, max_dim: int = 512) -> float:
+    """The vision model's yes probability to seeing `label` in `picture`, capped so tall strips stay small."""
+    h, w = picture.shape[:2]
+    scale = min(1.0, max_dim / max(1, h, w))
+    img = resize_rgb(picture, max(1, round(w * scale)), max(1, round(h * scale))) if scale < 1.0 else picture
+    question = f"Do you see {label} in this picture? Answer yes or no."
+    return brain.yes_probability(_with_image(data_url(img, max_width=max_dim), question))
+
+
+def locate_in_picture(brain: Any, rgb: np.ndarray, label: str) -> tuple[tuple[int, int, int, int], bool] | None:
+    """Find where `label` appears in a full camera frame via yes/no crops (no numbered dots: the 2B model picks the
+    last number). Overlapping thirds -> either probability-weighted centre of contiguous positive thirds (for wide
+    surfaces/areas spanning >=2 thirds; cut close-up rug centre error from 0.78 m to 0.36 m) or overlapping halves
+    (0.65 span: non-overlapping halves sliced a centred umbrella at u=0.50 from 96% to 4%/4%, while 0.65 overlap
+    gave 100%/99%) -> upper/lower split on a 0.30-span context strip. Measured on 30 random apt_0 views (210 pairs)
+    behind a 768px whole-image gate: 0/145 (0.0%) FP; blank-wall hallucinations (71% whole) dropped to 1%/0%."""
+    h, w = rgb.shape[:2]
+    thirds = ((0.0, 0.40), (0.30, 0.70), (0.60, 1.0))
+    t_scores = [see_probability(brain, rgb[:, int(a * w):max(int(a * w) + 1, int(b * w))], label, max_dim=384)
+                for a, b in thirds]
+    pos = [i for i, s in enumerate(t_scores) if s >= 0.5]
+    if not pos:
+        return None
+    best_i = max(pos, key=t_scores.__getitem__)
+    # Contiguous positive block containing the strongest third (wide surface/area or an object straddling a seam).
+    block = [best_i] if (len(pos) == 2 and abs(pos[0] - pos[1]) == 2) else pos
+    if len(block) >= 2:
+        span = 0.40
+        u_center = sum(t_scores[i] * 0.5 * (thirds[i][0] + thirds[i][1]) for i in block) / sum(
+            t_scores[i] for i in block
+        )
+    else:
+        a, b = thirds[best_i]
+        span = b - a
+        halves = ((a, a + 0.65 * span), (b - 0.65 * span, b))
+        h_scores = [see_probability(brain, rgb[:, int(x0 * w):max(int(x0 * w) + 1, int(x1 * w))], label, max_dim=384)
+                    for x0, x1 in halves]
+        if max(h_scores) < 0.5:
+            return None
+        total = h_scores[0] + h_scores[1]
+        u_center = (h_scores[0] * (a + 0.25 * span) + h_scores[1] * (b - 0.25 * span)) / total
+    sx0 = max(0, int(round((u_center - 0.30 * span) * w)))
+    sx1 = min(w, max(sx0 + 1, int(round((u_center + 0.30 * span) * w))))
+    strip = rgb[:, sx0:sx1]
+    top_end, bot_start = max(1, int(0.55 * h)), min(h - 1, int(0.45 * h))
+    v_top = see_probability(brain, strip[:top_end, :], label, max_dim=384)
+    v_bot = see_probability(brain, strip[bot_start:, :], label, max_dim=384)
+    if max(v_top, v_bot) < 0.5:
+        return None
+    # Floor-flat only when absent from the upper half: standing objects visible in both halves (umbrella 89%/100%) stay 3D.
+    on_floor = v_bot >= 0.5 and v_top < 0.35
+    y0, y1 = (bot_start, h) if on_floor else (0, max(1, int(0.60 * h))) if v_top > v_bot + 0.10 else (0, h)
+    x0 = max(0, int(round((u_center - 0.25 * span) * w)))
+    x1 = min(w, max(x0 + 1, int(round((u_center + 0.25 * span) * w))))
+    return (x0, y0, x1, y1), on_floor
 
 
 def place_picture(rgb: np.ndarray, cam: Any, bx: float, by: float, radius: float) -> np.ndarray | None:
@@ -662,7 +719,8 @@ class Perception:
                 self.crops[tid] = _only(rgb, box, [b for i, b in boxes.items() if i != tid])
             watched = {canonical(w) for w in words}
             for track in self.tracker.objects():  # negative evidence: viewed clearly, not seen, while looked for
-                if id(track) in matched or not track.present or track.person or canonical(track.label) not in watched:
+                if (id(track) in matched or not track.present or track.person or track.visual
+                        or canonical(track.label) not in watched):
                     continue  # (a ball seen while asked for is not gone because the detector stopped looking)
                 bx, by = to_robot(pose, track.x, track.y)
                 dist = math.hypot(bx, by)
