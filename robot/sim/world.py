@@ -41,8 +41,10 @@ from robot.perception.tracker import canonical
 RES = 0.05  # occupancy cell, m
 SEARCH_STOPS = 20  # most places one search drives to before it gives up
 BEARINGS = {"front": 0.0, "front-left": 45.0, "left": 90.0, "behind-left": 135.0, "behind": 180.0,
-            "behind-right": -135.0, "right": -90.0, "front-right": -45.0}  # degrees from the robot's heading, + left
+            "behind-right": -135.0, "right": -90.0, "front-right": -45.0,  # degrees from the robot's heading, + left
+            "rear-left": 120.0, "rear-right": -120.0}  # where those pictures look: the model named them for go_toward
 PLAN = 2  # planning cell = PLAN * RES
+NEARBY = 1.0  # metres beyond its usual reach a thing may be approached when no free floor is nearer (see _route)
 DT = 0.05  # simulation step, s
 RADIUS = 0.15  # the robot
 V_MAX, W_MAX, TURN_RATE, CRUISE = 0.5, 1.5, 1.0, 0.4  # firmware ceilings and normal speeds
@@ -618,11 +620,27 @@ class SimRobot:
             self._step(v_cmd * torque, w_cmd)
         self._halt()
 
+    def _route(self, target: Point | Pose | Object, goal: Point, reach: float) -> list[Point] | None:
+        """A path to within `reach` of `goal`; for a thing with no free floor that near, a path to the reachable floor
+        nearest it, NEARBY metres further at most. Seen from about 4 m, a bicycle by a wall was mapped 0.6 m into the
+        wall's margin; the nearest floor the robot could reach was 1.04 m from that centre and 0.51 m from the bike's
+        later one, and go_to had answered "no free path" with the bike in view."""
+        path = self._plan(goal, reach)
+        if path is not None or not isinstance(target, Object):
+            return path
+        res = RES * PLAN
+        xs, ys = self._centre(*np.nonzero(self._reachable()), res)
+        gaps = np.hypot(xs - goal[0], ys - goal[1])
+        k = int(np.argmin(gaps))
+        return self._plan((float(xs[k]), float(ys[k])), res / 2) if gaps[k] <= reach + NEARBY else None
+
     def _reach(self, target: Point | Pose | Object, stop_dist: float) -> tuple[Point, float]:
         goal = xy(target)
         if isinstance(target, Object):
             thing = self.things.get(target.id)
             live = self._where(thing) if thing and thing.person else None
+            if target.radius == 0.0:  # flat floor target (e.g. rug): drive onto it, or to nearest free floor beside it
+                return goal, max(stop_dist, 0.2)
             return live or goal, max(stop_dist, target.radius + RADIUS + STOP_ZONE + 0.05)
         if self._occ(*goal, self.inflated):
             return goal, max(stop_dist, 0.4)
@@ -676,6 +694,10 @@ class SimRobot:
             return self._object(t, where, when)
         raise NotFound(f"object {id} has not been seen")
 
+    def sees_now(self, target: Object) -> bool:
+        """Is the thing in view now, where it is mapped (an arrival is confirmed by it)."""
+        return target.last_seen <= 0
+
     # ---- motion -------------------------------------------------------------------------------------------------
     def toward(self, direction: str, metres: float) -> Point:
         """A floor point the planner can reach, `metres` away in a direction from the robot's own (front, front-left,
@@ -684,12 +706,20 @@ class SimRobot:
         farthest reachable floor on the way there. A point merely free on the map was often one the planner could
         not reach (beyond a table, in a pocket), and the robot answered "blocked" to most of these calls."""
         self._call()
-        heading = self.yaw + math.radians(BEARINGS[choose(direction, tuple(BEARINGS), "direction")])
+        return self._floor_toward(self.yaw + math.radians(BEARINGS[choose(direction, tuple(BEARINGS), "direction")]),
+                                  metres)
+
+    def _floor_toward(self, heading: float, metres: float) -> Point:
+        """toward() on a map heading in radians."""
         far = max(0.1, abs(float(metres)))
         target = (self.x + far * math.cos(heading), self.y + far * math.sin(heading))
 
         def reachable(p: Point) -> bool:
-            return not self._occ(*p, self.inflated) and self._plan(p, 0.25) is not None
+            """Planned as go_to will plan it. Planned to within 0.25 m here and 0.1 m there, 1.8% of these points on
+            the apt_0 map were ones go_to then answered "no free path" to."""
+            goal, reach = self._reach(p, 0.0)
+            return not self._occ(*p, self.inflated) and (
+                math.dist(goal, (self.x, self.y)) <= reach or self._plan(goal, reach) is not None)
 
         if reachable(target):
             return target
@@ -782,7 +812,7 @@ class SimRobot:
             return
         attempts = 0
         while True:
-            path = self._plan(goal, reach)
+            path = self._route(target, goal, reach)
             if path is None:
                 raise PathBlocked(f"no free path to ({goal[0]:.1f}, {goal[1]:.1f})")
             if not isinstance(target, Object) and not self._occ(*goal, self.inflated):
@@ -831,7 +861,7 @@ class SimRobot:
         self._halt()
 
     # ---- skills -------------------------------------------------------------------------------------------------
-    def search(self, description: str, area: str = "here") -> Object | None:
+    def search(self, description: str, area: str = "here", *, toward: str = "") -> Object | None:
         """In view now: done, without moving. Otherwise memory first, checked in person; then camera coverage,
         viewpoint by viewpoint, until it is in view."""
         self._call("search", description=description, area=area)
@@ -856,11 +886,19 @@ class SimRobot:
                 return found
             self.memory.pop(o.id, None)  # looked at its place with a clear view and it is not there
         tried: list[Point] = []  # where it drove to look, or could not reach
+        if toward and toward in BEARINGS:
+            hint = self._floor_toward(self.yaw + math.radians(BEARINGS[toward]), 3.0)
+            if math.dist(hint, (self.x, self.y)) >= 0.8 and (not region or self._room_at(*hint) == region):
+                tried.append(hint)
+                try:
+                    self._go(hint, 0.0)
+                except PathBlocked:
+                    pass
+                found = self._found(description, started)
+                if found:
+                    self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
+                    return found
         for _ in range(SEARCH_STOPS):
-            found = self._found(description, started)
-            if found:
-                self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
-                return found
             stop = self._next_stop(description, region, tried)
             if stop is None:
                 break
@@ -869,9 +907,12 @@ class SimRobot:
                 self._go(stop, 0.0)
             except PathBlocked:
                 pass
-        found = self._found(description, started)
-        self._result(f"found {found.label} {found.id}" if found else "not found")
-        return found
+            found = self._found(description, started)
+            if found:
+                self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
+                return found
+        self._result("not found")
+        return None
 
     def _next_stop(self, description: str, region: str | None, tried: list[Point]) -> Any:
         """Where a search looks next: the nearest viewpoint the cameras have not covered yet."""
@@ -892,10 +933,11 @@ class SimRobot:
         raise ValueError(f"area must be 'here', 'everywhere' or a room ({rooms}), not {area!r}")
 
     def _found(self, description: str, since: float) -> Object | None:
-        """In view now, or seen since the search started."""
-        visible = self._matching(description, self._in_view())
+        """In view now, looked at as detect looks (a thing that came into view as the robot stopped has had too few
+        frames to be one yet), or seen since the search started."""
+        visible = self.detect(description)
         if visible:
-            return self._object(visible[0])
+            return visible[0]
         recent = [o for o in self._remembered(description) if self.t - o.last_seen >= since - 1e-6]
         return recent[0] if recent else None
 

@@ -22,9 +22,8 @@ from robot.agent.tools import CAMERA_NAMES, Tools, speakable
 from robot.perception.camera import data_url
 
 MAX_TURNS = 16  # model replies per task
-MAX_OBJECTS = 15  # nearest objects listed in full in an observation
-MAX_FARTHER = 40  # more after them, by id and name only
-MAX_IMAGES = 4  # pictures kept in the conversation; older ones are replaced by a note
+MAX_OBJECTS = 8  # nearest objects listed in full; keep context lean and let look/search/recall fetch specifics
+MAX_IMAGES = 3  # pictures kept in the conversation (older ones replaced by a note; saves ~1100 tokens/image)
 IMAGE_WIDTH = 768  # pixels across each picture; at 512 the 2B model misjudged colours of small things (a red bike)
 THINK = {"off": 0, "low": 128, "medium": 512, "high": 2048}  # most tokens of reasoning before each turn
 EARLIER = 4  # earlier tasks summarised at the start of a new one
@@ -43,12 +42,13 @@ How you work:
   ids as targets when you have them, else name the thing ("red ball"): tools look for it with the cameras.
 - Detector labels are guesses. Check the search picture against the requested features before driving or saying
   you found it. If the view doesn't distinguish the objects, say so rather than guessing an ID.
-- To approach a named thing use go_to by name or ID. Use its measured ranges to compare objects before moving;
-  their sizes in the wide camera pictures can mislead. Use go_toward for a spot on the floor, in robot directions.
+- To approach any named thing, surface, area or saved place (such as "where you were before") use go_to by name or ID
+  (even if not in the object list yet). Use its measured ranges to compare objects before moving; their sizes in the
+  wide camera pictures can mislead. Use go_toward only for an unnamed spot in robot directions.
 - Call tools to act. You get each result back, then decide what to do next. If one fails, read why and try another
   way, or ask the user.
-- If something is not in view, search for it where it most likely is before you say it is not there: give search
-  the room, and with near a thing it is usually beside.
+- If something is not in view, reason about where it likely belongs and give search a room, a visible landmark/area in
+  near (e.g. near="kitchen" or near="stairs"), or a promising camera direction in toward before saying it is not there.
 - For a request with several parts, first write a to-do list with todo, then tick each step off with todo_done.
 - When the request is done, reply with one or two short, warm spoken sentences and no tool call. That ends the task.
 - If a request is impossible or unsafe for you, say so kindly instead."""
@@ -98,8 +98,8 @@ def _image_part(url: str) -> dict[str, Any]:
 
 class Agent:
     def __init__(self, brain: Any, *, memory: Any = None, live: Any = None, cameras: str = "all",
-                 see_after_moves: bool = False, max_turns: int = MAX_TURNS, think: str = "medium",
-                 image_width: int = IMAGE_WIDTH, review: bool = True, think_when: str = "always") -> None:
+                 see_after_moves: bool = False, max_turns: int = MAX_TURNS, think: str = "low",
+                 image_width: int = IMAGE_WIDTH, review: bool = False, think_when: str = "always") -> None:
         """`cameras`: the pictures sent with each request, "front", "all" three, or "none" (the object list only);
         the model asks for others with look. `see_after_moves`: also send fresh pictures after every move, not only when the model looks.
         `think`: how long the model may reason before each turn: off, low, medium or high (see THINK).
@@ -143,7 +143,12 @@ class Agent:
                  + (f" (rooms you know: {', '.join(rooms)})" if len(rooms) > 1 else "")
                  + f". Battery {snap.get('battery', 1.0):.0%}."]
         everything = sorted(snap.get("objects", []), key=lambda o: o.distance)
-        objects, farther = everything[:MAX_OBJECTS], everything[MAX_OBJECTS:]
+        objects = everything[:MAX_OBJECTS]
+        if user_id is not None and not any(o.id == user_id for o in objects):
+            user_obj = next((o for o in everything if o.id == user_id), None)
+            if user_obj is not None:
+                objects = [*objects[:MAX_OBJECTS - 1], user_obj]
+        rest = len(everything) - len(objects)
         if objects:
             lines.append("Objects (id, what, colour, how far, which way):")
             for o in objects:
@@ -151,8 +156,8 @@ class Agent:
                 tint = f", {o.color}" if o.color and o.id != user_id else ""
                 seen = "" if o.last_seen < 2 else f", seen {o.last_seen:.0f} s ago"
                 lines.append(f"  {o.id} {who}{tint}, {o.distance:.1f} m {o.side}{seen}")
-            if farther:  # the rest, short: a far chair in the picture still counts when asked "how many chairs?"
-                lines.append("Farther: " + ", ".join(f"{o.id} {o.label}" for o in farther[:MAX_FARTHER]))
+            if rest > 0:
+                lines.append(f"  (+{rest} farther; use look, search, or recall to inspect others)")
         else:
             lines.append("Objects: none seen yet.")
         places = self._places_text(robot, snap.get("pose"))
@@ -167,20 +172,34 @@ class Agent:
         if pose is None or not places:
             return ""
         about = {"start": "where this request began", "where you were before": "where the request before began"}
+        prev = places.get("where you were before")
+        at_before = prev is not None and math.dist((prev.x, prev.y), (pose.x, pose.y)) <= 0.3
         here = []
-        for name, p in places.items():
+        # List "where you were before" first, then "start", then mapped areas nearest-first.
+        def order(kv: tuple[str, Any]) -> tuple[int, float, str]:
+            name, p = kv
+            rank = 0 if name == "where you were before" else 1 if name == "start" else 2
+            return (rank, math.dist((p.x, p.y), (pose.x, pose.y)), name)
+
+        for name, p in sorted(places.items(), key=order):
             d = math.dist((p.x, p.y), (pose.x, pose.y))
-            if name == "start" and d <= 0.3:  # worth naming once the robot has left it
+            if name == "start" and (d <= 0.3 or at_before):  # don't lure the robot back after reaching where it was
                 continue
             bearing = math.degrees(wrap(math.atan2(p.y - pose.y, p.x - pose.x) - math.radians(pose.yaw)))
             where = f"{d:.1f} m {side(bearing)}" if d > 0.3 else "here"
             here.append(f"{name} ({about[name]}, {where})" if name in about else f"{name} ({where})")
-        return "Places you can go_to by name: " + "; ".join(here) if here else ""
+        has_areas = any(n not in about for n in places)
+        prefix = "Places you can go_to by name (or search near): " if has_areas else "Places you can go_to by name: "
+        return prefix + "; ".join(here) if here else ""
 
-    def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str) -> dict[str, Any]:
-        parts: list[dict[str, Any]] = [{"type": "text", "text": f"{header}\n{self._scene_text(robot)}"}]
-        if tools.todo.steps:
-            parts[0]["text"] += f"\nTo-do list:\n{tools.todo.text()}"
+    def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str, *,
+                     include_scene: bool = True) -> dict[str, Any]:
+        parts: list[dict[str, Any]] = []
+        if include_scene:
+            text = f"{header}\n{self._scene_text(robot)}"
+            if tools.todo.steps:
+                text += f"\nTo-do list:\n{tools.todo.text()}"
+            parts.append({"type": "text", "text": text})
         view_fn = getattr(robot, "camera_view", None)
         shown = []
         width, height = self.image_width, round(self.image_width * 9 / 16)
@@ -196,10 +215,11 @@ class Agent:
             parts += [{"type": "text", "text": caption}, _image_part(data_url(rgb, max_width=width))]
             shown.append(caption)
         tools.pictures.clear()
-        if not shown and cameras:
-            parts[0]["text"] += "\n(No camera pictures right now.)"
-        elif not shown:
-            parts[0]["text"] += "\n(No pictures with this message: call look to see.)"
+        if include_scene:
+            if not shown and cameras:
+                parts[0]["text"] += "\n(No camera pictures right now.)"
+            elif not shown:
+                parts[0]["text"] += "\n(No pictures with this message: call look to see.)"
         return {"role": "user", "content": parts}
 
     @staticmethod
@@ -250,7 +270,11 @@ class Agent:
         messages.append(first)
         reviewed = False
         last_said = ""
+        spoke_since_action = False
         last_call, repeats = None, 0
+        seen_calls: dict[tuple[str, ...], int] = {}
+        looks_here = 0
+        blocked_tools: set[str] = set()
         think = self.think  # the request is news
         sorry = "Sorry, I couldn't finish that. Could you tell me another way?"
 
@@ -261,7 +285,8 @@ class Agent:
                 self._trim_images(messages)
                 self._push(thought="(thinking...)")
                 t0, began = time.perf_counter(), round(float(getattr(robot, "t", 0.0)), 1)
-                reply = self.brain.chat(messages, tools.schemas(), think=think)
+                schemas = [s for s in tools.schemas() if s["function"]["name"] not in blocked_tools]
+                reply = self.brain.chat(messages, schemas, think=think)
                 step = Step("", model_s=round(time.perf_counter() - t0, 3), tokens=reply.write_tokens,
                             thought=reply.thought.strip(), t=began)
                 record.steps.append(step)
@@ -287,31 +312,47 @@ class Agent:
                                                                             for h in heard).strip()})
                         think = self.think
                         continue
-                    if self.review and not reviewed and any(s.calls for s in record.steps):
+                    if not reviewed and (tools.todo.open_steps() or (self.review and any(s.calls for s in record.steps))):
                         reviewed = True
                         messages.append({"role": "user", "content": self._review(instruction, record, tools)})
                         think = self._budget(news=False)
                         continue
-                    if reply.text and speak:
+                    if reply.text and speak and not spoke_since_action:
                         robot.say(speakable(reply.text))
-                    step.said = reply.text  # drafts stay in this model conversation, not in speech or the next request
-                    last_said = reply.text or last_said
+                    step.said = reply.text if not spoke_since_action else ""  # avoid duplicate speech after say()
+                    last_said = (reply.text if not spoke_since_action else "") or last_said
                     return self._finish(robot, record, "done", last_said)
 
                 failed = False
                 visual_result = None
                 for call in reply.tool_calls:
-                    key = (call.name, json.dumps(call.args, sort_keys=True))
+                    key = ("say",) if call.name == "say" else (call.name, json.dumps(call.args, sort_keys=True))
                     repeats = repeats + 1 if key == last_call else 1
                     last_call = key
+                    seen_calls[key] = seen_calls.get(key, 0) + 1
                     if failed:
                         result, ok = "Skipped: an earlier call in this turn failed.", False
                     elif visual_result is not None:
                         result, ok = "Not run: inspect the returned pictures before deciding the next action.", False
-                    elif repeats > REPEATS and call.name != "look":
-                        result, ok = (f"Not run: you made this exact call {repeats - 1} times in a row. Do something "
+                    elif call.name == "say" and repeats > 1:
+                        result, ok = ("Not run: you already spoke. If the request is finished, end with plain text "
+                                      "and no tool call."), False
+                        blocked_tools.add("say")
+                        record.problems.append("say: repeated")
+                    elif call.name == "look" and call.args.get("what") and looks_here >= 3:
+                        result, ok = ("Not run: you already looked around from here without moving. Call search(...) "
+                                      "or move somewhere else to see new views."), False
+                        blocked_tools.add("look")
+                        record.problems.append("look: already looked around here")
+                    elif (call.name == "search" and seen_calls[key] > 1) or (
+                        repeats > REPEATS and call.name != "look"
+                    ) or (call.name == "look" and seen_calls[key] > REPEATS + 1):
+                        n_prev = (seen_calls[key] if call.name in ("look", "search") else repeats) - 1
+                        result, ok = (f"Not run: you made this exact call {n_prev} times. Do something "
                                       "different, or if the request is done, reply to the user."), False
-                        record.problems.append(f"{call.name}: repeated {repeats - 1} times")
+                        if call.name != "search":  # other search(near=...) areas remain valid
+                            blocked_tools.add(call.name)
+                        record.problems.append(f"{call.name}: repeated {n_prev} times")
                     else:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
                         self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
@@ -323,6 +364,16 @@ class Agent:
                         failed = not ok
                         if call.name == "say" and ok:
                             last_said = str(call.args.get("text", ""))
+                            spoke_since_action = True
+                        elif ok:
+                            spoke_since_action = False
+                            blocked_tools.discard("say")
+                            if call.name == "look" and call.args.get("what"):
+                                looks_here += 1
+                                if looks_here >= 3:
+                                    blocked_tools.add("look")
+                            elif call.name != "look":
+                                blocked_tools.discard(call.name)
                     step.calls.append((call.name, call.args, result, ok))
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
                     if visual_result is None and (tools.looked or tools.pictures):
@@ -331,6 +382,10 @@ class Agent:
                            problems=list(record.problems))
                 if tools.todo.steps and not {c.name for c in reply.tool_calls} & {"todo", "todo_done"}:
                     messages[-1]["content"] += f"\nTo-do list now:\n{tools.todo.text()}"
+                if tools.moved:
+                    seen_calls = {k: v for k, v in seen_calls.items() if k[0] == "search"}
+                    looks_here = 0
+                    blocked_tools.clear()
                 if tools.moved and not self.see_after_moves:  # where places are from here now ("come back here")
                     snap = robot.snapshot()
                     places = self._places_text(robot, snap.get("pose"))
@@ -346,8 +401,9 @@ class Agent:
                     header = "".join(f'The user says: "{h}"\n' for h in heard) + "What you sense now:"
                     messages.append(self._observation(robot, tools, cameras, header))
                 elif cameras or tools.pictures:  # pictures come back inside the requesting tool result, as trained: a
-                    # new user message would end its tool-use turn and drop the reasoning so far
-                    seen = self._observation(robot, tools, cameras, "What you sense now:")
+                    # new user message would end its tool-use turn and drop the reasoning so far. Skip re-sending the
+                    # full scene list on stationary looks/crops to keep context lean.
+                    seen = self._observation(robot, tools, cameras, "What you sense now:", include_scene=moved)
                     result_msg = visual_result if visual_result is not None else messages[-1]
                     result_msg["content"] = [{"type": "text", "text": result_msg["content"]}, *seen["content"]]
                 tools.moved, tools.looked = False, []
@@ -421,9 +477,15 @@ class Agent:
                             for line in record.lines() if not line.startswith("reply:"))[:300]
         summary = (f'"{record.instruction}" -> {outcome}' + (f"; you did: {actions}" if actions else "")
                    + (f'; you said "{said[:100]}"' if said else ""))
+        began = getattr(robot, "places", {}).get("start")
+        moved_note = ""
+        if began is not None and hasattr(robot, "x") and hasattr(robot, "y"):
+            dm = math.dist((began.x, began.y), (robot.x, robot.y))
+            if dm > 0.1:
+                moved_note = f"; ended {dm:.1f} m from where that request began"
         self.earlier = [*self.earlier, summary][-EARLIER:]
         self.last = "\n".join([f'  The user said "{record.instruction}"', *(f"  {line}" for line in record.lines()),
-                               f"  ({outcome})"])
+                               f"  ({outcome}{moved_note})"])
         self._push(status="stopped" if outcome == "preempted" else outcome, steps=record.lines(thoughts=True),
                    problems=list(record.problems))
         return record

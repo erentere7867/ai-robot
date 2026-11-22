@@ -16,12 +16,16 @@ from typing import Any
 from robot.agent.api import NotFound, Object, PathBlocked, Pose, TargetLost, Timeout, geom
 from robot.sim.world import BEARINGS, visual_name
 
-CAMERAS = {
+CAMERAS = {  # every direction go_toward takes too: the model used each tool's words for the other ("front-right")
     "front": ("front_camera",),
+    "front-left": ("front_camera",),  # the front camera sees 70 degrees either way
+    "front-right": ("front_camera",),
     "rear-left": ("rear_left_camera",),
     "rear-right": ("rear_right_camera",),
-    "left": ("rear_left_camera",),
+    "left": ("rear_left_camera",),  # the rear cameras look 120 degrees round, 70 degrees either way
     "right": ("rear_right_camera",),
+    "behind-left": ("rear_left_camera",),
+    "behind-right": ("rear_right_camera",),
     "behind": ("rear_left_camera", "rear_right_camera"),
     "around": ("front_camera", "rear_left_camera", "rear_right_camera"),
 }
@@ -33,6 +37,8 @@ RANGE_ORDER = re.compile(r"\b(?:nearest|closest|farthest|furthest)\b", re.IGNORE
 VIEW_ORDER = re.compile(r"\b(?:leftmost|rightmost|left|right)\b", re.IGNORECASE)
 USER_WORDS = {"user", "me", "you", "the user", "person(user)", "human", "speaker", "my owner", "owner"}
 NO_TARGET = {"", "none", "null", "nothing"}
+PLACE_STOP = frozenset({"the", "a", "an", "my", "to", "in", "at", "by", "on", "of", "near", "area", "room", "place"})
+CLUSTER_GAP = 0.7  # metres: co-located same-label targets (e.g. a pair of shoes) auto-pick the nearest instead of asking
 NO_CLEARANCE = ("I cannot verify clearance under furniture. I did not drive underneath or beside it. "
                 "Ask before substituting a different destination")
 NUMBER = re.compile(r"\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*"
@@ -155,6 +161,35 @@ def _check_visual_name(text: str) -> None:
                         "then choose an ID by its measured distance")
 
 
+def _place_tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return {w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in words} - PLACE_STOP
+
+
+def _match_place(query: str, places: dict[str, Any], pose: Any = None) -> str | None:
+    """Best-matching mapped area for a free-form query (e.g. 'hallway' -> 'hallway: doorway, door'),
+    ignoring system places ('start', 'where you were before')."""
+    q = _place_tokens(query)
+    if not q or not places:
+        return None
+    best: tuple[int, int, float, str] | None = None
+    for raw, p in places.items():
+        name = str(raw).lower()
+        if name in ("start", "where you were before"):
+            continue
+        head, _, rest = name.partition(":")
+        head_toks = _place_tokens(head)
+        all_toks = head_toks | _place_tokens(rest)
+        overlap = len(q & all_toks)
+        if not overlap or (overlap < len(q) and not (q & head_toks)):
+            continue
+        dist = -math.dist((p.x, p.y), (pose.x, pose.y)) if pose is not None and hasattr(p, "x") else 0.0
+        score = (len(q & head_toks), overlap, dist)
+        if best is None or score > best[:3]:
+            best = (*score, name)
+    return best[3] if best is not None else None
+
+
 class Tools:
     """The tools bound to one robot for one task."""
 
@@ -167,6 +202,7 @@ class Tools:
         self.pictures: list[tuple[str, Any]] = []  # sensor evidence with its provenance, not a new live view
         self._tools = {t.name: t for t in self._define()}
         self.began = robot.pose()  # where this request began
+        self._task_pose_start = len(getattr(getattr(robot, "trace", None), "poses", ()))
         self.done: list[str] = []  # each motion of this request, as it went
         self.turned = 0.0  # degrees of turning in all, either way
 
@@ -178,9 +214,12 @@ class Tools:
         tool = self._tools.get(name)
         if tool is None:
             return f"There is no tool {name!r}. Tools: {', '.join(self._tools)}.", False
+        self.found = None  # what this call found by searching
         try:
             checked = _check(tool, args)
             result = tool.run(**checked)
+            if self.found is not None and name != "search":
+                result = f"Searched for it: found {self.found.label} {self.found.id}. {result}"
         except ToolError as exc:
             return f"Error: {exc}.", False
         except NotFound as exc:
@@ -198,13 +237,14 @@ class Tools:
             if tool.moves:
                 self.moved = True
         if tool.moves:
-            result += "\n" + self._progress(name, checked, result)
+            progress = self._progress(name, checked, result)
+            if progress:
+                result += "\n" + progress
         return result, True
 
     def _progress(self, name: str, args: dict[str, Any], result: str) -> str:
-        """Every motion of this request so far and where that has left the robot, after each motion: a small model
-        loses count over a long conversation (it spun twice, then kept turning; it rocked left and right, and lost
-        track of how often), but reads its progress right in the latest result."""
+        """Keep motion progress compact: always report for repetition-prone steps (turn/move/drive/orbit) or after
+        multiple motions, while omitting boilerplate on a single-step go_to/search to keep context lean."""
         if name == "turn":
             degrees = args["degrees"]
             self.turned += abs(degrees)
@@ -213,6 +253,8 @@ class Tools:
             self.done.append(f"moved {args['metres']:g} m {args['direction']}")
         else:
             self.done.append(result.split(":")[0].split(",")[0].rstrip(".").lower())  # "arrived", "drove for 2 s"
+        if name not in ("turn", "move", "drive", "orbit") and len(self.done) <= 1:
+            return ""
         now = self.robot.pose()
         heading = (now.yaw - self.began.yaw + 180) % 360 - 180
         away = math.dist((now.x, now.y), (self.began.x, self.began.y))
@@ -239,8 +281,10 @@ class Tools:
             result += " From the request start: " + "; ".join(f"ID {i} about {d:.1f} m" for d, i in start) + "."
         return result
 
-    def _resolve(self, target: str, *, people_only: bool = False) -> Any:
-        """An id, 'user', a room or saved place, or a description, as something the robot can drive to."""
+    def _resolve(self, target: str, *, people_only: bool = False, find: bool = True, fuzzy_place: bool = False) -> Any:
+        """An id, 'user', a room or saved place, or a description, as something the robot can drive to; `find`: a
+        description neither known nor in view is searched for, which drives (not for "turn to face the sofa": it
+        drove off to look for the sofa)."""
         r = self.robot
         text = str(target).strip().strip("'\"")
         low = re.sub(r"^(the|a|an|my)\s+", "", text.lower()).strip()
@@ -261,12 +305,13 @@ class Tools:
             except NotFound as exc:  # the robot says why, when it knows (gone from where it was, not one after all)
                 raise ToolError(str(exc) if str(exc) != f"there is no object {m.group(1)}"
                                 else f"there is no object {m.group(1)} in the object list") from None
+        raw_places = getattr(r, "places", {})
+        places_map = {str(k).lower(): v for k, v in raw_places.items()}
+        name = re.sub(r"\s*\(.*\)$", "", low)  # a place as the observation lists it: "kitchen (2.1 m front)"
         if not people_only:
-            places = {str(p).lower() for p in getattr(r, "places", {})}
             rooms = {str(p).lower() for p in getattr(getattr(r, "scene", None), "rooms", {})}
-            name = re.sub(r"\s*\(.*\)$", "", low)  # a place as the observation lists it: "kitchen (2.1 m front)"
             key = name.removesuffix(" room").strip()
-            if name in places or name in rooms:
+            if name in places_map or name in rooms:
                 return name
             if key in rooms:
                 return key
@@ -278,7 +323,20 @@ class Tools:
         if VIEW_ORDER.search(text):  # name lookup matches shared words; "right chair" must not pick any chair
             raise ToolError("a left/right selection needs a viewpoint. Use look(direction, what) with the "
                             "visual name, then choose the matching ID in the marked picture")
-        matches = list(r.where(text)) or list(r.detect(text))  # known already, or in view when looked for by name
+
+        def pick(found: list[Object]) -> Object:
+            best = [o for o in found if o.label == found[0].label]
+            if len(best) > 1 and max(geom.dist(o, best[0]) for o in best) > CLUSTER_GAP:
+                raise ToolError(f"{text!r} could be any of: {self._choices(best)} "
+                                "Use the id, or ask the user which one")
+            return found[0]
+
+        known = list(r.where(text))
+        if known:
+            return pick(known)
+        if fuzzy_place and not people_only and (hit := _match_place(name, places_map, r.pose())) is not None:
+            return hit
+        matches = list(r.detect(text))  # in view when looked for by name
         if not matches:
             label = visual_name(low)
             if label and label != low:
@@ -286,11 +344,30 @@ class Tools:
                 if candidates:
                     raise ToolError(f"I see {label}, but cannot confirm {text!r}. {self._choices(candidates)} "
                                     "Check the marked views and use an ID only if it matches, or ask the user")
-            raise ToolError(f"no {text!r} is known or in view. Use search({text!r}) to look for it")
-        best = [o for o in matches if o.label == matches[0].label]
-        if len(best) > 1:
-            raise ToolError(f"{text!r} could be any of: {self._choices(best)} Use the id, or ask the user which one")
-        return matches[0]
+            if not find:
+                raise ToolError(f"no {text!r} is known or in view. Use look('around', {text!r}) to look without "
+                                "driving, or search to drive round looking for it")
+            # If a mapped semantic place names this area/landmark, drive there before sweeping the home blindly.
+            hint = _match_place(name, places_map, r.pose()) if not people_only else None
+            if hint is not None:
+                hp = places_map.get(hint)
+                if hp is not None and math.dist((hp.x, hp.y), (r.pose().x, r.pose().y)) > 0.6:
+                    try:
+                        r.go_to(hint)
+                    except (NotFound, PathBlocked):
+                        pass
+                    matches = list(r.where(text)) or list(r.detect(text))
+                    if matches:
+                        return pick(matches)
+                if _place_tokens(name) <= _place_tokens(hint.partition(":")[0]):
+                    return hint
+            # "go to the bicycle" means finding it first: answering "use search" cost the model a turn, and a small
+            # model need not know to
+            self.found = r.search(text)
+            if self.found is None:
+                raise ToolError(f"searched here and found no {text!r}. Search another room, or ask the user")
+            return self.found
+        return pick(matches)
 
     def _name(self, t: Any) -> str:
         if isinstance(t, Object):
@@ -306,14 +383,15 @@ class Tools:
                                                    "like \"red ball\". Compare returned distances, not object names."}
         side = {"type": "string", "enum": ["left", "right"]}
         return [
-            Tool("say", "Say something out loud now, while you keep working. Your final reply is spoken too.",
-                 {"text": {"type": "string"}}, ("text",), self.say),
-            Tool("go_to", "Park beside a target and face it. Use an ID or visual name. For a requested side or gap "
-                          "use go_to_side or stop_near. Parking beside something does not go underneath.",
+            Tool("go_to", "Go to a target and face it. Use an ID, or any visible thing, area or place by name even if "
+                          "not in the Objects list yet (it will be located or searched for automatically). For a "
+                          "requested side or gap use go_to_side or stop_near. Parking beside something does not go "
+                          "underneath.",
                  {"target": target}, ("target",), self.go_to, moves=True),
-            Tool("go_toward", "Drive about some metres in a direction, around obstacles: to go somewhere you can see "
-                              "in a picture but that is not one thing you can name. The front picture shows what is in "
-                              "front of you; rear-left shows behind you on the left; rear-right behind you on the right.",
+            Tool("go_toward", "Drive about some metres in a direction, around obstacles, only when no named thing, "
+                              "surface or area can be given to go_to (such as an unnamed gap or a plain direction). "
+                              "The front picture shows what is in front of you; rear-left shows behind you on the "
+                              "left; rear-right behind you on the right.",
                  {"direction": {"type": "string", "enum": list(BEARINGS)},
                   "metres": {"type": "number", "minimum": 0.3, "maximum": 6}},
                  ("direction", "metres"), self.go_toward, moves=True),
@@ -357,14 +435,19 @@ class Tools:
             Tool("face", "Turn once to face a target.", {"target": target}, ("target",), self.face, moves=True),
             Tool("keep_facing", "Keep turning to face a target as it moves, until the user says stop.",
                  {"target": target}, ("target",), self.keep_facing, moves=True),
-            Tool("search", "Find something that is not in the object list: checks memory, then drives around the "
-                           "area until the cameras see it.",
+            Tool("search", "Find something not in the object list: checks memory, optionally starts beside a likely "
+                           "landmark/area (`near`) or heads a promising camera direction first (`toward`), then "
+                           "sweeps unseen floor until the cameras see it.",
                  {"what": {"type": "string", "description": "a visual name, like \"red ball\" or \"keys\", "
                                                            "without a distance comparison"},
-                  "area": {"type": "string", "description": "\"here\" (this room), a room name, or \"everywhere\". "
-                                                           "Search the room where it most likely is first."},
-                  "near": {"type": "string", "description": "optional: a thing to start beside, where it likely is "
-                                                           "(an id or a name, like \"sofa 4\")"}},
+                  "area": {"type": "string", "description": "\"here\" (this room), a room name, or \"everywhere\", not "
+                                                           "a direction."},
+                  "near": {"type": "string", "description": "optional: a known or visible landmark/area to go beside "
+                                                           "first, where the thing likely is (e.g. \"sofa 4\", "
+                                                           "\"kitchen\", \"stairs\")"},
+                  "toward": {"type": "string", "enum": list(BEARINGS),
+                             "description": "optional: camera direction to head first when a doorway or likely area "
+                                            "lies that way"}},
                  ("what",), self.search, moves=True),
             Tool("look", "Inspect fresh camera pictures without driving. To label what you see, supply its visual name.",
                  {"direction": {"type": "string", "enum": list(CAMERAS)},
@@ -388,18 +471,21 @@ class Tools:
                  {"steps": {"type": "array", "items": {"type": "string"}}}, ("steps",), self.write_todo),
             Tool("todo_done", "Tick off a finished step of the to-do list by its number.",
                  {"step": {"type": "integer", "minimum": 1, "maximum": 30}}, ("step",), self.todo_done),
+            Tool("say", "Speak mid-task ONLY when you still have more tool calls to make after speaking. Never call "
+                        "this for your final reply: end with plain text and no tool call instead.",
+                 {"text": {"type": "string"}}, ("text",), self.say),
         ]
 
     def say(self, text: str) -> str:
         self.robot.say(speakable(text))
-        return "Said it."
+        return "Said it. If the request is finished, reply with no tool call."
 
     def go_to(self, target: str, distance: float | None = None, side: str = "") -> str:
         if side == "under":
             raise ToolError(NO_CLEARANCE)
+        before = self.robot.pose()
         t = self._resolve(target)
         person = isinstance(t, Object) and t.label == "person"
-        before = self.robot.pose()
         if side:
             self.robot.go_to(t, distance=distance if distance is not None else (0.8 if person else 0.2), side=side)
         else:
@@ -421,13 +507,18 @@ class Tools:
             try:
                 self.robot.face(t)
                 fresh = self.robot.obj(t.id)
-                if fresh.last_seen > 0:
+                if not self.robot.sees_now(fresh):
                     raise NotFound(f"last seen {fresh.last_seen:g} s ago")
             except NotFound as exc:
                 self.looked = list(CAMERAS["front"])
                 raise ToolError(f"drive finished {geom.dist(self.robot.pose(), t):.1f} m from the last mapped centre "
                                 f"of {t.label} {t.id}. Target not confirmed: {exc}. Check the front view") from exc
+            if fresh.radius == 0.0:
+                return f"Drive finished. Reached {self._name(fresh)} (on the nearest open floor to its centre)."
             gap = max(0.0, fresh.distance - fresh.radius - ROBOT_RADIUS)
+            if gap <= 0.6:
+                return (f"Drive finished. Reached {self._name(fresh)}, facing it "
+                        f"(gap {gap:.1f} m, {fresh.distance:.1f} m to centre).")
             return (f"Drive finished. Facing {self._name(fresh)}, estimated gap {gap:.1f} m "
                     f"({fresh.distance:.1f} m to centre).")
         return f"Arrived at {self._name(t)}."
@@ -457,39 +548,58 @@ class Tools:
         return f"Followed for {seconds:g} s." if seconds else "Stopped following."
 
     def face(self, target: str) -> str:
-        t = self._resolve(target)
+        t = self._resolve(target, find=False)
         self.robot.face(t)
         return f"Facing {self._name(t)}."
 
     def keep_facing(self, target: str) -> str:
-        t = self._resolve(target)
+        t = self._resolve(target, find=False)
         self.robot.face(t, background=True)
         while True:  # until "stop", or words from the user, preempt it
             self.robot.wait(1.0)
 
-    def search(self, what: str, area: str = "here", near: str = "") -> str:
-        self.found = None
+    def search(self, what: str, area: str = "here", near: str = "", toward: str = "") -> str:
         _check_visual_name(what)
-        if near:  # start beside it: "the table is by the sofa" is the model's to know, the looking is the robot's
-            start = self._resolve(near)
-            self.robot.go_to(start, distance=(start.radius + 0.5) if isinstance(start, Object) else 0.0)
-        found = self.robot.search(what, area=area or "here")
-        log = getattr(self.robot, "search_log", [])
-        looked = f" Where you looked: {'; '.join(log[-4:])}." if log else ""
+        near_key = near.strip().lower().replace("_", "-")
+        if near_key in BEARINGS and not toward:
+            toward, near = near_key, ""
+        if near and near_key not in {"here", "everywhere", "room"}:  # start beside a visible/known landmark if found
+            try:
+                start = self._resolve(near, find=False, fuzzy_place=True)
+                self.robot.go_to(start, distance=(start.radius + 0.5) if isinstance(start, Object) else 0.0)
+            except (ToolError, NotFound, PathBlocked):
+                pass
+        try:
+            self.found = found = self.robot.search(what, area=area or "here", toward=toward)
+        except TypeError:  # a test fake whose search() takes only (what, area)
+            self.found = found = self.robot.search(what, area=area or "here")
         if found is None:
-            where = "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
-            return f"Searched {where}: no {what} found.{looked}"
-        self.found = found
+            log = getattr(self.robot, "search_log", [])
+            poses = getattr(getattr(self.robot, "trace", None), "poses", ())
+            trail = [(x, y) for _, x, y, _ in poses[self._task_pose_start:]] or [
+                (self.robot.pose().x, self.robot.pose().y)
+            ]
+            mapped = [
+                (str(n), p) for n, p in getattr(self.robot, "places", {}).items()
+                if str(n).lower() not in ("start", "where you were before") and hasattr(p, "x")
+            ]
+            unvisited = [n for n, p in mapped if all(math.dist((p.x, p.y), xy) > 2.2 for xy in trail)]
+            hint = f" Areas not visited closely yet: {'; '.join(unvisited[:4])}." if unvisited else ""
+            where = "all reachable areas" if (mapped and not unvisited and area in ("here", "everywhere")) else (
+                "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
+            )
+            stops = f" ({len(log)} stops)" if log else ""
+            return f"Searched {where}{stops}: no {what} found.{hint}"
         crop = getattr(self.robot, "target_crop", lambda _: None)(found.id)
         if crop is not None:
             self.pictures.append((f"Recorded detection crop for {found.label} ID {found.id} (not a live view):", crop))
         others = [o for o in self.robot.where(what, area=area or "here") if o.id != found.id]
         if others:
-            return f"Found candidate {found.label} {found.id}. Known matches: {self._choices([found, *others])}{looked}"
+            return f"Found candidate {found.label} {found.id}. Known matches: {self._choices([found, *others])}"
         marked = getattr(self.robot, "marked_cameras", None)
         self.looked.extend(marked({found.id}) if marked else CAMERAS["around"])
         evidence = "" if self.looked or self.pictures else " No matching image is available to verify this ID."
-        return f"Found candidate {found.label} {found.id}, {_where_words(found)}.{looked}{evidence}"
+        return f"Found candidate {found.label} {found.id}, {_where_words(found)}.{evidence}"
 
     def go_toward(self, direction: str, metres: float) -> str:
         before = self.robot.pose()
@@ -510,11 +620,14 @@ class Tools:
         return f"The front camera over the last {seconds:g} s: {len(past)} pictures follow, oldest first."
 
     def look(self, direction: str, what: str = "") -> str:
+        matches = ""
         if what:
             _check_visual_name(what)
-            self.robot.detect(what)  # activate the requested label without starting a travelling search
+            found = list(self.robot.detect(what))
+            matches = (" Seen: " + "; ".join(f"{o.label} {o.id} ({_where_words(o)})" for o in found[:6]) + "."
+                       if found else f" No {what} detected.")
         self.looked = list(dict.fromkeys([*self.looked, *CAMERAS[direction]]))
-        return f"Looking {direction}: the pictures follow."
+        return f"Looking {direction}: the pictures follow.{matches}"
 
     def wait(self, seconds: float, until: str = "") -> str:
         if until:

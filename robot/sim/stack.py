@@ -147,7 +147,8 @@ class Home:
         from robot.ros.real import RealRobot
 
         scene, grid = own_home(self.map)
-        return RealRobot(scene, detector=detector, brain=brain, store=store, grid=grid)
+        return RealRobot(scene, detector=detector, brain=brain, store=store, grid=grid,
+                         places_file=self.map.with_suffix(".places.json"))
 
     def reset(self, localise: bool = True) -> None:
         """Carry the robot back to its dock and tell its localisation so (as when it is put back on its dock)."""

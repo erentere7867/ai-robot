@@ -159,8 +159,6 @@ def test_a_flickering_thing_is_not_gone_until_unseen_for_a_while():
     tr.update([Detection("plant", 1.0, 0.0, 0.3)], 9.5)
     tr.update([Detection("plant", 1.0, 0.0, 0.3)], 10.0)  # seen twice: a thing, not a one-frame blip
     plant = tr.objects()[0]
-    for _ in range(GONE_AFTER + 2):  # two cameras missing it for a few frames, a second after it was seen
-        tr.missed(plant, 11.0)
-    assert plant.present
-    tr.missed(plant, 10.0 + GONE_S + 0.1)
-    assert not plant.present
+    # two cameras missing it for a few frames, a second after it was seen
+    assert not any([tr.missed(plant, 11.0) for _ in range(GONE_AFTER + 2)])
+    assert tr.missed(plant, 10.0 + GONE_S + 0.1)

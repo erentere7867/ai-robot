@@ -107,6 +107,9 @@ class Track:
     normal: tuple[float, float] | None = None
     visual_color: str = ""  # named from the object crop when a request actually needs its colour
     color_from: int = 0
+    visual: bool = False  # placed by the vision model, not the detector: detector misses are not evidence it left
+    z: float = 0.0  # median elevation of a visual target, metres (>0.45 is above camera eye level, e.g. on a desk)
+    spotted_from: tuple[float, float] = (0.0, 0.0)  # robot map (x, y) when a visual target was placed
     def predict(self, dt: float) -> tuple[float, float]:
         """Predicted 2D position (x, y) at dt seconds into the future."""
         return self.x + self.vx * dt, self.y + self.vy * dt
@@ -174,6 +177,8 @@ class Tracker:
             best, best_gap = None, math.inf
             for t in self.tracks.values():
                 same = t.label == label
+                if t.visual and not same:
+                    continue  # a detector guess under another word must not hijack or move a vision-placed track
                 alike = d.cut or not t.sized or _alike(t.radius, d.radius)
                 if t is reserved or t in touched or (not same and (t.person or label == "person" or not alike)):
                     continue
@@ -307,10 +312,11 @@ class Tracker:
                 t.apart.add(o.id)
                 o.apart.add(t.id)
         for t in sorted(self.tracks.values(), key=lambda t: t.id):
-            if t.id not in self.tracks:
+            if t.id not in self.tracks or t.rejected or not t.present:
                 continue
-            for o in [o for o in self.tracks.values() if o.id > t.id and o.person == t.person]:
-                if o.id in t.apart:
+            for o in [o for o in self.tracks.values()
+                      if o.id > t.id and o.person == t.person and not o.rejected and o.present]:
+                if o.id in t.apart or ((t.visual or o.visual) and t.label != o.label):
                     continue
                 gap = math.dist((t.x, t.y), (o.x, o.y))
                 if not t.person and _across_seam(t, o):
@@ -345,6 +351,10 @@ class Tracker:
                 t.colors.update(o.colors)
                 t.last_seen = max(t.last_seen, o.last_seen)
                 t.score = max(t.score, o.score)
+                t.verified = t.verified or o.verified
+                t.sure = t.sure or o.sure
+                if o.visual and not t.visual:
+                    t.visual, t.z, t.spotted_from = True, o.z, o.spotted_from
                 for neighbor in o.apart:
                     self.tracks[neighbor].apart.remove(o.id)
                     self.tracks[neighbor].apart.add(t.id)
@@ -355,13 +365,13 @@ class Tracker:
                     if track is o:
                         pairs[k] = (d, t)
 
-    def missed(self, track: Track, now: float | None = None) -> None:
-        """A camera looked clearly at where `track` should be and did not see it. Gone after GONE_AFTER such misses
-        in a row, and, given `now`, GONE_S since anything last saw it: misses come from all three cameras, and two of
-        them each missing a flickering plant for a few frames took it off the map a second after a search found it."""
+    def missed(self, track: Track, now: float | None = None) -> bool:
+        """A camera looked clearly at where `track` should be and did not see it: True once the detector's misses say
+        it is gone, GONE_AFTER in a row and, given `now`, GONE_S since anything last saw it (misses come from all three
+        cameras, and two of them each missing a flickering plant for a few frames took it off the map a second after
+        a search found it). Whether it is gone is the caller's to decide (perception asks the vision model first)."""
         track.misses += 1
-        if track.misses >= GONE_AFTER and (now is None or now - track.last_seen >= GONE_S):
-            track.present = False
+        return track.misses >= GONE_AFTER and (now is None or now - track.last_seen >= GONE_S)
 
     def verify(self, track: Track, label: str | None, pixels: int = 0, sure: bool = False) -> None:
         """The vision model's name for the track's crop of `pixels` pixels; None means it saw no object. Its word

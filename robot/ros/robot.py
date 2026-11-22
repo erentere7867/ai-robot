@@ -29,6 +29,9 @@ from robot.interfaces.voice import chime as synth_chime
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
 DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
+# A Nav2 goal that has not brought the robot PROGRESS_M nearer in PROGRESS_S simulated seconds is given up: a search
+# stop Nav2 could not reach kept it backing up, spinning and replanning along one 2 m stretch for 490 s.
+PROGRESS_S, PROGRESS_M = 30.0, 0.25
 
 
 class RosRobot(SimRobot):
@@ -54,11 +57,9 @@ class RosRobot(SimRobot):
         )
         self.tf = Buffer()
         self._tf_listener = TransformListener(self.tf, self.node)
-        self.actions = {name: ActionClient(self._action_node, kind, name) for name, kind in (
-            ("navigate_to_pose", NavigateToPose), ("follow_path", FollowPath), ("spin", Spin),
-            ("drive_on_heading", DriveOnHeading))}
         self.kinds = {"navigate_to_pose": NavigateToPose, "follow_path": FollowPath, "spin": Spin,
                       "drive_on_heading": DriveOnHeading}
+        self.actions: dict[str, Any] = {}
         # Direct motion (drive, express) enters Nav2's own command chain where its controller's does: the velocity
         # smoother, then the collision monitor, which stops the robot short of anything in the way. Nothing reaches
         # the wheels around that safety stop.
@@ -86,6 +87,9 @@ class RosRobot(SimRobot):
                 next_nudge = time.monotonic() + 10.0
             time.sleep(0.2)
         self._wait_for_nav2(deadline)
+        # Create action clients after Nav2's lifecycle managers are active: clients built while behavior_server was
+        # still inactive occasionally missed FastDDS SHM discovery on drive_on_heading (E2 reached 0.84 m then failed).
+        self.actions = {name: ActionClient(self._action_node, kind, name) for name, kind in self.kinds.items()}
         self.t0 = self._now()
         self.t = 0.0
         self.trace.poses = [(0.0, self.x, self.y, self.yaw)]
@@ -120,6 +124,11 @@ class RosRobot(SimRobot):
         if getattr(self, "t0", None) is not None:
             try:
                 self.t = self._now() - self.t0
+            except Exception:
+                pass
+        if hasattr(self, "tf"):
+            try:
+                self._read_pose()
             except Exception:
                 pass
         super().begin()
@@ -190,7 +199,10 @@ class RosRobot(SimRobot):
             current = self.obj(target.id)
         except NotFound as exc:
             raise TargetLost(f"stopped approaching {target.label} {target.id}: {exc}") from exc
-        if current.label != target.label or math.dist(current.position, target.position) > target.radius + current.radius:
+        # Match Tracker.gate (0.6 m): small objects (e.g. shoes, r=0.04-0.11 m) routinely refine depth by 0.16-0.26 m
+        # while approaching, which falsely aborted 4 consecutive go_to calls against 2*r (0.08-0.22 m).
+        limit = max(0.6, target.radius + current.radius)
+        if current.label != target.label or math.dist(current.position, target.position) > limit:
             raise TargetLost(f"stopped: the label or mapped footprint of {target.label} {target.id} changed")
 
     def _act(self, name: str, *, watch: Object | None = None, **fields: Any) -> None:
@@ -199,6 +211,8 @@ class RosRobot(SimRobot):
         if not client.wait_for_server(timeout_sec=10.0):
             from rclpy.action import ActionClient
 
+            if hasattr(client, "destroy"):
+                client.destroy()
             self.actions[name] = ActionClient(self._action_node, self.kinds[name], name)
             client = self.actions[name]
             if not client.wait_for_server(timeout_sec=20.0):
@@ -224,22 +238,30 @@ class RosRobot(SimRobot):
             raise PathBlocked(f"{name} refused the goal")
         self._goal, result = handle, handle.get_result_async()
         next_check = 0.0
+        to = (fields["pose"].pose.position.x, fields["pose"].pose.position.y) if "pose" in fields else None
+        best, since = math.inf, self.t
         try:
             while not result.done():
                 self._step(0.0, 0.0)
                 if watch is not None and time.monotonic() >= next_check:
                     self._check_goal(watch)
                     next_check = time.monotonic() + 0.2
+                if to is not None:  # Nav2 retries and recovers for as long as it likes; a goal that gets no nearer ends
+                    gap = math.dist(to, (self.x, self.y))
+                    if gap < best - PROGRESS_M:
+                        best, since = gap, self.t
+                    elif self.t - since > PROGRESS_S:
+                        raise PathBlocked(f"no nearer to ({to[0]:.1f}, {to[1]:.1f}) in {PROGRESS_S:g} s")
         except BaseException as exc:
             handle.cancel_goal_async()
             self._publish(0.0, 0.0)
-            if isinstance(exc, TargetLost):
+            if isinstance(exc, (TargetLost, PathBlocked)):
                 # Do not hand the model another motion turn while the old controller can still drive.
                 deadline = time.monotonic() + 2.0
                 while not result.done() and time.monotonic() < deadline:
                     time.sleep(0.02)
                 if not result.done():
-                    raise SafetyStop("Nav2 did not confirm the lost target's goal had stopped") from exc
+                    raise SafetyStop(f"Nav2 did not confirm that the {name} goal it was told to drop had stopped") from exc
             raise
         finally:
             self._goal = None
@@ -283,9 +305,11 @@ class RosRobot(SimRobot):
         goal, reach = self._reach(target, distance)
         if math.dist(goal, (self.x, self.y)) <= reach:
             return None
-        path = self._plan(goal, reach)
+        path = self._route(target, goal, reach)
         if path is None:
             raise PathBlocked(f"no free path to ({goal[0]:.1f}, {goal[1]:.1f})")
+        if not path:  # already on the nearest floor there is
+            return None
         end = path[-1] if isinstance(target, Object) or self._occ(*goal, self.inflated) else goal
         if isinstance(target, Pose):
             return end, math.radians(target.yaw)
@@ -317,9 +341,9 @@ class RosRobot(SimRobot):
                 self._act("navigate_to_pose", watch=watch, pose=self._pose_msg(gx, gy, yaw))
             except PathBlocked:
                 self._sync()
-                if math.dist(goal, (self.x, self.y)) > reach + 0.35:
+                if math.dist(goal, (self.x, self.y)) > reach + 0.35 and math.dist((gx, gy), (self.x, self.y)) > 0.35:
                     raise
-                self._face_goal(goal)  # stopped just short: close enough, and facing it
+                self._face_goal(goal)  # stopped just short (or at nearest free cell beside furniture): face it
         if isinstance(target, Pose):
             self._rotate(wrap(math.radians(target.yaw) - self.yaw))
 
@@ -423,6 +447,11 @@ class RosRobot(SimRobot):
 
     def shutdown(self) -> None:
         self._halt()
+        for client in getattr(self, "actions", {}).values():
+            try:
+                client.destroy()
+            except Exception:  # noqa: BLE001
+                pass
         if hasattr(self, "_action_executor"):
             self._action_executor.shutdown()
         if hasattr(self, "_action_node"):

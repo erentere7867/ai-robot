@@ -16,7 +16,7 @@ import array
 import math
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import replace
 from typing import Any
 
@@ -24,13 +24,13 @@ import numpy as np
 
 from robot.mind.brain import _with_image
 from robot.perception import colour
-from robot.perception.camera import data_url
+from robot.perception.camera import data_url, resize_rgb
 from robot.perception.depth import StepHazard, classify_tof_grid, synthetic_scan, tof_scan
 from robot.perception.locate import lidar_range, locate
 from robot.perception.overlay import draw_set_of_mark
 from robot.perception.pose import estimate_pose_from_keypoints
 from robot.perception.rig import RIG, to_map, to_robot
-from robot.perception.tracker import Detection, Track, Tracker, canonical, look, pixels
+from robot.perception.tracker import GONE_AFTER, Detection, Track, Tracker, canonical, look, pixels
 from robot.ros.model import BODY_R, TOF
 
 TOPICS = {name: f"/{name}/image" for name in RIG}  # the camera drivers' colour pictures
@@ -38,6 +38,7 @@ DEPTH_TOPICS = {name: f"/{name}/depth" for name in RIG}  # the depth node's esti
 TOF_TOPICS = {"front": "/tof/front", "rear": "/tof/rear"}  # 8x8 grids from the MCU, metres
 SEE_FAR = 3.5  # beyond this a miss is not evidence: the detector may simply not resolve it
 PAST_EVERY, PAST_KEPT = 0.5, 60  # seconds between kept front pictures, and how many: the last 30 s, to look back on
+PLACE_SLACK = 0.3  # metres round a mapped place the vision model is shown when the detector stops finding a thing
 _, _, _TOF_HEIGHT, _TOF_PITCH, _TOF_HFOV, _ = TOF["front"]
 
 
@@ -74,6 +75,82 @@ def _only(rgb: np.ndarray, box: tuple[int, int, int, int], others: list[tuple[in
         if a < c and b < d:
             crop[b:d, a:c] = 128
     return crop
+
+
+def is_there(brain: Any, picture: np.ndarray, label: str) -> bool:
+    """The vision model's yes to a thing in the middle of a picture."""
+    question = f"Is there a {label} in the middle of this picture? Answer yes or no."
+    return brain.yes_probability(_with_image(data_url(picture), question)) >= 0.5
+
+
+def see_probability(brain: Any, picture: np.ndarray, label: str, max_dim: int = 512) -> float:
+    """The vision model's yes probability to seeing `label` in `picture`, capped so tall strips stay small."""
+    h, w = picture.shape[:2]
+    scale = min(1.0, max_dim / max(1, h, w))
+    img = resize_rgb(picture, max(1, round(w * scale)), max(1, round(h * scale))) if scale < 1.0 else picture
+    question = f"Do you see {label} in this picture? Answer yes or no."
+    return brain.yes_probability(_with_image(data_url(img, max_width=max_dim), question))
+
+
+def locate_in_picture(brain: Any, rgb: np.ndarray, label: str) -> tuple[tuple[int, int, int, int], bool] | None:
+    """Find where `label` appears in a full camera frame via yes/no crops (no numbered dots: the 2B model picks the
+    last number). Overlapping thirds -> either probability-weighted centre of contiguous positive thirds (for wide
+    surfaces/areas spanning >=2 thirds; cut close-up rug centre error from 0.78 m to 0.36 m) or overlapping halves
+    (0.65 span: non-overlapping halves sliced a centred umbrella at u=0.50 from 96% to 4%/4%, while 0.65 overlap
+    gave 100%/99%) -> upper/lower split on a 0.30-span context strip. Measured on 30 random apt_0 views (210 pairs)
+    behind a 768px whole-image gate: 0/145 (0.0%) FP; blank-wall hallucinations (71% whole) dropped to 1%/0%."""
+    h, w = rgb.shape[:2]
+    thirds = ((0.0, 0.40), (0.30, 0.70), (0.60, 1.0))
+    t_scores = [see_probability(brain, rgb[:, int(a * w):max(int(a * w) + 1, int(b * w))], label, max_dim=384)
+                for a, b in thirds]
+    pos = [i for i, s in enumerate(t_scores) if s >= 0.5]
+    if not pos:
+        return None
+    best_i = max(pos, key=t_scores.__getitem__)
+    # Contiguous positive block containing the strongest third (wide surface/area or an object straddling a seam).
+    block = [best_i] if (len(pos) == 2 and abs(pos[0] - pos[1]) == 2) else pos
+    if len(block) >= 2:
+        span = 0.40
+        u_center = sum(t_scores[i] * 0.5 * (thirds[i][0] + thirds[i][1]) for i in block) / sum(
+            t_scores[i] for i in block
+        )
+    else:
+        a, b = thirds[best_i]
+        span = b - a
+        halves = ((a, a + 0.65 * span), (b - 0.65 * span, b))
+        h_scores = [see_probability(brain, rgb[:, int(x0 * w):max(int(x0 * w) + 1, int(x1 * w))], label, max_dim=384)
+                    for x0, x1 in halves]
+        if max(h_scores) < 0.5:
+            return None
+        total = h_scores[0] + h_scores[1]
+        u_center = (h_scores[0] * (a + 0.25 * span) + h_scores[1] * (b - 0.25 * span)) / total
+    sx0 = max(0, int(round((u_center - 0.30 * span) * w)))
+    sx1 = min(w, max(sx0 + 1, int(round((u_center + 0.30 * span) * w))))
+    strip = rgb[:, sx0:sx1]
+    top_end, bot_start = max(1, int(0.55 * h)), min(h - 1, int(0.45 * h))
+    v_top = see_probability(brain, strip[:top_end, :], label, max_dim=384)
+    v_bot = see_probability(brain, strip[bot_start:, :], label, max_dim=384)
+    if max(v_top, v_bot) < 0.5:
+        return None
+    # Floor-flat only when absent from the upper half: standing objects visible in both halves (umbrella 89%/100%) stay 3D.
+    on_floor = v_bot >= 0.5 and v_top < 0.35
+    y0, y1 = (bot_start, h) if on_floor else (0, max(1, int(0.60 * h))) if v_top > v_bot + 0.10 else (0, h)
+    x0 = max(0, int(round((u_center - 0.25 * span) * w)))
+    x1 = min(w, max(x0 + 1, int(round((u_center + 0.25 * span) * w))))
+    return (x0, y0, x1, y1), on_floor
+
+
+def place_picture(rgb: np.ndarray, cam: Any, bx: float, by: float, radius: float) -> np.ndarray | None:
+    """The part of a picture where a thing mapped at robot-frame (bx, by) should be, PLACE_SLACK metres wider each
+    way for its mapped place being a little off; None where it falls outside the picture."""
+    cam = cam.at(rgb.shape[1], rgb.shape[0])
+    middle = cam.project(bx, by, radius)  # half way up a thing about as tall as it is wide
+    if middle is None:
+        return None
+    half = cam.focal * (radius + PLACE_SLACK) / max(0.1, math.hypot(bx - cam.x, by - cam.y))
+    (u, v), (h, w) = middle, rgb.shape[:2]
+    x1, x2, y1, y2 = int(max(0, u - half)), int(min(w, u + half)), int(max(0, v - half)), int(min(h, v + half))
+    return rgb[y1:y2, x1:x2].copy() if x2 - x1 >= 16 and y2 - y1 >= 16 else None
 
 
 def taken_with(buffer: deque, t: float, within: float) -> tuple[Any, float]:
@@ -428,10 +505,11 @@ class Perception:
         self.scans = self.scan_bridge.scans
         self.depth_pairs: deque[float] = deque(maxlen=500)  # 0 when a frame found its depth image, else how far off
         self.crops: dict[int, np.ndarray] = {}
+        self.doubts: dict[int, tuple[str, np.ndarray]] = {}  # track id -> its label and the picture of its place
         self.past: deque[tuple[float, np.ndarray]] = deque(maxlen=PAST_KEPT)  # front pictures, 2 a second
         self.boxes: dict[str, list[tuple[tuple[int, int, int, int], int]]] = {}  # camera -> latest (box, track id)
         self.timings: list[float] = []
-        self.counts: dict[str, int] = {}  # frames processed per camera
+        self.looks: dict[str, Counter] = {}  # frames processed per camera, by each word the detector looked for
         self.served: dict[str, float] = {}  # when each camera's frame was last taken for detection
         self.detected: dict[str, tuple[float, np.ndarray]] = {}  # camera -> capture time, RGB paired with its boxes
         # every sighting: monotonic time, camera, track, map x, y, how its range was found, robot x, y, depth lag (s)
@@ -521,26 +599,43 @@ class Perception:
                 print(f"perception: {name}: {exc}", flush=True)
 
     def _verify_loop(self) -> None:
+        """The vision model's yes or no on a picture, for a new thing the detector named (yes keeps it, no drops it:
+        YOLOE fires on an asked word too easily, black panels as "tv", 12% of ball-free pictures as "ball"; renaming
+        a no to another of the few asked words instead turned a false "tv" into a "sofa"), and for a thing the
+        detector stopped finding where it is mapped, shown that place (no: gone; yes: still there). On the detector's
+        misses alone the robot gave up real things mid-approach, seen up close or from aside: a bike seen 110 times,
+        a plant 53 times, beanbags; false ones it named from afar (a table as "tv") go as before, on the model's no."""
         while not self._stop:
+            # New things first: tools drive to them, and a doubted thing stays until it is answered. Asked after the
+            # doubts, the bike YOLOE called an umbrella (the model's yes to that crop: 0%) was driven to unchecked.
             with self.lock:
                 track = self.tracker.to_name(self.crops)
-                crop = self.crops.get(track.id) if track is not None else None
-            if track is None:
+                doubt = next(iter(self.doubts), None) if track is None else None
+                if track is not None:
+                    label = track.votes.most_common(1)[0][0] if track.votes else track.label
+                    picture = self.crops[track.id]
+                elif doubt is not None:
+                    label, picture = self.doubts[doubt]
+            if doubt is None and track is None:
                 time.sleep(0.2)
                 continue
-            guess = track.votes.most_common(1)[0][0] if track.votes else track.label
-            # the vision model checks the detector's word on the crop: yes keeps it, no drops the thing. YOLOE fires
-            # on an asked word too easily (black panels as "tv", 12% of ball-free pictures as "ball"); renaming a
-            # no to another of the few asked words instead turned a false "tv" into a "sofa"
             try:
-                question = f"Is there a {guess} in the middle of this picture? Answer yes or no."
-                yes = self.brain.yes_probability(_with_image(data_url(crop), question)) >= 0.5
+                yes = is_there(self.brain, picture, label)
             except Exception as exc:  # noqa: BLE001 - unchecked when the model is unreachable: asked again later
-                print(f"perception: checking {track.label} {track.id}: {exc}", flush=True)
+                print(f"perception: checking {label}: {exc}", flush=True)
                 time.sleep(1.0)
                 continue
             with self.lock:
-                self.tracker.verify(track, guess if yes else None, pixels(crop), sure=yes)
+                if track is not None:
+                    self.tracker.verify(track, label if yes else None, pixels(picture), sure=yes)
+                    continue
+                del self.doubts[doubt]
+                doubted = self.tracker.tracks.get(doubt)
+                if doubted is not None and doubted.misses >= GONE_AFTER:  # not seen again while the model looked
+                    if yes:
+                        doubted.misses = 0
+                    else:
+                        doubted.present = False
 
     def process(self, name: str) -> None:
         stamp, rgb = self.frames[name]
@@ -549,9 +644,10 @@ class Perception:
             return
         cam = RIG[name]
         started = time.perf_counter()
+        words = list(getattr(self.detector, "vocabulary", ()))  # this frame's words: one asked for from now on is not
         seen = self.detector(rgb)
         self.timings = (self.timings + [time.perf_counter() - started])[-20:]
-        self.counts[name] = self.counts.get(name, 0) + 1
+        self.looks.setdefault(name, Counter()).update(words)
         t = _seconds(stamp)
         roll, pitch = self.tilt_at(stamp)
         depth, gap = self.scan_bridge.depth_for(name, stamp)
@@ -621,9 +717,10 @@ class Perception:
                 if (box[0] <= 4 or box[2] >= cam.width - 4) and tid in self.crops:
                     continue  # a part of the thing makes a poor picture of it; keep the whole one
                 self.crops[tid] = _only(rgb, box, [b for i, b in boxes.items() if i != tid])
-            watched = {canonical(w) for w in getattr(self.detector, "vocabulary", ())}
+            watched = {canonical(w) for w in words}
             for track in self.tracker.objects():  # negative evidence: viewed clearly, not seen, while looked for
-                if id(track) in matched or not track.present or track.person or canonical(track.label) not in watched:
+                if (id(track) in matched or not track.present or track.person or track.visual
+                        or canonical(track.label) not in watched):
                     continue  # (a ball seen while asked for is not gone because the detector stopped looking)
                 bx, by = to_robot(pose, track.x, track.y)
                 dist = math.hypot(bx, by)
@@ -635,7 +732,12 @@ class Perception:
                 scan_r = lidar_range(self.scan, math.atan2(by, bx))
                 if scan_r is not None and scan_r < dist - track.radius - 0.3:  # something nearer hides it
                     continue
-                self.tracker.missed(track, now)
+                if self.tracker.missed(track, now):
+                    where = place_picture(rgb, cam, bx, by, track.radius) if self.brain is not None else None
+                    if where is None:
+                        track.present = False
+                    else:
+                        self.doubts.setdefault(track.id, (track.label, where))
 
     def render_annotated_view(self, camera: str, width: int, height: int, min_stamp: float) -> np.ndarray | None:
         """Show badges only on their own recent exposure. If detection stalls, show current unmarked RGB instead."""

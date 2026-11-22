@@ -4,11 +4,16 @@ import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
+from robot.eval.suite import office
+from robot.interfaces.demo import Holder, attach_3d
 from robot.interfaces.live import PAGE, Live
+from robot.sim.world import SimRobot
 
 NODE = shutil.which("node")
 
@@ -96,3 +101,71 @@ def test_read_only_is_exposed_in_state(dashboard):
     live.update(read_only=True)
     with urllib.request.urlopen(url + "/state", timeout=5) as response:
         assert json.load(response)["read_only"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is needed to syntax-check the 3D viewer JS")
+def test_viewer3d_js_is_served_and_valid_js(dashboard):
+    _, url = dashboard
+    with urllib.request.urlopen(f"{url}/viewer3d.js", timeout=5) as response:
+        assert response.status == 200
+        js = response.read().decode("utf-8")
+    assert "sprocket3d" in js
+    check = subprocess.run([NODE, "--check"], input=js, text=True, capture_output=True, timeout=10)
+    assert check.returncode == 0, check.stderr
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_scene3d_and_whitelisted_assets(dashboard, tmp_path, read_only):
+    live, url = dashboard
+    live.update(read_only=read_only)
+    with urllib.request.urlopen(f"{url}/scene3d", timeout=5) as response:
+        assert json.load(response) == {"mode": "2d"}
+
+    glb = tmp_path / "room.glb"
+    glb.write_bytes(b"glTF\x02\x00\x00\x00\x0c\x00\x00\x00")
+    live.world3d = lambda: {
+        "mode": "3d",
+        "cx": 1.0,
+        "cy": -0.5,
+        "ground_y": 0.0,
+        "stage": str(glb),
+        "instances": [{"path": str(glb), "mat": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]}],
+    }
+    with urllib.request.urlopen(f"{url}/scene3d", timeout=5) as response:
+        manifest = json.load(response)
+    assert manifest["mode"] == "3d"
+    assert manifest["stage"].startswith("/assets/")
+    assert manifest["instances"][0]["url"] == manifest["stage"]
+
+    with urllib.request.urlopen(f"{url}{manifest['stage']}", timeout=5) as response:
+        assert response.status == 200
+        assert response.headers["Content-Type"] == "model/gltf-binary"
+        assert response.read() == glb.read_bytes()
+
+    with pytest.raises(urllib.error.HTTPError) as err:
+        urllib.request.urlopen(f"{url}/assets/../../etc/passwd", timeout=5)
+    assert err.value.code == 404
+
+
+def test_show_world_and_attach_3d_include_truth_and_slam_overlay():
+    live = Live()
+    sim = SimRobot(office())
+    sim.walls = np.zeros((10, 10), dtype=bool)
+    sim.walls[2, 3] = True
+    home = SimpleNamespace(
+        truth={"start": (1.5, -2.0, 0.5), "objects": [{"label": "sofa", "x": 2.0, "y": 1.0, "radius": 0.6, "height": 0.8}]},
+        path=[(0.0, 1.5, -2.0, 0.5), (1.0, 1.8, -1.7, 0.6)],
+        dock=lambda: (1.5, -2.0, 0.5),
+        world=SimpleNamespace(call=lambda **kw: {"cx": 0.0, "cy": 0.0, "ground_y": 0.0, "stage": "", "instances": []}),
+    )
+    holder = Holder(sim, home)
+    attach_3d(live, holder)
+    live.show_world(sim, home=home)
+    assert live.state.true_pose == (1.8, -1.7, 0.6)
+    assert live.state.true_trail == [(1.5, -2.0)]
+    assert live.state.dock == (1.5, -2.0, 0.5)
+    assert live.state.true_objects == [{"label": "sofa", "x": 2.0, "y": 1.0, "r": 0.6, "height": 0.8}]
+
+    payload = live.scene_3d_payload()
+    assert payload["mode"] == "3d"
+    assert payload["slam"]["png"]

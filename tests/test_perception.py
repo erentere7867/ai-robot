@@ -68,9 +68,8 @@ def test_the_tracker_keeps_ids_merges_views_and_forgets_on_evidence():
     objects = tr.objects()
     assert [t.label for t in objects] == ["sofa"] and objects[0].hits == 2  # the chair needs a second sighting
     sofa = objects[0]
-    for _ in range(GONE_AFTER):
-        tr.missed(sofa)
-    assert not sofa.present
+    assert [tr.missed(sofa) for _ in range(GONE_AFTER)] == [False] * (GONE_AFTER - 1) + [True]
+    sofa.present = False  # perception's to decide, once the vision model has looked at its place too
     tr.update([Detection("sofa", 1.05, 1.0, 0.5)], 2.0)
     assert sofa.present and len(tr.tracks) == 2
 
@@ -737,7 +736,7 @@ def test_the_vision_models_no_drops_a_detection():
     perc._stop = False
     perc.lock = threading.Lock()
     perc.tracker = Tracker()
-    perc.crops = {}
+    perc.crops, perc.doubts = {}, {}
     perc.detector = MagicMock()
     perc.detector.vocabulary = ["chair", "table", "cup"]
 
@@ -804,6 +803,48 @@ def test_ranging_uses_the_same_camera_and_exposure_even_if_another_frame_is_newe
     assert scan.depth_for("front_camera", stamp(2))[0] is None
 
 
+def test_a_thing_the_detector_stops_finding_is_gone_only_when_the_vision_model_agrees():
+    import threading
+    import time
+    from unittest.mock import MagicMock
+
+    from robot.ros.perceive import Perception
+
+    def perception(answer: float) -> tuple:
+        perc = object.__new__(Perception)
+        perc.lock, perc.tracker, perc._stop = threading.Lock(), Tracker(), False
+        perc.pose_sigma, perc.scan_bridge = (0.05, 0.05), MagicMock(turn_rate=0.0)
+        perc.scan_bridge.depth_for.return_value = (None, 0.0)
+        perc.boxes, perc.detected, perc.sightings, perc.crops, perc.doubts = {}, {}, [], {}, {}
+        perc.timings, perc.looks, perc.depth_pairs, perc.scans, perc.scan = [], {}, [], [], None
+        perc.pose_at, perc.tilt_at = (lambda s: (0.0, 0.0, 0.0)), (lambda s: (0.0, 0.0))
+        perc.detector = MagicMock(return_value=[], vocabulary=["person", "bike"])  # it finds no bike any more
+        cam = RIG["front_camera"]
+        perc.frames = {"front_camera": (SimpleNamespace(sec=1, nanosec=0), np.zeros((cam.height, cam.width, 3),
+                                                                                   np.uint8))}
+        bike = Track(1, "bike", 2.0, 0.0, 0.4, 0.0, time.monotonic() - 10.0, hits=5)  # 2 m ahead, last seen 10 s ago
+        perc.tracker.tracks[1] = bike
+        asked = []
+
+        def yes_probability(messages: list) -> float:
+            asked.append(messages[0]["content"][-1]["text"])
+            perc._stop = True  # one look, then the loop ends
+            return answer
+
+        perc.brain = SimpleNamespace(yes_probability=yes_probability)
+        return perc, bike, asked
+
+    for answer, present in ((0.9, True), (0.1, False)):
+        perc, bike, asked = perception(answer)
+        for _ in range(GONE_AFTER):
+            perc.process("front_camera")
+        assert bike.present and list(perc.doubts) == [1]  # the detector's misses alone do not make it gone
+        assert perc.doubts[1][1].shape[0] >= 16  # the model is shown the part of the picture where it should be
+        perc._verify_loop()
+        assert asked == ["Is there a bike in the middle of this picture? Answer yes or no."]
+        assert bike.present is present and not perc.doubts
+
+
 def test_perception_scan_surface_consistency():
     import threading
     from unittest.mock import MagicMock
@@ -845,7 +886,7 @@ def test_perception_scan_surface_consistency():
     perc.pose_at = lambda s: (0.0, 0.0, 0.0)
     perc.tilt_at = lambda s: (0.0, 0.0)
     perc.timings = []
-    perc.counts = {}
+    perc.looks = {}
     perc.depth_pairs = []
     perc.scan_bridge.depth_for.return_value = (depth, 0.0)
     perc.detector = MagicMock(return_value=seen)
@@ -907,3 +948,151 @@ def test_tof_sees_a_low_box_the_cameras_take_for_floor():
     ahead = 180
     assert np.isfinite(ranges[ahead - 3:ahead + 4]).any()
     assert 0.35 < float(np.nanmin(ranges)) < 0.5
+
+
+def test_locate_crop_ignores_side_edge_clutter_ranges_floor_and_falls_back_to_scan():
+    from robot.perception.locate import locate_crop
+
+    cam = RIG["front_camera"]
+    h, w = cam.height, cam.width
+    # Standing target at 3.0 m in middle columns, with a 1.0 m foreground clutter strip on the crop's right edge
+    depth = np.full((h, w), 3.0, dtype=np.float32)
+    depth[:, 700:770] = 1.0
+    place = locate_crop(cam, (512, 0, 768, 430), depth=depth, on_floor=False)
+    assert place is not None and place.how == "depth" and place.radius >= 0.15 and place.z > 0.5
+    assert 2.8 <= math.hypot(place.x - cam.x, place.y - cam.y) <= 3.3
+
+    # Floor-flat target (rug): r^2 weighting over [0.4, 3.5] m places it at the geometric midpoint (~1.95 m)
+    rows = np.arange(h, dtype=np.float32)[:, None]
+    down = np.maximum((rows - h / 2) / cam.focal, 1e-3)
+    floor_depth = np.broadcast_to(cam.z / down, (h, w)).astype(np.float32).copy()
+    rug = locate_crop(cam, (512, int(0.45 * h), 768, h), depth=floor_depth, on_floor=True)
+    assert rug is not None and rug.how == "floor" and rug.radius == 0.0 and rug.z == 0.0
+    assert 1.7 <= math.hypot(rug.x - cam.x, rug.y - cam.y) <= 2.2
+
+    # Scan fallback when depth is missing
+    ranges = np.full(360, 2.4, dtype=np.float32)
+    via_scan = locate_crop(cam, (560, 100, 720, 400), depth=None, scan=(ranges, -math.pi, 2 * math.pi / 360))
+    assert via_scan is not None and via_scan.how == "lidar" and abs(math.hypot(via_scan.x, via_scan.y) - 2.4) < 0.1
+
+    # Floor-ray fallback when both depth and scan are missing
+    via_ray = locate_crop(cam, (560, int(0.45 * h), 720, h), depth=None, scan=None, on_floor=True)
+    assert via_ray is not None and via_ray.how == "floor" and via_ray.radius == 0.0
+
+
+def test_locate_in_picture_localises_by_crops_centres_straddling_objects_and_rejects_false_positives():
+    from robot.ros.perceive import locate_in_picture
+
+    # Paint a distinctive bright patch in the upper-left ([x=150..350, y=50..250]) of a dark 1280x720 frame
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    rgb[50:250, 150:350] = 255
+
+    def make_brain(predicate):
+        import base64
+
+        import cv2
+
+        def yes_prob(messages):
+            url = messages[0]["content"][0]["image_url"]["url"]
+            raw = base64.b64decode(url.split(",", 1)[1])
+            arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            return predicate(arr)
+
+        return SimpleNamespace(yes_probability=yes_prob)
+
+    # Object straddles the boundary between [0, 0.2] and [0.2, 0.4] -> weighted centre near x=250, upper half wins
+    brain = make_brain(lambda arr: 0.95 if (arr > 200).mean() > 0.05 else 0.05)
+    hit = locate_in_picture(brain, rgb, "computer monitor")
+    assert hit is not None
+    (x0, y0, x1, y1), on_floor = hit
+    assert not on_floor and y0 == 0 and y1 < 500
+    assert 150 <= (x0 + x1) / 2 <= 350
+
+    # Floor-flat object in lower-middle -> on_floor is True
+    rug_rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    rug_rgb[450:680, 480:800] = 255
+    hit_rug = locate_in_picture(brain, rug_rgb, "rug")
+    assert hit_rug is not None and hit_rug[1] is True and hit_rug[0][1] >= 300
+
+    # Narrow standing object centred at u=0.50 (both overlapping halves see it whole; non-overlapping would slice it)
+    tall_rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    tall_rgb[180:640, 615:665] = 255
+    tall_brain = make_brain(lambda arr: 0.95 if (arr > 200).any(axis=2).any(axis=0).sum() >= 20 else 0.05)
+    hit_tall = locate_in_picture(tall_brain, tall_rgb, "umbrella")
+    assert hit_tall is not None and hit_tall[1] is False and 580 <= (hit_tall[0][0] + hit_tall[0][2]) / 2 <= 700
+
+    # Wide floor surface spanning left + middle thirds -> weighted centre near u=0.35 (x=448), skips halves
+    wide_rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    wide_rgb[450:680, 40:820] = 255
+    hit_wide = locate_in_picture(brain, wide_rgb, "rug")
+    assert hit_wide is not None and hit_wide[1] is True and 380 <= (hit_wide[0][0] + hit_wide[0][2]) / 2 <= 520
+
+    # Blank wall: one third and both halves say yes, vertical split says no -> rejected
+    wall_scores = iter([0.8, 0.05, 0.05, 0.8, 0.8, 0.05, 0.05])
+    assert locate_in_picture(SimpleNamespace(yes_probability=lambda _m: next(wall_scores)), rgb, "umbrella") is None
+
+
+def test_visual_tracks_are_not_evicted_by_detector_misses():
+    import threading
+    import time
+    from unittest.mock import MagicMock
+
+    from robot.ros.perceive import Perception
+
+    perc = object.__new__(Perception)
+    perc.lock, perc.tracker = threading.Lock(), Tracker()
+    perc.pose_sigma, perc.scan_bridge = (0.05, 0.05), MagicMock(turn_rate=0.0)
+    perc.scan_bridge.depth_for.return_value = (None, 0.0)
+    perc.boxes, perc.detected, perc.sightings, perc.crops, perc.doubts = {}, {}, [], {}, {}
+    perc.timings, perc.looks, perc.depth_pairs, perc.scans, perc.scan = [], {}, [], [], None
+    perc.pose_at, perc.tilt_at = (lambda s: (0.0, 0.0, 0.0)), (lambda s: (0.0, 0.0))
+    perc.detector = MagicMock(return_value=[], vocabulary=["person", "kitchen"])
+    perc.brain = MagicMock()
+    cam = RIG["front_camera"]
+    perc.frames = {"front_camera": (SimpleNamespace(sec=1, nanosec=0), np.zeros((cam.height, cam.width, 3), np.uint8))}
+    kitchen = Track(1, "kitchen", 2.0, 0.0, 0.3, 0.0, time.monotonic() - 10.0, hits=2, verified=True, sure=True,
+                    visual=True)
+    perc.tracker.tracks[1] = kitchen
+    for _ in range(GONE_AFTER + 2):
+        perc.process("front_camera")
+    assert kitchen.present and not perc.doubts
+
+    # A new live visual track near an earlier rejected or absent ghost must not merge into the dead track
+    now = time.monotonic()
+    perc.tracker.tracks[10] = Track(10, "umbrella", 2.0, 0.0, 0.2, now - 10, now - 10, hits=2, verified=True,
+                                    rejected=True)
+    perc.tracker.tracks[11] = Track(11, "umbrella", 2.05, 0.0, 0.2, now, now, hits=2, verified=True, sure=True,
+                                    visual=True)
+    perc.tracker.tracks[12] = Track(12, "umbrella", 2.0, 0.0, 0.2, now - 5, now - 5, hits=2, verified=True,
+                                    present=False, visual=True)
+    perc.tracker._merge([])
+    assert perc.tracker.current(11) == 11 and perc.tracker.tracks[11].present and not perc.tracker.tracks[11].rejected
+
+
+def test_badge_deoverlap_and_detector_max_asked():
+    from robot.perception.detector import MAX_ASKED, Detector
+    from robot.perception.overlay import _place_badge, draw_set_of_mark
+
+    placed: list[tuple[int, int, int, int]] = []
+    x1, y1 = _place_badge(100, 100, 80, 20, 640, 360, placed)
+    r1 = (x1, y1, x1 + 80, y1 + 20)
+    placed.append(r1)
+    x2, y2 = _place_badge(105, 100, 80, 20, 640, 360, placed)
+    r2 = (x2, y2, x2 + 80, y2 + 20)
+    assert r2[2] <= r1[0] or r2[0] >= r1[2] or r2[3] <= r1[1] or r2[1] >= r1[3]
+    assert 0 <= r2[0] and r2[2] <= 640 and 0 <= r2[1] and r2[3] <= 360
+
+    rgb = np.zeros((360, 640, 3), dtype=np.uint8)
+    out = draw_set_of_mark(rgb, [((100, 100, 180, 220), 19, "shoes"), ((105, 100, 190, 220), 20, "shoes")])
+    assert out.shape == rgb.shape and (out > 0).any()
+
+    # Even with plenty of GPU prompt slots, Detector keeps only MAX_ASKED recent asked words so stale tasks don't leak.
+    fake_server = SimpleNamespace(slots=12)
+    det = Detector(server=fake_server, always=("person",))
+    for w in ("umbrella", "shoes", "stool", "mug", "bicycle"):
+        det.watch(w)
+    assert len(det.asked) == MAX_ASKED == 3
+    assert det.asked == ["stool", "mug", "bicycle"]
+    assert det.vocabulary == ["person", "stool", "mug", "bicycle"]
+
+

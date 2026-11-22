@@ -24,6 +24,7 @@ data/
 # the robot's own map of the test apartment, from its first exploration: a fresh machine skips the 30 minutes
 !maps/apt_0.pgm
 !maps/apt_0.yaml
+!maps/apt_0.places.json
 *.jsonl
 *.log
 
