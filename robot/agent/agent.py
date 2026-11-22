@@ -175,15 +175,22 @@ class Agent:
         prev = places.get("where you were before")
         at_before = prev is not None and math.dist((prev.x, prev.y), (pose.x, pose.y)) <= 0.3
         here = []
-        # List saved places like "where you were before" ahead of "start" so "come back" sees the previous spot first.
-        for name, p in sorted(places.items(), key=lambda kv: (kv[0] == "start", kv[0])):
+        # List "where you were before" first, then "start", then mapped areas nearest-first.
+        def order(kv: tuple[str, Any]) -> tuple[int, float, str]:
+            name, p = kv
+            rank = 0 if name == "where you were before" else 1 if name == "start" else 2
+            return (rank, math.dist((p.x, p.y), (pose.x, pose.y)), name)
+
+        for name, p in sorted(places.items(), key=order):
             d = math.dist((p.x, p.y), (pose.x, pose.y))
             if name == "start" and (d <= 0.3 or at_before):  # don't lure the robot back after reaching where it was
                 continue
             bearing = math.degrees(wrap(math.atan2(p.y - pose.y, p.x - pose.x) - math.radians(pose.yaw)))
             where = f"{d:.1f} m {side(bearing)}" if d > 0.3 else "here"
             here.append(f"{name} ({about[name]}, {where})" if name in about else f"{name} ({where})")
-        return "Places you can go_to by name: " + "; ".join(here) if here else ""
+        has_areas = any(n not in about for n in places)
+        prefix = "Places you can go_to by name (or search near): " if has_areas else "Places you can go_to by name: "
+        return prefix + "; ".join(here) if here else ""
 
     def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str, *,
                      include_scene: bool = True) -> dict[str, Any]:
@@ -337,13 +344,14 @@ class Agent:
                                       "or move somewhere else to see new views."), False
                         blocked_tools.add("look")
                         record.problems.append("look: already looked around here")
-                    elif (repeats > REPEATS and call.name != "look") or (
-                        call.name == "look" and seen_calls[key] > REPEATS + 1
-                    ):
-                        n_prev = (seen_calls[key] if call.name == "look" else repeats) - 1
+                    elif (call.name == "search" and seen_calls[key] > 1) or (
+                        repeats > REPEATS and call.name != "look"
+                    ) or (call.name == "look" and seen_calls[key] > REPEATS + 1):
+                        n_prev = (seen_calls[key] if call.name in ("look", "search") else repeats) - 1
                         result, ok = (f"Not run: you made this exact call {n_prev} times. Do something "
                                       "different, or if the request is done, reply to the user."), False
-                        blocked_tools.add(call.name)
+                        if call.name != "search":  # other search(near=...) areas remain valid
+                            blocked_tools.add(call.name)
                         record.problems.append(f"{call.name}: repeated {n_prev} times")
                     else:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
@@ -375,7 +383,7 @@ class Agent:
                 if tools.todo.steps and not {c.name for c in reply.tool_calls} & {"todo", "todo_done"}:
                     messages[-1]["content"] += f"\nTo-do list now:\n{tools.todo.text()}"
                 if tools.moved:
-                    seen_calls.clear()
+                    seen_calls = {k: v for k, v in seen_calls.items() if k[0] == "search"}
                     looks_here = 0
                     blocked_tools.clear()
                 if tools.moved and not self.see_after_moves:  # where places are from here now ("come back here")

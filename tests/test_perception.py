@@ -1068,3 +1068,31 @@ def test_visual_tracks_are_not_evicted_by_detector_misses():
     perc.tracker._merge([])
     assert perc.tracker.current(11) == 11 and perc.tracker.tracks[11].present and not perc.tracker.tracks[11].rejected
 
+
+def test_badge_deoverlap_and_detector_max_asked():
+    from robot.perception.detector import MAX_ASKED, Detector
+    from robot.perception.overlay import _place_badge, draw_set_of_mark
+
+    placed: list[tuple[int, int, int, int]] = []
+    x1, y1 = _place_badge(100, 100, 80, 20, 640, 360, placed)
+    r1 = (x1, y1, x1 + 80, y1 + 20)
+    placed.append(r1)
+    x2, y2 = _place_badge(105, 100, 80, 20, 640, 360, placed)
+    r2 = (x2, y2, x2 + 80, y2 + 20)
+    assert r2[2] <= r1[0] or r2[0] >= r1[2] or r2[3] <= r1[1] or r2[1] >= r1[3]
+    assert 0 <= r2[0] and r2[2] <= 640 and 0 <= r2[1] and r2[3] <= 360
+
+    rgb = np.zeros((360, 640, 3), dtype=np.uint8)
+    out = draw_set_of_mark(rgb, [((100, 100, 180, 220), 19, "shoes"), ((105, 100, 190, 220), 20, "shoes")])
+    assert out.shape == rgb.shape and (out > 0).any()
+
+    # Even with plenty of GPU prompt slots, Detector keeps only MAX_ASKED recent asked words so stale tasks don't leak.
+    fake_server = SimpleNamespace(slots=12)
+    det = Detector(server=fake_server, always=("person",))
+    for w in ("umbrella", "shoes", "stool", "mug", "bicycle"):
+        det.watch(w)
+    assert len(det.asked) == MAX_ASKED == 3
+    assert det.asked == ["stool", "mug", "bicycle"]
+    assert det.vocabulary == ["person", "stool", "mug", "bicycle"]
+
+

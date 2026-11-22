@@ -1017,5 +1017,101 @@ def test_says_no_contractions_and_search_near_direction_or_here():
     assert "here" not in seen_detects
 
 
+def test_sync_vlm_vetting_cluster_pick_and_semantic_places(tmp_path):
+    from threading import Lock
+
+    from robot.agent.agent import Agent
+    from robot.agent.tools import ToolError, Tools
+    from robot.ros.explore import describe_place, load_places, save_places
+
+    # 1. Synchronous VLM vetting in RealRobot._matching rejects false YOLOE tracks and preserves synonym tracks
+    real = object.__new__(RealRobot)
+    tracker = Tracker()
+    cloth = Track(1, "shoes", 1.5, 0.0, 0.15, 0.0, 0.0, hits=2, verified=False, sure=False)
+    chair = Track(2, "chair", 2.0, 0.0, 0.3, 0.0, 0.0, hits=2, verified=False, sure=False)
+    table = Track(3, "table", 2.5, 0.0, 0.4, 0.0, 0.0, hits=2, verified=True, sure=True, named_from=400)
+    tracker.tracks = {1: cloth, 2: chair, 3: table}
+    crop = np.zeros((20, 20, 3), dtype=np.uint8)
+    real.perception = SimpleNamespace(lock=Lock(), tracker=tracker, crops={1: crop, 2: crop, 3: crop})
+    asked: list[str] = []
+
+    def yes_prob(msgs):
+        q = msgs[0]["content"][-1]["text"]
+        asked.append(q)
+        if "chair" in q:
+            return 0.9
+        return 0.05  # cloth is not shoes, coffee table is not desk
+
+    real.brain = SimpleNamespace(yes_probability=yes_prob)
+    assert real._matching("shoes", [Thing("shoes", 1.5, 0.0, 0.15, id=1)]) == []
+    assert cloth.rejected is True
+    assert len(real._matching("chair", [Thing("chair", 2.0, 0.0, 0.3, id=2)])) == 1
+    assert chair.sure is True and chair.named_from == 400
+    before_calls = len(asked)
+    assert len(real._matching("chair", [Thing("chair", 2.0, 0.0, 0.3, id=2)])) == 1
+    assert len(asked) == before_calls  # cached sure=True until crop grows 2x
+    assert real._matching("desk", [Thing("table", 2.5, 0.0, 0.4, id=3)]) == []
+    assert table.rejected is False  # coffee table stays valid as a table
+
+    # 2. Co-located same-label targets (<= 0.7 m) auto-pick the nearest; separated ones (> 0.7 m) still ask
+    pair = SimRobot(Scene(8.0, 6.0, [Thing("shoes", 1.5, 0.0, 0.1, id=1), Thing("shoes", 1.8, 0.1, 0.1, id=2)],
+                          {}, start=Pose(0.0, 0.0, 0.0)))
+    pair.detect("shoes")
+    assert Tools(pair)._resolve("shoes").id == 1
+    apart = SimRobot(Scene(8.0, 6.0, [Thing("shoes", 1.5, 0.0, 0.1, id=1), Thing("shoes", 1.5, 2.0, 0.1, id=2)],
+                           {}, start=Pose(0.0, 0.0, 0.0)))
+    apart.detect("shoes")
+    with pytest.raises(ToolError, match="could be any of"):
+        Tools(apart)._resolve("shoes")
+
+    # 3. Semantic place captions, persistence, prompt ordering, fuzzy search(near=...), and out-of-view go_to hint
+    fake_brain = SimpleNamespace(describe=lambda _u, _p: SimpleNamespace(text="Kitchen: cabinets, counter (bright)."))
+    cap = describe_place(fake_brain, {"front_camera": np.zeros((180, 320, 3), dtype=np.uint8)})
+    assert cap == "kitchen: cabinets, counter"
+    places_path = tmp_path / "home.places.json"
+    save_places(places_path, {
+        "kitchen: cabinets, counter": Pose(3.0, 0.0, 0.0),
+        "hallway: doorway, wooden door": Pose(-3.0, 0.0, 180.0),
+    })
+    loaded = load_places(places_path)
+    assert set(loaded) == {"kitchen: cabinets, counter", "hallway: doorway, wooden door"}
+
+    sim = SimRobot(Scene(10.0, 6.0, [Thing("mug", -3.2, 0.0, 0.1)], {}, start=Pose(0.0, 0.0, 0.0)))
+    sim.places.update(loaded)
+    sim.places["where you were before"] = Pose(1.0, 0.0, 0.0)
+    txt = Agent._places_text(sim, sim.pose())
+    assert txt.startswith("Places you can go_to by name (or search near): where you were before")
+    assert "kitchen: cabinets, counter" in txt and "hallway: doorway, wooden door" in txt
+
+    tools = Tools(sim)
+    out, ok = tools.run("search", {"what": "mug", "near": "hallway"})
+    assert ok and "Found candidate mug" in out and sim.x < -1.0
+
+    # Out-of-view go_to("kitchen") resolves to mapped "kitchen: cabinets, counter" and drives there without blind search
+    out2, ok2 = tools.run("go_to", {"target": "kitchen"})
+    assert ok2 and "Arrived at kitchen: cabinets, counter" in out2 and sim.x > 2.0
+
+    # 4. Unvisited mapped areas hint + Agent blocks repeating identical search() after moving
+    from robot.mind.brain import Reply, ToolCall
+
+    sim2 = SimRobot(Scene(10.0, 6.0, [], {}, start=Pose(0.0, 0.0, 0.0)))
+    sim2.places["far hall: doors"] = Pose(4.5, 0.0, 0.0)
+    sim2.search = lambda *a, **kw: None
+    t2 = Tools(sim2)
+    miss, ok3 = t2.run("search", {"what": "umbrella"})
+    assert ok3 and "Areas not visited closely yet: far hall: doors." in miss
+
+    calls = iter([
+        Reply("", tool_calls=[ToolCall("1", "search", {"what": "umbrella"})]),
+        Reply("", tool_calls=[ToolCall("2", "search", {"what": "umbrella"})]),
+        Reply("No umbrella found."),
+    ])
+    fake_llm = SimpleNamespace(chat=lambda *_a, **_kw: next(calls))
+    rec = Agent(fake_llm, cameras="none").do("Find the umbrella.", sim2, speak=False)
+    assert rec.steps[1].calls[0][3] is False and "made this exact call" in rec.steps[1].calls[0][2]
+
+
+
+
 
 

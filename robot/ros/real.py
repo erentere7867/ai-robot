@@ -15,6 +15,7 @@ import threading
 import time
 from collections import Counter, deque
 from itertools import combinations
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -26,6 +27,7 @@ from robot.perception.camera import data_url
 from robot.perception.locate import locate_crop
 from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import Track, canonical, pixels
+from robot.ros.explore import MAX_PLACES, PLACE_GAP, describe_place, load_places, unique_place_name
 from robot.ros.perceive import (
     Perception,
     _nanoseconds,
@@ -58,11 +60,17 @@ ELEVATED_Z = 0.45  # metres above floor: above the 22 cm camera, occluded by tab
 
 class RealRobot(RosRobot):
     def __init__(self, scene: Scene, *, detector: Any, brain: Any = None, max_time: float = 600.0,
-                 nudge: Any = None, store: Any = None, grid: Any = None) -> None:
+                 nudge: Any = None, store: Any = None, grid: Any = None,
+                 places_file: Path | None = None) -> None:
         """`store` (CirculatingMemory) persists seen objects, habits, speakers, facts and places across restarts;
-        `grid` is the occupancy of the map the robot built itself (robot/ros/explore.py), for planning."""
+        `grid` is the occupancy of the map the robot built itself (robot/ros/explore.py), for planning;
+        `places_file` is the optional semantic area map built by the robot's cameras alongside `maps/<scene>.yaml`."""
         self._ready = False
         super().__init__(scene, max_time=max_time, nudge=nudge)
+        self._mapped_places: set[str] = set()
+        for name, pose in load_places(places_file).items():
+            self.places[name] = pose
+            self._mapped_places.add(name)
         self._rooms: list = []  # room masks of the robot's own map, named again as it learns (robot/ros/rooms.py)
         self._named_at = -1e9
         if grid is not None:
@@ -77,6 +85,7 @@ class RealRobot(RosRobot):
         self._trail_views: deque = deque(maxlen=24)  # (mono_t, pose, {cam: (stamp, rgb, depth)}) every TRAIL_STEP m (6 m)
         self._searching = False
         self._search_snap_after = 0.0
+        self._search_coverage: dict[str, np.ndarray] = {}
         self.perception = Perception(self.node, detector, self._pose_at, brain,
                                      scan_bridge=getattr(self, "_scan_bridge", None))
         self.brain = brain
@@ -204,8 +213,33 @@ class RealRobot(RosRobot):
             from robot.ros.rooms import name
 
             self._named_at = now
+            mapped = getattr(self, "_mapped_places", ())
+            tour_places = {k: v for k, v in self.places.items() if k not in mapped and k != "where you were before"}
             self.scene.rooms = name(self._rooms, RES, (self.scene.width, self.scene.height), self._room_answers,
-                                    self.places, before=list(self.scene.rooms or {}))
+                                    tour_places, before=list(self.scene.rooms or {}))
+
+    def _note_place(self) -> None:
+        """Record a compact VLM area caption when stopping in an unmapped part of the home (>= PLACE_GAP from existing
+        mapped places), so even a brand-new home builds a semantic place map on the fly (~60 ms per new area)."""
+        if not getattr(self, "_ready", False) or self.brain is None or not hasattr(self.brain, "describe"):
+            return
+        mapped = getattr(self, "_mapped_places", None)
+        if mapped is None or len(mapped) >= MAX_PLACES:
+            return
+        here = (self.x, self.y)
+        if any(math.dist(here, (self.places[n].x, self.places[n].y)) < PLACE_GAP for n in mapped if n in self.places):
+            return
+        frames = {c: f[1] for c, f in getattr(self.perception, "frames", {}).items() if f is not None}
+        if not frames:
+            return
+        try:
+            label = describe_place(self.brain, frames)
+        except Exception:  # noqa: BLE001 - optional semantic caption must not interrupt motion
+            return
+        if label:
+            key = unique_place_name(label, self.places)
+            self.places[key] = Pose(self.x, self.y, math.degrees(self.yaw))
+            mapped.add(key)
 
     def _record_trail(self, now: float) -> None:
         """Keep a lightweight snapshot of the three cameras every TRAIL_STEP m of travel, for mid-drive search
@@ -425,35 +459,67 @@ class RealRobot(RosRobot):
 
     def _matching(self, description: str, things: list[Thing]) -> list[Thing]:
         wanted = set(description.lower().split()) & COLORS
-        if not wanted or self.brain is None:
+        p = getattr(self, "perception", None)
+        if self.brain is None or p is None:
             return super()._matching(description, things)
         if "grey" in wanted or "gray" in wanted:
             wanted.update(("grey", "gray"))
+        label_query = visual_name(description)
+        candidates = super()._matching(label_query if wanted else description, things)
+        if not candidates:
+            return []
         matches = []
-        p = self.perception
-        for thing in super()._matching(visual_name(description), things):
+        rejected = False
+        can_vet = hasattr(self.brain, "yes_probability")
+        q_canon = canonical(label_query) if label_query else ""
+        for thing in candidates:
             with p.lock:
                 track = p.tracker.tracks.get(thing.id)
                 if track is None or track.rejected or not track.present:
                     continue
-                crop, color = p.crops.get(thing.id), track.visual_color
-                recheck = crop is not None and (not color or pixels(crop) >= 2 * track.color_from)
-            if recheck:
-                # Most of a bicycle box was wall or tyres. Ask about its colour, not the median pixel;
-                # only when a tool needs the attribute, and never while holding the camera worker's lock.
-                question = (f"What colour would a person call the {thing.label} in the middle of this picture? "
-                            "Ignore the background. Answer with one colour or unknown.")
-                scores = self.brain.decide(_with_image(data_url(crop), question), choices=COLOR_WORDS)
-                scores["grey"] += scores.pop("gray")
-                word = max(scores, key=scores.get)
-                color = word if scores[word] > 0.5 else "unknown"
+                crop = p.crops.get(thing.id)
+                same_label = not q_canon or canonical(track.label).rstrip("s") == q_canon.rstrip("s")
+                need_vet = (
+                    can_vet and not track.person and not track.visual and crop is not None
+                    and (not track.sure or (track.named_from > 0 and pixels(crop) >= 2 * track.named_from))
+                )
+                need_query = can_vet and not track.person and not track.visual and crop is not None and not same_label
+                color = track.visual_color
+                need_color = bool(wanted) and crop is not None and (not color or pixels(crop) >= 2 * track.color_from)
+            if need_vet:
+                # Vet unconfirmed or newly-closer YOLOE tracks synchronously before tools drive to them:
+                # YOLOE fired on cloths as "shoes", chairs as "stool" and tables as "tv"; rejecting here
+                # lets detect() fall straight through to _see_target() instead of chasing a false box.
+                yes = is_there(self.brain, crop, track.label)
                 with p.lock:
                     if p.tracker.tracks.get(thing.id) is not track or track.rejected or not track.present:
                         continue
-                    track.visual_color, track.color_from = color, pixels(crop)
-            if color in wanted:
+                    p.tracker.verify(track, track.label if yes else None, pixels(crop), sure=yes)
+                if not yes:
+                    rejected = True
+                    continue
+            if need_query and not is_there(self.brain, crop, label_query):
+                continue
+            if wanted:
+                if need_color:
+                    # Most of a bicycle box was wall or tyres. Ask about its colour, not the median pixel;
+                    # only when a tool needs the attribute, and never while holding the camera worker's lock.
+                    question = (f"What colour would a person call the {thing.label} in the middle of this picture? "
+                                "Ignore the background. Answer with one colour or unknown.")
+                    scores = self.brain.decide(_with_image(data_url(crop), question), choices=COLOR_WORDS)
+                    scores["grey"] += scores.pop("gray")
+                    word = max(scores, key=scores.get)
+                    color = word if scores[word] > 0.5 else "unknown"
+                    with p.lock:
+                        if p.tracker.tracks.get(thing.id) is not track or track.rejected or not track.present:
+                            continue
+                        track.visual_color, track.color_from = color, pixels(crop)
+                if color not in wanted:
+                    continue
                 thing.color = color
-                matches.append(thing)
+            matches.append(thing)
+        if rejected:
+            self._perceive_objects()
         return matches
 
     def detect(self, description: str) -> list[Object]:
@@ -473,12 +539,6 @@ class RealRobot(RosRobot):
             # the vision server died twice in one session; the robot then answered "not in view" and searched blind
             raise RuntimeError(f"no camera picture was looked at in {LOOK_S:g} s: is the vision server running, and "
                                "is the robot localised?")
-        end = time.monotonic() + 3.0  # and the vision model's check of what it found: a false "tv" is no target
-        while self.brain is not None and time.monotonic() < end and any(
-            not t.verified and self._matching(word, [Thing(t.label, 0, 0, 0)])
-            for t in self.perception.objects() if t.present and not t.person
-        ):
-            self._step(0.0, 0.0)
         self._perceive_objects()
         found = self._matching(description, self._in_view())
         if not found and self.brain is not None and description.strip():
@@ -550,6 +610,7 @@ class RealRobot(RosRobot):
 
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
         super()._go(target, distance, side=side)
+        self._note_place()
         if side or not isinstance(target, Object):
             return
         cand = self._spotted_standpoint(target, distance)
@@ -717,13 +778,22 @@ class RealRobot(RosRobot):
                 marks.append((u, v))
         return img, spots
 
+    def begin(self) -> None:
+        super().begin()
+        self._search_coverage.clear()
+
     def search(self, description: str, area: str = "here", *, toward: str = "") -> Object | None:
         self.search_log = []
         self._search_from = len(self.trace.poses)  # where this search's own trail begins
         self._stepped_back = False  # once a search: a second step back backed away from "kitchen" again and again
         self._searching = True
         self._search_snap_after = time.monotonic()
-        self.coverage = np.zeros_like(self.occupied)
+        # Keep per-target coverage within one request (cleared in begin()) so a follow-up search(near=...) checks
+        # the new area and still-uncovered floor instead of re-sweeping the whole home from scratch.
+        key = canonical(visual_name(description) or description)
+        cov = self._search_coverage.get(key)
+        self.coverage = cov if cov is not None else np.zeros_like(self.occupied)
+        self._search_coverage[key] = self.coverage
         self._cover()
         try:
             return super().search(description, area, toward=toward)

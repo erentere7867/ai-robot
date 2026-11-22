@@ -57,11 +57,9 @@ class RosRobot(SimRobot):
         )
         self.tf = Buffer()
         self._tf_listener = TransformListener(self.tf, self.node)
-        self.actions = {name: ActionClient(self._action_node, kind, name) for name, kind in (
-            ("navigate_to_pose", NavigateToPose), ("follow_path", FollowPath), ("spin", Spin),
-            ("drive_on_heading", DriveOnHeading))}
         self.kinds = {"navigate_to_pose": NavigateToPose, "follow_path": FollowPath, "spin": Spin,
                       "drive_on_heading": DriveOnHeading}
+        self.actions: dict[str, Any] = {}
         # Direct motion (drive, express) enters Nav2's own command chain where its controller's does: the velocity
         # smoother, then the collision monitor, which stops the robot short of anything in the way. Nothing reaches
         # the wheels around that safety stop.
@@ -89,6 +87,9 @@ class RosRobot(SimRobot):
                 next_nudge = time.monotonic() + 10.0
             time.sleep(0.2)
         self._wait_for_nav2(deadline)
+        # Create action clients after Nav2's lifecycle managers are active: clients built while behavior_server was
+        # still inactive occasionally missed FastDDS SHM discovery on drive_on_heading (E2 reached 0.84 m then failed).
+        self.actions = {name: ActionClient(self._action_node, kind, name) for name, kind in self.kinds.items()}
         self.t0 = self._now()
         self.t = 0.0
         self.trace.poses = [(0.0, self.x, self.y, self.yaw)]
@@ -210,6 +211,8 @@ class RosRobot(SimRobot):
         if not client.wait_for_server(timeout_sec=10.0):
             from rclpy.action import ActionClient
 
+            if hasattr(client, "destroy"):
+                client.destroy()
             self.actions[name] = ActionClient(self._action_node, self.kinds[name], name)
             client = self.actions[name]
             if not client.wait_for_server(timeout_sec=20.0):
@@ -444,6 +447,11 @@ class RosRobot(SimRobot):
 
     def shutdown(self) -> None:
         self._halt()
+        for client in getattr(self, "actions", {}).values():
+            try:
+                client.destroy()
+            except Exception:  # noqa: BLE001
+                pass
         if hasattr(self, "_action_executor"):
             self._action_executor.shutdown()
         if hasattr(self, "_action_node"):

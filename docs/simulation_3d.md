@@ -468,6 +468,62 @@ Measured 3D results in `apt_0` (repeated, `think=low`, 0.33x real time):
   fallback; `S1` (plant, 0 bumps) genuinely spotted and drove to the foot of the stairs below the real upstairs
   potted plant (`010_candidate_33.jpg`).
 
+#### Synchronous vetting, semantic place map and badge de-overlap (`vlm-locate`, 22 November)
+
+Three general-purpose improvements built on `vlm-locate` (keeping `think="low"` at 128 tokens — LFM3-VL-2B's model card
+explicitly advises short low-temperature tool routing backed by memory/retrieval rather than deep ungrounded reasoning):
+
+- **Synchronous VLM vetting & bounded detector words (`robot/ros/real.py`, `robot/perception/detector.py`).**
+  Previously `where()` returned brand-new unverified YOLOE tracks before the background `_verify_loop` saw them, and
+  `detect()`'s 3 s polling loop timed out whenever unrelated tracks were queued. `RealRobot._matching()` now vets
+  un-`sure` (or >=2x larger crop) non-person, non-visual YOLOE tracks synchronously via `is_there()` (deleting the 3 s
+  polling loop in `detect()`), and vets synonym-matched labels (e.g. `"desk"` vs `"table"`) without destroying the
+  underlying track. `Detector.asked` is capped at `MAX_ASKED = 3` most recent words even on high-slot servers so old
+  task words stop leaking into new tasks.
+- **Semantic place map built by the robot's own cameras (`robot/ros/explore.py`, `robot/ros/real.py`,
+  `robot/sim/stack.py`, `robot/agent/`).** `Explorer` / `annotate_map_places` / `RealRobot._note_place()` caption up to
+  `MAX_PLACES = 6` well-spaced (`PLACE_GAP = 2.8 m`) viewpoints with `describe_place()` (~50–75 ms per caption on
+  LFM3-VL-2B, saved beside `maps/<scene>.yaml` in `maps/<scene>.places.json`, zero truth leakage). `Agent._places_text`
+  lists `"where you were before"` first, `"start"` second, then mapped places nearest-first; `Tools._resolve` fuzzily
+  matches mapped areas by word overlap for `search(near=...)` and out-of-view `go_to` before blind sweeping.
+  `RealRobot.search()` preserves per-target coverage across calls within one request (cleared in `begin()`),
+  `Tools.search()` reports unvisited mapped areas (`> 2.2 m` from trail), and `Agent.do()` blocks identical repeat
+  `search()` calls after moving.
+- **De-overlapped ID badges & co-located clustering (`robot/perception/overlay.py`, `robot/agent/tools.py`).**
+  `_place_badge()` nudges colliding badge rectangles apart vertically/horizontally so adjacent IDs never fuse into
+  `"1920 SHOES"` (verified live on `E3`: model read `"17 SHOES", "24 SHOES", "20 SHOES"` cleanly). Same-label matches
+  within `CLUSTER_GAP = 0.7 m` auto-pick the nearest instead of raising an ambiguity error.
+- **ROS 2 action-client discovery fix (`robot/ros/robot.py`).** `RosRobot.__init__` previously built `ActionClient`s
+  before `_wait_for_nav2` finished activating `behavior_server`, causing a FastDDS SHM discovery miss on
+  `drive_on_heading` right after `E2` reached `0.84 m` from the umbrella (`vlm2-b`). Creating `self.actions` after
+  `_wait_for_nav2` and destroying clients before recreating and on `shutdown()` eliminated both the `drive_on_heading`
+  error and the `sprocket_actions` shutdown warnings (`vlm2-c`).
+- **What did not work (fixed from measurements).** A 3-camera `320x180` panoramic strip in `describe_place` collapsed
+  open-plan views into `"living room: couch, coffee table"` because the rear cameras looked back at the sofa; switching
+  to the single `768 px` `front_camera` (simpler, sharper) separated living room, kitchen, hallway and staircase on
+  `rand30.npz` and produced 6 distinct nodes on `maps/apt_0.places.json`. Sampling at `0.45 m` clearance placed a tour
+  node behind the west coffee table (`-6.25, -1.03`) where leaving snagged on the thin legs; raising open-floor
+  clearance to `0.55 m` plus backup-clear recovery completed all 6/6 tour waypoints cleanly. Clearing `self.coverage`
+  and `seen_calls` on every `search()` caused `vlm2-a`'s `E2` to re-sweep the living room 3 times; preserving per-task
+  coverage and keeping `search` keys in `seen_calls` stopped the loop.
+
+Measured 3D results after these fixes (`vlm2-b`, `vlm2-c`, `vlm2-home`, `vlm2-n1`, `vlm2-e15`, `think=low`, 0.33x):
+
+- `E2` (umbrella): **2/2 reached real umbrella with 0 bumps** (`vlm2-c` **PASS** in `128.1 s` / 3 turns / `0.79 m`,
+  35% faster than Phase 1; `vlm2-b` reached `0.84 m` in 2 turns / 0 bumps before the `drive_on_heading` fix).
+- `E4` (kitchen): **2/2 PASS** (`22.7 s` / 2 turns / 0 bumps / `-0.27 m`; `93.1 s` / 4 turns / 1 bump / `0.84 m`).
+- `E6` (computer monitor): **2/2 PASS** (`15.2 s` / 2 turns / `0.55 m`; `15.6 s` / 2 turns / `0.58 m`).
+- `E3` (shoes): **1/2 PASS** (`vlm2-b` **PASS** in `163.4 s` / `0.28 m`, cleanly reading de-overlapped badges;
+  `vlm2-c` timed out after a false visual `[passed]` shadow on a rug and a reviving false YOLOE track in the west
+  corner).
+- `E7` (big rug): **2/2 drove onto `rug 0` with 0 bumps** (`-0.22 m` in `32.1 s` / 2 turns; `-0.26 m` on Turn 2 using
+  `search(what='big rug', near='living room')`; same cabinet-edge limit vs `0.90 m` check).
+- Non-regression & FP (`vlm2-home`, `vlm2-n1`, `vlm2-e15`, **0 bumps across all runs**): `S2` (dog, **PASS**, `5.0 s`,
+  0 FP), `S3` (elephant, **PASS**, `3.2 s`, 0 FP), `R2` (TV + `"Come back."`, **PASS**, `99.0 s`, 1-turn return to
+  `0.1 m` of start), `N1` (sofa, **PASS**, `20.5 s`, 2 turns, `0.66 m`; one earlier 1-off raw-JSON 2B reply),
+  `E1` (beanbag, **PASS**, `49.1 s`, 2 turns, `0.64 m`). `E5` (`Turn to face the sofa.`) had 0 bumps in `18.9 s` but
+  the 2B model chose `go_to('sofa')` instead of `face('sofa')`.
+
 ## Hazards found
 
 - **Under the stairs.** Exploring `apt_0`, the robot drove under the open staircase, whose underside slopes down

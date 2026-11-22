@@ -37,6 +37,8 @@ RANGE_ORDER = re.compile(r"\b(?:nearest|closest|farthest|furthest)\b", re.IGNORE
 VIEW_ORDER = re.compile(r"\b(?:leftmost|rightmost|left|right)\b", re.IGNORECASE)
 USER_WORDS = {"user", "me", "you", "the user", "person(user)", "human", "speaker", "my owner", "owner"}
 NO_TARGET = {"", "none", "null", "nothing"}
+PLACE_STOP = frozenset({"the", "a", "an", "my", "to", "in", "at", "by", "on", "of", "near", "area", "room", "place"})
+CLUSTER_GAP = 0.7  # metres: co-located same-label targets (e.g. a pair of shoes) auto-pick the nearest instead of asking
 NO_CLEARANCE = ("I cannot verify clearance under furniture. I did not drive underneath or beside it. "
                 "Ask before substituting a different destination")
 NUMBER = re.compile(r"\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*"
@@ -159,6 +161,35 @@ def _check_visual_name(text: str) -> None:
                         "then choose an ID by its measured distance")
 
 
+def _place_tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return {w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in words} - PLACE_STOP
+
+
+def _match_place(query: str, places: dict[str, Any], pose: Any = None) -> str | None:
+    """Best-matching mapped area for a free-form query (e.g. 'hallway' -> 'hallway: doorway, door'),
+    ignoring system places ('start', 'where you were before')."""
+    q = _place_tokens(query)
+    if not q or not places:
+        return None
+    best: tuple[int, int, float, str] | None = None
+    for raw, p in places.items():
+        name = str(raw).lower()
+        if name in ("start", "where you were before"):
+            continue
+        head, _, rest = name.partition(":")
+        head_toks = _place_tokens(head)
+        all_toks = head_toks | _place_tokens(rest)
+        overlap = len(q & all_toks)
+        if not overlap or (overlap < len(q) and not (q & head_toks)):
+            continue
+        dist = -math.dist((p.x, p.y), (pose.x, pose.y)) if pose is not None and hasattr(p, "x") else 0.0
+        score = (len(q & head_toks), overlap, dist)
+        if best is None or score > best[:3]:
+            best = (*score, name)
+    return best[3] if best is not None else None
+
+
 class Tools:
     """The tools bound to one robot for one task."""
 
@@ -171,6 +202,7 @@ class Tools:
         self.pictures: list[tuple[str, Any]] = []  # sensor evidence with its provenance, not a new live view
         self._tools = {t.name: t for t in self._define()}
         self.began = robot.pose()  # where this request began
+        self._task_pose_start = len(getattr(getattr(robot, "trace", None), "poses", ()))
         self.done: list[str] = []  # each motion of this request, as it went
         self.turned = 0.0  # degrees of turning in all, either way
 
@@ -249,7 +281,7 @@ class Tools:
             result += " From the request start: " + "; ".join(f"ID {i} about {d:.1f} m" for d, i in start) + "."
         return result
 
-    def _resolve(self, target: str, *, people_only: bool = False, find: bool = True) -> Any:
+    def _resolve(self, target: str, *, people_only: bool = False, find: bool = True, fuzzy_place: bool = False) -> Any:
         """An id, 'user', a room or saved place, or a description, as something the robot can drive to; `find`: a
         description neither known nor in view is searched for, which drives (not for "turn to face the sofa": it
         drove off to look for the sofa)."""
@@ -273,12 +305,13 @@ class Tools:
             except NotFound as exc:  # the robot says why, when it knows (gone from where it was, not one after all)
                 raise ToolError(str(exc) if str(exc) != f"there is no object {m.group(1)}"
                                 else f"there is no object {m.group(1)} in the object list") from None
+        raw_places = getattr(r, "places", {})
+        places_map = {str(k).lower(): v for k, v in raw_places.items()}
+        name = re.sub(r"\s*\(.*\)$", "", low)  # a place as the observation lists it: "kitchen (2.1 m front)"
         if not people_only:
-            places = {str(p).lower() for p in getattr(r, "places", {})}
             rooms = {str(p).lower() for p in getattr(getattr(r, "scene", None), "rooms", {})}
-            name = re.sub(r"\s*\(.*\)$", "", low)  # a place as the observation lists it: "kitchen (2.1 m front)"
             key = name.removesuffix(" room").strip()
-            if name in places or name in rooms:
+            if name in places_map or name in rooms:
                 return name
             if key in rooms:
                 return key
@@ -290,7 +323,20 @@ class Tools:
         if VIEW_ORDER.search(text):  # name lookup matches shared words; "right chair" must not pick any chair
             raise ToolError("a left/right selection needs a viewpoint. Use look(direction, what) with the "
                             "visual name, then choose the matching ID in the marked picture")
-        matches = list(r.where(text)) or list(r.detect(text))  # known already, or in view when looked for by name
+
+        def pick(found: list[Object]) -> Object:
+            best = [o for o in found if o.label == found[0].label]
+            if len(best) > 1 and max(geom.dist(o, best[0]) for o in best) > CLUSTER_GAP:
+                raise ToolError(f"{text!r} could be any of: {self._choices(best)} "
+                                "Use the id, or ask the user which one")
+            return found[0]
+
+        known = list(r.where(text))
+        if known:
+            return pick(known)
+        if fuzzy_place and not people_only and (hit := _match_place(name, places_map, r.pose())) is not None:
+            return hit
+        matches = list(r.detect(text))  # in view when looked for by name
         if not matches:
             label = visual_name(low)
             if label and label != low:
@@ -301,16 +347,27 @@ class Tools:
             if not find:
                 raise ToolError(f"no {text!r} is known or in view. Use look('around', {text!r}) to look without "
                                 "driving, or search to drive round looking for it")
+            # If a mapped semantic place names this area/landmark, drive there before sweeping the home blindly.
+            hint = _match_place(name, places_map, r.pose()) if not people_only else None
+            if hint is not None:
+                hp = places_map.get(hint)
+                if hp is not None and math.dist((hp.x, hp.y), (r.pose().x, r.pose().y)) > 0.6:
+                    try:
+                        r.go_to(hint)
+                    except (NotFound, PathBlocked):
+                        pass
+                    matches = list(r.where(text)) or list(r.detect(text))
+                    if matches:
+                        return pick(matches)
+                if _place_tokens(name) <= _place_tokens(hint.partition(":")[0]):
+                    return hint
             # "go to the bicycle" means finding it first: answering "use search" cost the model a turn, and a small
             # model need not know to
             self.found = r.search(text)
             if self.found is None:
                 raise ToolError(f"searched here and found no {text!r}. Search another room, or ask the user")
             return self.found
-        best = [o for o in matches if o.label == matches[0].label]
-        if len(best) > 1:
-            raise ToolError(f"{text!r} could be any of: {self._choices(best)} Use the id, or ask the user which one")
-        return matches[0]
+        return pick(matches)
 
     def _name(self, t: Any) -> str:
         if isinstance(t, Object):
@@ -426,9 +483,9 @@ class Tools:
     def go_to(self, target: str, distance: float | None = None, side: str = "") -> str:
         if side == "under":
             raise ToolError(NO_CLEARANCE)
+        before = self.robot.pose()
         t = self._resolve(target)
         person = isinstance(t, Object) and t.label == "person"
-        before = self.robot.pose()
         if side:
             self.robot.go_to(t, distance=distance if distance is not None else (0.8 if person else 0.2), side=side)
         else:
@@ -508,7 +565,7 @@ class Tools:
             toward, near = near_key, ""
         if near and near_key not in {"here", "everywhere", "room"}:  # start beside a visible/known landmark if found
             try:
-                start = self._resolve(near, find=False)
+                start = self._resolve(near, find=False, fuzzy_place=True)
                 self.robot.go_to(start, distance=(start.radius + 0.5) if isinstance(start, Object) else 0.0)
             except (ToolError, NotFound, PathBlocked):
                 pass
@@ -518,9 +575,21 @@ class Tools:
             self.found = found = self.robot.search(what, area=area or "here")
         if found is None:
             log = getattr(self.robot, "search_log", [])
-            where = "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
+            poses = getattr(getattr(self.robot, "trace", None), "poses", ())
+            trail = [(x, y) for _, x, y, _ in poses[self._task_pose_start:]] or [
+                (self.robot.pose().x, self.robot.pose().y)
+            ]
+            mapped = [
+                (str(n), p) for n, p in getattr(self.robot, "places", {}).items()
+                if str(n).lower() not in ("start", "where you were before") and hasattr(p, "x")
+            ]
+            unvisited = [n for n, p in mapped if all(math.dist((p.x, p.y), xy) > 2.2 for xy in trail)]
+            hint = f" Areas not visited closely yet: {'; '.join(unvisited[:4])}." if unvisited else ""
+            where = "all reachable areas" if (mapped and not unvisited and area in ("here", "everywhere")) else (
+                "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
+            )
             stops = f" ({len(log)} stops)" if log else ""
-            return f"Searched {where}{stops}: no {what} found."
+            return f"Searched {where}{stops}: no {what} found.{hint}"
         crop = getattr(self.robot, "target_crop", lambda _: None)(found.id)
         if crop is not None:
             self.pictures.append((f"Recorded detection crop for {found.label} ID {found.id} (not a live view):", crop))
