@@ -1087,12 +1087,16 @@ def test_badge_deoverlap_and_detector_max_asked():
     assert out.shape == rgb.shape and (out > 0).any()
 
     # Even with plenty of GPU prompt slots, Detector keeps only MAX_ASKED recent asked words so stale tasks don't leak.
+    class StubDetector(Detector):
+        # Vocabulary bookkeeping needs no text encoder or model weights.
+        def _feature(self, word: str) -> np.ndarray:
+            return np.zeros(1, dtype=np.float32)
+
     fake_server = SimpleNamespace(slots=12)
-    det = Detector(server=fake_server, always=("person",))
+    det = StubDetector(server=fake_server, always=("person",))
     for w in ("umbrella", "shoes", "stool", "mug", "bicycle"):
         det.watch(w)
     assert len(det.asked) == MAX_ASKED == 3
     assert det.asked == ["stool", "mug", "bicycle"]
     assert det.vocabulary == ["person", "stool", "mug", "bicycle"]
-
 
