@@ -631,6 +631,8 @@ class RealRobot(RosRobot):
         return where
 
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
+        if isinstance(target, Object) and hasattr(getattr(self, "perception", None), "detector"):
+            self._watch(target.label)
         super()._go(target, distance, side=side)
         self._note_place()
         if side or not isinstance(target, Object):
@@ -809,6 +811,9 @@ class RealRobot(RosRobot):
     def begin(self) -> None:
         super().begin()
         self._search_coverage.clear()
+        det = getattr(getattr(self, "perception", None), "detector", None)
+        if hasattr(det, "clear"):
+            det.clear()
 
     def search(self, description: str, area: str = "here", *, toward: str = "") -> Object | None:
         self.search_log = []

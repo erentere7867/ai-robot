@@ -54,6 +54,12 @@ def _with_image(url: str, text: str) -> list[dict[str, Any]]:
 class Brain:
     def __init__(self, url: str = "http://127.0.0.1:8081", timeout_s: float = 180.0) -> None:
         self.http = httpx.Client(base_url=url, timeout=timeout_s, trust_env=False)
+        self._busy = 0
+
+    @property
+    def busy(self) -> bool:
+        """True while an interactive agent turn is running on llama-server (background perception yields)."""
+        return self._busy > 0
 
     def healthy(self) -> bool:
         try:
@@ -87,9 +93,13 @@ class Brain:
         }
         if think > 0:
             payload["thinking_budget_tokens"] = think
-        r = self.http.post("/v1/chat/completions", json=payload)
-        r.raise_for_status()
-        data = r.json()
+        self._busy += 1
+        try:
+            r = self.http.post("/v1/chat/completions", json=payload)
+            r.raise_for_status()
+            data = r.json()
+        finally:
+            self._busy -= 1
         message = data["choices"][0]["message"]
         calls = []
         for i, tc in enumerate(message.get("tool_calls") or []):

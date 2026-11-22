@@ -606,10 +606,21 @@ class Perception:
         misses alone the robot gave up real things mid-approach, seen up close or from aside: a bike seen 110 times,
         a plant 53 times, beanbags; false ones it named from afar (a table as "tv") go as before, on the model's no."""
         while not self._stop:
+            if getattr(self.brain, "busy", False) is True:  # yield the GPU while an agent LLM turn is running
+                time.sleep(0.15)
+                continue
             # New things first: tools drive to them, and a doubted thing stays until it is answered. Asked after the
             # doubts, the bike YOLOE called an umbrella (the model's yes to that crop: 0%) was driven to unchecked.
+            # Only background-verify labels in the active vocabulary (old-task tracks are vetted synchronously on demand).
+            vocab = getattr(self.detector, "vocabulary", ())
+            watched = {canonical(w) for w in vocab} if isinstance(vocab, (list, tuple, set, frozenset)) else set()
             with self.lock:
-                track = self.tracker.to_name(self.crops)
+                active_crops = (
+                    {tid: img for tid, img in self.crops.items()
+                     if (tr := self.tracker.tracks.get(tid)) is not None and canonical(tr.label) in watched}
+                    if watched else self.crops
+                )
+                track = self.tracker.to_name(active_crops)
                 doubt = next(iter(self.doubts), None) if track is None else None
                 if track is not None:
                     label = track.votes.most_common(1)[0][0] if track.votes else track.label
@@ -628,14 +639,15 @@ class Perception:
             with self.lock:
                 if track is not None:
                     self.tracker.verify(track, label if yes else None, pixels(picture), sure=yes)
-                    continue
-                del self.doubts[doubt]
-                doubted = self.tracker.tracks.get(doubt)
-                if doubted is not None and doubted.misses >= GONE_AFTER:  # not seen again while the model looked
-                    if yes:
-                        doubted.misses = 0
-                    else:
-                        doubted.present = False
+                else:
+                    del self.doubts[doubt]
+                    doubted = self.tracker.tracks.get(doubt)
+                    if doubted is not None and doubted.misses >= GONE_AFTER:  # not seen again while the model looked
+                        if yes:
+                            doubted.misses = 0
+                        else:
+                            doubted.present = False
+            time.sleep(0.15)
 
     def process(self, name: str) -> None:
         stamp, rgb = self.frames[name]
@@ -752,7 +764,8 @@ class Perception:
                     return None
                 rgb, raw_boxes = frame[1], []
             labels_by_id = {t.id: t.label for t in self.tracker.tracks.values()}
-            rejected = {t.id for t in self.tracker.tracks.values() if t.rejected}
+            hidden = {t.id for t in self.tracker.tracks.values() if t.rejected or not t.present}
+            raw_boxes = [(b, self.tracker.current(tid)) for b, tid in raw_boxes]
         orig_h, orig_w = rgb.shape[:2]
         target_w = width if width > 0 else orig_w
         target_h = height if height > 0 else (int(round(target_w * 9 / 16)) if width > 0 else orig_h)
@@ -768,7 +781,7 @@ class Perception:
 
         boxes_with_labels: list[tuple[tuple[int, int, int, int], int, str]] = []
         for b, tid in raw_boxes:
-            if tid in rejected:  # the vision model said it is not what the detector called it
+            if tid in hidden or tid not in labels_by_id:  # rejected or marked absent: never lure go_to with dead IDs
                 continue
             scaled_box = (
                 int(round(b[0] * sx)),

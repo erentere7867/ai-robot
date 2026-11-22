@@ -32,7 +32,7 @@ CAMERAS = {  # every direction go_toward takes too: the model used each tool's w
 CAMERA_NAMES = {"front_camera": "front", "rear_left_camera": "rear-left", "rear_right_camera": "rear-right"}
 ROBOT_RADIUS = 0.15  # metres, from the robot's centre to its edge
 RELATION = re.compile(r"\b(left of|right of|behind|in front of|front of|next to|beside|near|between|on top of|under"
-                      r"neath|under|far side of|close to)\b")
+                      r"neath|under|far side of|close to|in|on|by|at)\b")
 RANGE_ORDER = re.compile(r"\b(?:nearest|closest|farthest|furthest)\b", re.IGNORECASE)
 VIEW_ORDER = re.compile(r"\b(?:leftmost|rightmost|left|right)\b", re.IGNORECASE)
 USER_WORDS = {"user", "me", "you", "the user", "person(user)", "human", "speaker", "my owner", "owner"}
@@ -155,10 +155,24 @@ def _where_words(o: Object) -> str:
     return f"{o.distance:.1f} m {o.side}"
 
 
-def _check_visual_name(text: str) -> None:
+def _object_id(text: str) -> int | None:
+    """Numeric track ID from '4', '#4', '4 box', 'box 4', 'box #4', or None."""
+    low = text.strip().lower()
+    m = (re.fullmatch(r"(?:#|id\s*[:=]?\s*|object\s+)?(\d+)(?:\s+[a-z ()-]+)?", low)
+         or re.fullmatch(r"[a-z ]+?\s*#?(\d+)", low))
+    return int(m.group(1)) if m else None
+
+
+def _check_visual_name(text: str, *, allow_relation: bool = False) -> None:
+    if _object_id(text) is not None:
+        raise ToolError(f"{text!r} is an object ID, not a plain object name. Pass just the object name in "
+                        "what=..., or pass the ID directly to go_to/face")
     if RANGE_ORDER.search(text):
         raise ToolError("a distance comparison is not a camera label. Call search with just the object name, "
                         "then choose an ID by its measured distance")
+    if not allow_relation and RELATION.search(text.lower()):
+        raise ToolError(f"{text!r} is a location phrase, not a plain object name. Pass just the object name in "
+                        "what=... and put the area or landmark in search(near=...)")
 
 
 def _place_tokens(text: str) -> set[str]:
@@ -215,11 +229,14 @@ class Tools:
         if tool is None:
             return f"There is no tool {name!r}. Tools: {', '.join(self._tools)}.", False
         self.found = None  # what this call found by searching
+        before = self.robot.pose() if tool.moves else None
         try:
             checked = _check(tool, args)
             result = tool.run(**checked)
             if self.found is not None and name != "search":
                 result = f"Searched for it: found {self.found.label} {self.found.id}. {result}"
+            if tool.moves:
+                self.moved = True
         except ToolError as exc:
             return f"Error: {exc}.", False
         except NotFound as exc:
@@ -234,8 +251,11 @@ class Tools:
         except (ValueError, TypeError) as exc:
             return f"Error: {exc}.", False
         finally:
-            if tool.moves:
-                self.moved = True
+            if tool.moves and not self.moved and before is not None:
+                now = self.robot.pose()
+                if (math.dist((now.x, now.y), (before.x, before.y)) > 0.02
+                        or abs((now.yaw - before.yaw + 180) % 360 - 180) > 2.0):
+                    self.moved = True
         if tool.moves:
             progress = self._progress(name, checked, result)
             if progress:
@@ -297,14 +317,13 @@ class Tools:
             return user
         if re.match(r"under(?:neath)?\s+", low):
             raise ToolError(NO_CLEARANCE)
-        m = (re.fullmatch(r"(?:#|id\s*[:=]?\s*|object\s+)?(\d+)(?:\s+[a-z ()-]+)?", low)  # "4", "#4", "4 box"
-             or re.fullmatch(r"[a-z ]+?\s*#?(\d+)", low))  # "box 4", "box #4"
-        if m:
+        oid = _object_id(low)
+        if oid is not None:
             try:
-                return r.obj(int(m.group(1)))
+                return r.obj(oid)
             except NotFound as exc:  # the robot says why, when it knows (gone from where it was, not one after all)
-                raise ToolError(str(exc) if str(exc) != f"there is no object {m.group(1)}"
-                                else f"there is no object {m.group(1)} in the object list") from None
+                raise ToolError(str(exc) if str(exc) != f"there is no object {oid}"
+                                else f"there is no object {oid} in the object list") from None
         raw_places = getattr(r, "places", {})
         places_map = {str(k).lower(): v for k, v in raw_places.items()}
         name = re.sub(r"\s*\(.*\)$", "", low)  # a place as the observation lists it: "kitchen (2.1 m front)"
@@ -315,11 +334,12 @@ class Tools:
                 return name
             if key in rooms:
                 return key
-        _check_visual_name(text)
-        if RELATION.search(low):  # "behind the sofa" would otherwise silently mean "the sofa"
-            raise ToolError(f"{text!r} describes a spot, not a thing. To go to a spot you can see, use go_toward "
-                            "with the direction of the picture it is in and about how far; for a side of a thing use "
-                            "go_to_side, to stop some metres from it use stop_near")
+        _check_visual_name(text, allow_relation=True)
+        if RELATION.search(low):  # "behind the sofa" or "chair in living room" would otherwise pollute YOLOE
+            raise ToolError(f"{text!r} mixes an object and a place or spot. To find a thing in an area or beside a "
+                            "landmark, pass just the object name to search(what=..., near=...) (or go_to the area "
+                            "first). To drive to a visible floor spot use go_toward; for a side of a thing use "
+                            "go_to_side; to stop some metres from it use stop_near")
         if VIEW_ORDER.search(text):  # name lookup matches shared words; "right chair" must not pick any chair
             raise ToolError("a left/right selection needs a viewpoint. Use look(direction, what) with the "
                             "visual name, then choose the matching ID in the marked picture")

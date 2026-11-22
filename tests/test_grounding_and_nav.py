@@ -915,7 +915,8 @@ def test_search_toward_and_lean_stationary_look():
         chat=lambda m, schemas, **kw: (schema_names.append([s["function"]["name"] for s in schemas]), replies2.pop(0))[1]
     )
     Agent(brain2, cameras="front").do("Find the mug.", sim)
-    assert "look" in schema_names[0] and "look" in schema_names[2] and "look" not in schema_names[3]
+    assert "look" in schema_names[0] and "look" in schema_names[2]
+    assert "look" not in schema_names[3] and "look_back" not in schema_names[3]
 
 
 def test_small_object_depth_refinement_and_arrived_reached_wording():
@@ -1163,8 +1164,77 @@ def test_color_qualified_sees_now_and_visual_target_color_check():
     assert real._see_target("red bike") is None
 
 
+def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear():
+    from robot.agent.agent import Agent
+    from robot.agent.tools import Tools
+    from robot.mind.brain import Reply, ToolCall
+    from robot.perception.detector import Detector
 
+    # 1. Location phrases ("chair in living room") and object IDs ("bike 7") never leak into YOLOE vocabulary
+    sim = SimRobot(Scene(8.0, 6.0, [Thing("chair", 2.0, 0.0, 0.3)], {}, start=Pose(0.0, 0.0, 0.0)))
+    vocab_before = sim.vocabulary.copy()
+    tools = Tools(sim)
+    for name, args in (
+        ("go_to", {"target": "chair in living room"}),
+        ("search", {"what": "chair in living room"}),
+        ("look", {"direction": "front", "what": "cup on table"}),
+        ("search", {"what": "bike 7"}),
+        ("look", {"direction": "front", "what": "25 CHAIR"}),
+    ):
+        msg, ok = tools.run(name, args)
+        assert not ok and ("search(" in msg or "object ID" in msg)
+    assert sim.vocabulary == vocab_before
 
+    # 2. Default see_after_moves="front" attaches 1 fresh front_camera frame after open-loop moves without full scene dump
+    seen_turns = []
+    replies = [
+        Reply("", tool_calls=[ToolCall("m1", "go_toward", {"direction": "front", "metres": 0.5})]),
+        Reply("Done."),
+    ]
+    fake_llm = SimpleNamespace(chat=lambda m, *a, **kw: (seen_turns.append(list(m)), replies.pop(0))[1])
+    Agent(fake_llm, cameras="all").do("Step forward.", sim, speak=False)
+    tool_content = [m for m in seen_turns[1] if m["role"] == "tool"][-1]["content"]
+    assert isinstance(tool_content, list)
+    assert sum(p.get("type") == "image_url" for p in tool_content) == 1
+    assert any(p.get("text") == "front camera:" for p in tool_content)
+    assert not any("What you sense now:" in p.get("text", "") for p in tool_content)
 
+    # 3. Detector.clear() drops previous request's asked words while preserving `always`
+    det = Detector(server=SimpleNamespace(slots=8), always=("person",))
+    det.watch("shoes", "umbrella")
+    assert det.vocabulary == ["person", "shoes", "umbrella"]
+    det.clear()
+    assert det.vocabulary == ["person"]
 
+    # 4. _trim_images removes evicted images along with their captions (no '(older picture removed)' text mash)
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": "What you sense now:"},
+        {"type": "text", "text": "front camera:"}, {"type": "image_url", "image_url": {"url": "u1"}},
+        {"type": "text", "text": "rear-left camera:"}, {"type": "image_url", "image_url": {"url": "u2"}},
+        {"type": "text", "text": "rear-right camera:"}, {"type": "image_url", "image_url": {"url": "u3"}},
+        {"type": "text", "text": "\nThe user says: \"hi\""},
+    ]}, {"role": "tool", "content": [
+        {"type": "text", "text": "Moved."},
+        {"type": "text", "text": "front camera:"}, {"type": "image_url", "image_url": {"url": "u4"}},
+    ]}]
+    Agent._trim_images(msgs)
+    texts = [p.get("text", "") for p in msgs[0]["content"] if p.get("type") == "text"]
+    assert "front camera:" not in texts and not any("older picture removed" in t for t in texts)
+    assert sum(p.get("type") == "image_url" for m in msgs for p in m["content"]) == 3
+
+    # 5. render_annotated_view hides absent tracks (present=False) so dead IDs don't lure go_to retries
+    from robot.ros.perceive import Perception
+
+    perc = object.__new__(Perception)
+    perc.lock = Lock()
+    perc.tracker = Tracker()
+    perc.tracker.tracks[25] = Track(25, "chair", 2.0, 0.0, 0.3, 0.0, 0.0, hits=2, present=False)
+    perc.detected = {"front_camera": (10.0, np.zeros((360, 640, 3), dtype=np.uint8))}
+    perc.boxes = {"front_camera": [((100, 100, 200, 200), 25)]}
+    perc.frames = {}
+    out_absent = perc.render_annotated_view("front_camera", 640, 360, 5.0)
+    assert out_absent is not None and int(out_absent.sum()) == 0
+    perc.tracker.tracks[25].present = True
+    out_present = perc.render_annotated_view("front_camera", 640, 360, 5.0)
+    assert out_present is not None and int(out_present.sum()) > 0
 
