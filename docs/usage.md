@@ -86,6 +86,28 @@ Fifty instructions in drawn 2D rooms, fast; the model must be running.
 ~/sprocket-venv/bin/python -m robot.eval.suite --tag mine            # --only O3 C1 ..., --list
 ```
 
+## Local latency benchmark
+
+From a checkout with the model and vision servers running, measure individual wait paths without ROS or a 3D run:
+
+```bash
+python -m robot.eval.latency --vision-url http://127.0.0.1:8090 --json latency.json
+```
+
+The script ranks agent requests, their nested model turns, YOLOE and depth frames, SQLite recall, and live HTTP
+responses by per-operation p95. These isolated timings are not traffic-weighted; don't add model turns to agent
+requests. The agent uses two synthetic scenes and greedy decoding; this is not a task-success or robot-hardware
+test. At the default 12 agent requests, both agent tail percentiles are the slowest sample. Without a vision server,
+omit `--vision-url` to skip YOLOE and optionally supply `--depth-weights` for CPU depth. YOLOE needs the `vision`
+dependencies and the model files from setup above.
+
+To compare model-server settings, restart the model server before each run and use `--only agent` with the same
+sample and warmup counts. The Linux launcher defaults to half the available cores, rounded up. On an idle CPU-only
+8-vCPU Xeon with llama.cpp b11960 and the original agent and server settings (`a755aca`), setting
+`SPROCKET_BRAIN_THREADS=8` instead of four threads reduced agent p95 from 139 s to 105 s over 12 requests. The
+override does not affect GPU launchers. More threads can take CPU away from perception or ROS, so measure with
+the rest of the stack before using it on the robot.
+
 ## The 3D apartment
 
 The real robot software in a ReplicaCAD apartment: only the world, the body and the raw sensors are simulated
