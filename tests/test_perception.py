@@ -1069,7 +1069,7 @@ def test_visual_tracks_are_not_evicted_by_detector_misses():
     assert perc.tracker.current(11) == 11 and perc.tracker.tracks[11].present and not perc.tracker.tracks[11].rejected
 
 
-def test_badge_deoverlap_and_detector_max_asked():
+def test_badge_deoverlap_and_detector_max_asked(monkeypatch):
     from robot.perception.detector import MAX_ASKED, Detector
     from robot.perception.overlay import _place_badge, draw_set_of_mark
 
@@ -1089,10 +1089,10 @@ def test_badge_deoverlap_and_detector_max_asked():
     # Even with plenty of GPU prompt slots, Detector keeps only MAX_ASKED recent asked words so stale tasks don't leak.
     fake_server = SimpleNamespace(slots=12)
     det = Detector(server=fake_server, always=("person",))
+    monkeypatch.setattr(det, "_feature", lambda _word: np.zeros(1, dtype=np.float32))
     for w in ("umbrella", "shoes", "stool", "mug", "bicycle"):
         det.watch(w)
     assert len(det.asked) == MAX_ASKED == 3
     assert det.asked == ["stool", "mug", "bicycle"]
     assert det.vocabulary == ["person", "stool", "mug", "bicycle"]
-
 
