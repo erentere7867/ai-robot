@@ -55,6 +55,7 @@ class Place:
     width: float = 0.0
     depth_extent: float = 0.0
     orientation_yaw: float = 0.0
+    z: float = 0.0  # median elevation of non-floor crop pixels (robot frame, metres); 0 for floor-flat targets
 
 
 def lidar_range(scan: tuple[np.ndarray, float, float] | None, bearing: float, spread: float = 0.04) -> float | None:
@@ -111,6 +112,13 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
     a, b = cam.bearing(x1), cam.bearing(x2)
     middle, span = (a + b) / 2, abs(a - b)  # the middle direction: on a wide lens the middle pixel is not
     axis = (math.cos(cam.yaw), math.sin(cam.yaw))
+    fu, fv = foot if foot is not None else ((x1 + x2) / 2, y2)
+    contact = cam.floor(fu, fv) if y2 < cam.height - 2 else None
+    if contact is not None:
+        floor_seen = math.hypot(contact[0] - cam.x, contact[1] - cam.y)
+        floor_radius = _radius(floor_seen, span)
+        behind = BODY if person else floor_radius
+        floor_x, floor_y = contact[0] + behind * axis[0], contact[1] + behind * axis[1]
     if depth is not None:
         r0, r1 = int(y1), max(int(y2), int(y1) + 1)
         c0, c1 = int(x1), max(int(x2), int(x1) + 1)
@@ -118,7 +126,8 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
         good = np.isfinite(patch) & (patch > 0.1) & (patch < 8.0)
         if good.any():
             down = (np.arange(r0, r0 + patch.shape[0], dtype=np.float32)[:, None] - cam.height / 2) / cam.focal
-            heights = cam.z - down * patch  # height above the floor of each pixel's point
+            # No return is inf. At the horizon, 0 * inf is undefined even though the pixel is later masked out.
+            heights = cam.z - down * np.where(good, patch, 0.0)
             if np.percentile(heights[good], 90) < 0.04:
                 return None  # all floor
             valid_mask = good & (heights > 0.03)
@@ -163,6 +172,14 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
                 rel = bearing_eff - cam.yaw
                 radius = _radius(seen, span)
                 reach = seen + (BODY if person else radius)
+                if contact is not None and foot is not None and not person and x1 > 4 and x2 < cam.width - 4:
+                    # A complete outline gives a second estimate if its foot is consistent with the floor.
+                    # Do not project a shelf (or an occluded object's apparent bottom) blindly onto the floor.
+                    floor_reach = math.hypot(floor_x - cam.x, floor_y - cam.y)
+                    if abs(floor_reach - reach) <= radius + SIGMA["floor"][0] + SIGMA["floor"][1] * reach:
+                        reach = (reach + floor_reach) / 2
+                        radius = (radius + floor_radius) / 2
+                        rel = middle - cam.yaw
                 x, y, _ = cam.to_base(reach * math.cos(rel), reach * math.sin(rel), 0.0)
 
                 # 3D extents (width, depth_extent) and orientation_yaw from depth cluster
@@ -192,13 +209,9 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
                 return _place(x, y, radius, "depth", seen, width, depth_extent, ori_yaw)
     # where it meets the floor, unless the box runs off the bottom of the picture: then the picture's edge is not the
     # thing's foot, and the estimate came out half the true range
-    fu, fv = foot if foot is not None else ((x1 + x2) / 2, y2)
-    contact = cam.floor(fu, fv) if y2 < cam.height - 2 else None
     if contact is None:
         return None
-    seen = math.hypot(contact[0] - cam.x, contact[1] - cam.y)
-    radius = _radius(seen, span)
-    behind = BODY if person else radius
+    seen, radius = floor_seen, floor_radius
     forward = (contact[0] - cam.x) * axis[0] + (contact[1] - cam.y) * axis[1]
     if scan is not None and cam.point(fu, y1, forward)[2] >= SCAN_Z:  # scan beam passes over low things
         lo, hi = (math.atan2(cam.y + seen * math.sin(e), cam.x + seen * math.cos(e)) for e in (a, b))
@@ -208,8 +221,73 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
             return _place(reach * math.cos(bearing), reach * math.sin(bearing), radius, "lidar", lidar[0],
                           2 * radius, behind * 2, bearing)
     # the lowest point of a thing's outline is its nearest along the lens axis: its middle lies further along the axis
-    return _place(contact[0] + behind * axis[0], contact[1] + behind * axis[1], radius, "floor", seen,
-                  2 * radius, behind * 2, middle)
+    return _place(floor_x, floor_y, radius, "floor", seen, 2 * radius, behind * 2, middle)
+
+
+def locate_crop(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarray | None = None,
+                scan: tuple[np.ndarray, float, float] | None = None, on_floor: bool = False) -> Place | None:
+    """Range a coarse visual crop (x1, y1, x2, y2) into a robot-frame Place on its front surface or floor spot.
+
+    Unlike `locate()` for tight detector boxes, a coarse crop can include foreground furniture near its side edges
+    (sampling the middle half of columns and the 25th depth percentile cut `dock -> kitchen` edge error from 1.50 m
+    to 0.00 m). Floor-flat targets (rugs) are kept when at least 60% of below-horizon pixels lie on the floor and
+    weighted by r^2 (exact flat-floor Jacobian dr ∝ r^2 dv) over [0.4, 3.5] m: unweighted median fell at 0.72 m near
+    the robot's feet, linear r stopped at 0.88 m, r^2 up to 3.0 m landed at 0.69 m (1.02 m after Nav2's 0.25 m goal
+    tolerance), and r^2 up to 3.5 m landed the 2-camera centroid's nearest free cell at 0.56 m."""
+    x1, y1, x2, y2 = box
+    a, b = cam.bearing(x1), cam.bearing(x2)
+    u_mid = (x1 + x2) / 2.0
+    bearing, span = cam.bearing(u_mid), abs(a - b)
+    rel = bearing - cam.yaw
+    seen, how, floor_flat, obj_z = None, "", False, 0.0
+    if depth is not None:
+        dh, dw = depth.shape[:2]
+        dcam = cam.at(dw, dh)
+        inset = 0.25 * (x2 - x1)
+        c0 = max(0, int((x1 + inset) * dw / cam.width))
+        c1 = min(dw, max(c0 + 1, int((x2 - inset) * dw / cam.width)))
+        r0 = max(0, int(y1 * dh / cam.height))
+        r1 = min(dh, max(r0 + 1, int(y2 * dh / cam.height)))
+        patch = depth[r0:r1, c0:c1]
+        good = np.isfinite(patch) & (patch > 0.15) & (patch < 7.0)
+        if good.any():
+            rows = np.arange(r0, r1, dtype=np.float32)[:, None]
+            down = (rows - dcam.height / 2.0) / dcam.focal
+            heights = dcam.z - down * np.where(good, patch, 0.0)
+            u_cols = np.arange(c0, c1, dtype=np.float32)[None, :]
+            r_patch = patch * np.sqrt(1.0 + ((u_cols - dcam.width / 2.0) / dcam.focal) ** 2)
+            below = good & (rows >= dcam.height / 2.0)
+            below_floor = below & (heights <= 0.06)
+            floor_px = below_floor & (r_patch >= 0.4) & (r_patch <= 3.5)
+            obj_px = good & (heights > 0.04)
+            below_n, floor_n = int(np.count_nonzero(below)), int(np.count_nonzero(floor_px))
+            mostly_floor = floor_n >= 12 and int(np.count_nonzero(below_floor)) >= 0.6 * max(1, below_n)
+            if on_floor and mostly_floor:
+                vals = r_patch[floor_px]
+                seen, how, floor_flat = float(np.average(vals, weights=vals ** 2)), "floor", True
+            elif np.count_nonzero(obj_px) >= 12:
+                cand = float(np.percentile(r_patch[obj_px], 25))
+                if cand <= 6.0:
+                    seen, how, obj_z = cand, "depth", float(np.median(heights[obj_px]))
+                elif floor_n >= 12:  # far back wall behind a distant floor target
+                    vals = r_patch[floor_px]
+                    seen, how, floor_flat = float(np.average(vals, weights=vals ** 2)), "floor", True
+            elif floor_n >= 12:
+                vals = r_patch[floor_px]
+                seen, how, floor_flat = float(np.average(vals, weights=vals ** 2)), "floor", True
+    if seen is None and scan is not None:
+        sr = lidar_range(scan, bearing, spread=max(0.06, span / 3.0))
+        if sr is not None:
+            return _place(sr * math.cos(bearing), sr * math.sin(bearing), 0.2, "lidar", sr)
+    if seen is None:
+        fp = cam.floor(u_mid, max(cam.height / 2.0 + 12.0, (y1 + y2) / 2.0))
+        if fp is None:
+            return None
+        seen = math.hypot(fp[0] - cam.x, fp[1] - cam.y)
+        return _place(fp[0], fp[1], 0.0 if on_floor else 0.2, "floor", seen)
+    x, y, _ = cam.to_base(seen * math.cos(rel), seen * math.sin(rel), 0.0)
+    radius = 0.0 if floor_flat else max(0.15, min(0.35, _radius(seen, span) * 0.5))
+    return _place(x, y, radius, how, seen, z=0.0 if floor_flat else obj_z)
 
 
 def _radius(seen: float, span: float) -> float:
@@ -218,10 +296,11 @@ def _radius(seen: float, span: float) -> float:
 
 
 def _place(x: float, y: float, radius: float, how: str, seen: float,
-           width: float = 0.0, depth_extent: float = 0.0, orientation_yaw: float = 0.0) -> Place | None:
+           width: float = 0.0, depth_extent: float = 0.0, orientation_yaw: float = 0.0,
+           z: float = 0.0) -> Place | None:
     if not 0.15 <= seen <= 6.0:
         return None
     base, per_metre = SIGMA[how]
     w = width if width > 0.0 else 2 * radius
     de = depth_extent if depth_extent > 0.0 else 2 * radius
-    return Place(x, y, radius, how, base + per_metre * seen, w, de, orientation_yaw)
+    return Place(x, y, radius, how, base + per_metre * seen, w, de, orientation_yaw, z)

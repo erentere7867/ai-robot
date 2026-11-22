@@ -42,6 +42,28 @@ def _approach(now: float, want: float, step: float) -> float:
     return now + max(-step, min(step, want - now))
 
 
+class GyroZero:
+    """The MCU estimates zero rate from samples at rest; it does not know the simulated sensor's bias."""
+
+    def __init__(self) -> None:
+        self.bias = self.total = 0.0
+        self.still = self.samples = 0
+
+    def correct(self, raw: float, stationary: bool) -> float:
+        if not stationary:
+            self.still = self.samples = 0
+            self.total = 0.0
+        else:
+            self.still += 1
+            if self.still * DT > 1.0:  # one second to settle, then one second of readings, as on the MCU
+                self.total += raw
+                self.samples += 1
+                if self.samples * DT >= 1.0:
+                    self.bias = self.total / self.samples
+                    self.total, self.samples = 0.0, 0
+        return raw - self.bias
+
+
 class Hardware:
     def __init__(self, port: int, rtf: float, seed: int = 0) -> None:
         import rclpy
@@ -62,6 +84,7 @@ class Hardware:
         self.rng = np.random.default_rng(seed)
         self.wheel_scale = 1 + rng.gauss(0, WHEEL_SCALE)
         self.gyro_bias = rng.gauss(0, GYRO_BIAS)
+        self.gyro_zero = GyroZero()
         start = self.world.call(op="info")["start"]
         self.truth = self.world.call(op="reset", pose=start)
         self.t = 0.0
@@ -127,8 +150,8 @@ class Hardware:
         moved = math.dist(before[:2], self.truth[:2])
         turned = math.atan2(math.sin(self.truth[2] - before[2]), math.cos(self.truth[2] - before[2]))
         v_true, w_true = math.copysign(moved, self.v) / DT, turned / DT
-        self._odometry(stamp, v_true, w_true)
-        self._imu(stamp, w_true)
+        wheels_still = self._odometry(stamp, v_true, w_true)
+        self._imu(stamp, w_true, wheels_still and want == (0.0, 0.0))
         if k % TOF_EVERY == 0:
             self._tof()
         for name, every, offset in self.cameras:
@@ -137,7 +160,7 @@ class Hardware:
         if k % TRUTH_EVERY == 0:
             self._truth(stamp)
 
-    def _odometry(self, stamp: Any, v_true: float, w_true: float) -> None:
+    def _odometry(self, stamp: Any, v_true: float, w_true: float) -> bool:
         """What the wheel encoders report: the wheels turn by what the body did, plus their own errors."""
         spin = abs(w_true) > 0.2 and abs(v_true) < 0.05  # turning on the spot: the tyres scrub
         v = v_true * self.wheel_scale + self.rng.normal(0, WHEEL_NOISE_V) * (v_true != 0 or w_true != 0)
@@ -155,13 +178,15 @@ class Hardware:
         cov[0], cov[7], cov[35] = 0.0004, 1e-6, 0.004  # vx, vy (held at zero), vyaw
         msg.twist.covariance = cov
         self.pubs["odom"].publish(msg)
+        return abs(v) + abs(w) * TRACK / 2 < 0.002  # both encoder speeds below the firmware's 2 mm/s threshold
 
-    def _imu(self, stamp: Any, w_true: float) -> None:
+    def _imu(self, stamp: Any, w_true: float, stationary: bool) -> None:
         msg = self.msgs["imu"]()
         msg.header.stamp, msg.header.frame_id = stamp, "imu_link"
         yaw = self.truth[2]  # level floor: no roll or pitch (the robot fuses only the turn rate)
         msg.orientation.z, msg.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
-        msg.angular_velocity.z = w_true + self.gyro_bias + self.rng.normal(0, GYRO_NOISE)
+        raw = w_true + self.gyro_bias + self.rng.normal(0, GYRO_NOISE)
+        msg.angular_velocity.z = self.gyro_zero.correct(raw, stationary)
         msg.linear_acceleration.z = 9.81
         msg.orientation_covariance[0] = msg.orientation_covariance[4] = msg.orientation_covariance[8] = 0.01
         msg.angular_velocity_covariance[8] = GYRO_NOISE ** 2

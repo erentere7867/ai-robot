@@ -50,8 +50,8 @@ def test_what_was_seen_told_and_shown_comes_back_after_a_restart(tmp_path):
 def test_a_thing_found_gone_is_not_remembered_as_there(tmp_path):
     tracker, memory = Tracker(), Memory(tmp_path / "home.db")
     _seen(tracker, "keys", 3.8, -2.0)
-    for _ in range(GONE_AFTER):
-        tracker.missed(tracker.objects()[0])  # looked at its place clearly often enough: not there
+    keys = tracker.objects()[0]
+    keys.present = not [tracker.missed(keys) for _ in range(GONE_AFTER)][-1]  # looked at its place clearly: not there
     memory.save(tracker, [], {})
     restored = Tracker()
     memory.restore(restored)

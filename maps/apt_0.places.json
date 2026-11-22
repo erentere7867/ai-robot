@@ -1,0 +1,38 @@
+[
+  {
+    "name": "living room: table, chair",
+    "x": 0.0,
+    "y": 0.0,
+    "yaw": -0.1
+  },
+  {
+    "name": "clothing store: rack, cabinet",
+    "x": 0.527,
+    "y": 3.769,
+    "yaw": 68.0
+  },
+  {
+    "name": "hallway: doors, staircase",
+    "x": 3.607,
+    "y": 3.82,
+    "yaw": -1.2
+  },
+  {
+    "name": "staircase: stairs, wooden floor",
+    "x": 4.26,
+    "y": 0.288,
+    "yaw": -85.5
+  },
+  {
+    "name": "living room: sofa, coffee table",
+    "x": -2.719,
+    "y": 3.658,
+    "yaw": -179.7
+  },
+  {
+    "name": "living room: sofas, coffee table",
+    "x": -5.956,
+    "y": 0.511,
+    "yaw": -149.4
+  }
+]

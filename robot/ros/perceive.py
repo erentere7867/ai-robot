@@ -16,7 +16,7 @@ import array
 import math
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import replace
 from typing import Any
 
@@ -24,13 +24,13 @@ import numpy as np
 
 from robot.mind.brain import _with_image
 from robot.perception import colour
-from robot.perception.camera import data_url
+from robot.perception.camera import data_url, resize_rgb
 from robot.perception.depth import StepHazard, classify_tof_grid, synthetic_scan, tof_scan
 from robot.perception.locate import lidar_range, locate
 from robot.perception.overlay import draw_set_of_mark
 from robot.perception.pose import estimate_pose_from_keypoints
 from robot.perception.rig import RIG, to_map, to_robot
-from robot.perception.tracker import Detection, Track, Tracker, canonical, look, pixels
+from robot.perception.tracker import GONE_AFTER, Detection, Track, Tracker, canonical, look, pixels
 from robot.ros.model import BODY_R, TOF
 
 TOPICS = {name: f"/{name}/image" for name in RIG}  # the camera drivers' colour pictures
@@ -38,6 +38,7 @@ DEPTH_TOPICS = {name: f"/{name}/depth" for name in RIG}  # the depth node's esti
 TOF_TOPICS = {"front": "/tof/front", "rear": "/tof/rear"}  # 8x8 grids from the MCU, metres
 SEE_FAR = 3.5  # beyond this a miss is not evidence: the detector may simply not resolve it
 PAST_EVERY, PAST_KEPT = 0.5, 60  # seconds between kept front pictures, and how many: the last 30 s, to look back on
+PLACE_SLACK = 0.3  # metres round a mapped place the vision model is shown when the detector stops finding a thing
 _, _, _TOF_HEIGHT, _TOF_PITCH, _TOF_HFOV, _ = TOF["front"]
 
 
@@ -49,8 +50,12 @@ def _image(msg: Any) -> np.ndarray:
     return array[:, :, ::-1] if msg.encoding == "bgr8" else array
 
 
+def _nanoseconds(stamp: Any) -> int:
+    return stamp.sec * 1_000_000_000 + stamp.nanosec
+
+
 def _seconds(stamp: Any) -> float:
-    return stamp.sec + stamp.nanosec * 1e-9
+    return _nanoseconds(stamp) * 1e-9
 
 
 def _only(rgb: np.ndarray, box: tuple[int, int, int, int], others: list[tuple[int, int, int, int]]) -> np.ndarray:
@@ -72,9 +77,84 @@ def _only(rgb: np.ndarray, box: tuple[int, int, int, int], others: list[tuple[in
     return crop
 
 
+def is_there(brain: Any, picture: np.ndarray, label: str) -> bool:
+    """The vision model's yes to a thing in the middle of a picture."""
+    question = f"Is there a {label} in the middle of this picture? Answer yes or no."
+    return brain.yes_probability(_with_image(data_url(picture), question)) >= 0.5
+
+
+def see_probability(brain: Any, picture: np.ndarray, label: str, max_dim: int = 512) -> float:
+    """The vision model's yes probability to seeing `label` in `picture`, capped so tall strips stay small."""
+    h, w = picture.shape[:2]
+    scale = min(1.0, max_dim / max(1, h, w))
+    img = resize_rgb(picture, max(1, round(w * scale)), max(1, round(h * scale))) if scale < 1.0 else picture
+    question = f"Do you see {label} in this picture? Answer yes or no."
+    return brain.yes_probability(_with_image(data_url(img, max_width=max_dim), question))
+
+
+def locate_in_picture(brain: Any, rgb: np.ndarray, label: str) -> tuple[tuple[int, int, int, int], bool] | None:
+    """Find where `label` appears in a full camera frame via yes/no crops (no numbered dots: the 2B model picks the
+    last number). Overlapping thirds -> either probability-weighted centre of contiguous positive thirds (for wide
+    surfaces/areas spanning >=2 thirds; cut close-up rug centre error from 0.78 m to 0.36 m) or overlapping halves
+    (0.65 span: non-overlapping halves sliced a centred umbrella at u=0.50 from 96% to 4%/4%, while 0.65 overlap
+    gave 100%/99%) -> upper/lower split on a 0.30-span context strip. Measured on 30 random apt_0 views (210 pairs)
+    behind a 768px whole-image gate: 0/145 (0.0%) FP; blank-wall hallucinations (71% whole) dropped to 1%/0%."""
+    h, w = rgb.shape[:2]
+    thirds = ((0.0, 0.40), (0.30, 0.70), (0.60, 1.0))
+    t_scores = [see_probability(brain, rgb[:, int(a * w):max(int(a * w) + 1, int(b * w))], label, max_dim=384)
+                for a, b in thirds]
+    pos = [i for i, s in enumerate(t_scores) if s >= 0.5]
+    if not pos:
+        return None
+    best_i = max(pos, key=t_scores.__getitem__)
+    # Contiguous positive block containing the strongest third (wide surface/area or an object straddling a seam).
+    block = [best_i] if (len(pos) == 2 and abs(pos[0] - pos[1]) == 2) else pos
+    if len(block) >= 2:
+        span = 0.40
+        u_center = sum(t_scores[i] * 0.5 * (thirds[i][0] + thirds[i][1]) for i in block) / sum(
+            t_scores[i] for i in block
+        )
+    else:
+        a, b = thirds[best_i]
+        span = b - a
+        halves = ((a, a + 0.65 * span), (b - 0.65 * span, b))
+        h_scores = [see_probability(brain, rgb[:, int(x0 * w):max(int(x0 * w) + 1, int(x1 * w))], label, max_dim=384)
+                    for x0, x1 in halves]
+        if max(h_scores) < 0.5:
+            return None
+        total = h_scores[0] + h_scores[1]
+        u_center = (h_scores[0] * (a + 0.25 * span) + h_scores[1] * (b - 0.25 * span)) / total
+    sx0 = max(0, int(round((u_center - 0.30 * span) * w)))
+    sx1 = min(w, max(sx0 + 1, int(round((u_center + 0.30 * span) * w))))
+    strip = rgb[:, sx0:sx1]
+    top_end, bot_start = max(1, int(0.55 * h)), min(h - 1, int(0.45 * h))
+    v_top = see_probability(brain, strip[:top_end, :], label, max_dim=384)
+    v_bot = see_probability(brain, strip[bot_start:, :], label, max_dim=384)
+    if max(v_top, v_bot) < 0.5:
+        return None
+    # Floor-flat only when absent from the upper half: standing objects visible in both halves (umbrella 89%/100%) stay 3D.
+    on_floor = v_bot >= 0.5 and v_top < 0.35
+    y0, y1 = (bot_start, h) if on_floor else (0, max(1, int(0.60 * h))) if v_top > v_bot + 0.10 else (0, h)
+    x0 = max(0, int(round((u_center - 0.25 * span) * w)))
+    x1 = min(w, max(x0 + 1, int(round((u_center + 0.25 * span) * w))))
+    return (x0, y0, x1, y1), on_floor
+
+
+def place_picture(rgb: np.ndarray, cam: Any, bx: float, by: float, radius: float) -> np.ndarray | None:
+    """The part of a picture where a thing mapped at robot-frame (bx, by) should be, PLACE_SLACK metres wider each
+    way for its mapped place being a little off; None where it falls outside the picture."""
+    cam = cam.at(rgb.shape[1], rgb.shape[0])
+    middle = cam.project(bx, by, radius)  # half way up a thing about as tall as it is wide
+    if middle is None:
+        return None
+    half = cam.focal * (radius + PLACE_SLACK) / max(0.1, math.hypot(bx - cam.x, by - cam.y))
+    (u, v), (h, w) = middle, rgb.shape[:2]
+    x1, x2, y1, y2 = int(max(0, u - half)), int(min(w, u + half)), int(max(0, v - half)), int(min(h, v + half))
+    return rgb[y1:y2, x1:x2].copy() if x2 - x1 >= 16 and y2 - y1 >= 16 else None
+
+
 def taken_with(buffer: deque, t: float, within: float) -> tuple[Any, float]:
-    """The item in a (stamp, item) buffer taken nearest to time t, and how much later it was taken; (None, 0) when
-    nothing is within `within` seconds."""
+    """Nearest item and signed stamp difference; no item outside the tolerance, (None, 0) for an empty buffer."""
     if not buffer:
         return None, 0.0
     stamp, item = min(list(buffer), key=lambda s: abs(s[0] - t))
@@ -220,8 +300,8 @@ class SyntheticScanPublisher:
 
     def __init__(self, node: Any = None, publish_topic: str = "/scan", publish: bool = True) -> None:
         self.publish = publish
-        self.cam_depths: dict[str, deque[tuple[float, tuple[Any, np.ndarray]]]] = {n: deque(maxlen=12) for n in RIG}
-        self.depths = self.cam_depths["front_camera"]
+        self.cam_depths: dict[str, deque[tuple[int, np.ndarray]]] = {n: deque(maxlen=12) for n in RIG}
+        self._depth_ready = threading.Condition()
         self.tof_grids: dict[str, np.ndarray] = {}
         self.hazards: dict[str, StepHazard] = {}
         self.tilts: deque[tuple[float, float, float]] = deque(maxlen=400)  # stamp s, roll, pitch (rad)
@@ -354,6 +434,15 @@ class SyntheticScanPublisher:
     def _depth(self, name: str, msg: Any) -> None:
         self.ingest_depth(name, msg.header.stamp, _image(msg))
 
+    def depth_for(self, name: str, stamp: Any) -> tuple[np.ndarray | None, float]:
+        """Depth for this exposure only: a 0.2 s old image was 9 degrees off during a turn.
+        The depth node copies the RGB stamp. Once it publishes a later frame, this one was skipped."""
+        buf, t = self.cam_depths[name], _nanoseconds(stamp)
+        with self._depth_ready:
+            self._depth_ready.wait_for(lambda: buf and buf[-1][0] >= t, timeout=0.15)
+            depth, gap = taken_with(buf, t, 0)
+        return depth, gap * 1e-9
+
     def ingest_depth(self, name: str, stamp: Any, depth: np.ndarray) -> tuple[np.ndarray, float, float] | None:
         """Keep a camera's metric depth (for ranging what the detector finds); when publishing, add its sector to
         /scan. Each sector is made at its own picture's moment and carried to the newest one by the odometry: the
@@ -361,8 +450,9 @@ class SyntheticScanPublisher:
         if name not in self.cam_depths:
             return None
         t = _seconds(stamp)
-        with self._lock:
-            self.cam_depths[name].append((t, (stamp, depth)))
+        with self._depth_ready:
+            self.cam_depths[name].append((_nanoseconds(stamp), depth))
+            self._depth_ready.notify_all()
         if not self.publish:
             return None
         roll, pitch = self.tilt_at(stamp)
@@ -411,18 +501,17 @@ class Perception:
         self.frames: dict[str, tuple[Any, np.ndarray]] = {}
         self.fresh: set[str] = set()
         # Share metric-calibrated 3-CSI depth, ToF, IMU tilt and synthetic /scan buffers with SyntheticScanPublisher.
-        self.cam_depths = self.scan_bridge.cam_depths
-        self.depths = self.scan_bridge.depths
         self.tof_grids = self.scan_bridge.tof_grids
         self.scans = self.scan_bridge.scans
         self.depth_pairs: deque[float] = deque(maxlen=500)  # 0 when a frame found its depth image, else how far off
         self.crops: dict[int, np.ndarray] = {}
+        self.doubts: dict[int, tuple[str, np.ndarray]] = {}  # track id -> its label and the picture of its place
         self.past: deque[tuple[float, np.ndarray]] = deque(maxlen=PAST_KEPT)  # front pictures, 2 a second
         self.boxes: dict[str, list[tuple[tuple[int, int, int, int], int]]] = {}  # camera -> latest (box, track id)
         self.timings: list[float] = []
-        self.counts: dict[str, int] = {}  # frames processed per camera
+        self.looks: dict[str, Counter] = {}  # frames processed per camera, by each word the detector looked for
         self.served: dict[str, float] = {}  # when each camera's frame was last taken for detection
-        self.detected: dict[str, np.ndarray] = {}  # camera -> the frame the detector last ran on
+        self.detected: dict[str, tuple[float, np.ndarray]] = {}  # camera -> capture time, RGB paired with its boxes
         # every sighting: monotonic time, camera, track, map x, y, how its range was found, robot x, y, depth lag (s)
         self.sightings: deque[tuple] = deque(maxlen=2000)
         self.tilts = self.scan_bridge.tilts
@@ -510,58 +599,43 @@ class Perception:
                 print(f"perception: {name}: {exc}", flush=True)
 
     def _verify_loop(self) -> None:
+        """The vision model's yes or no on a picture, for a new thing the detector named (yes keeps it, no drops it:
+        YOLOE fires on an asked word too easily, black panels as "tv", 12% of ball-free pictures as "ball"; renaming
+        a no to another of the few asked words instead turned a false "tv" into a "sofa"), and for a thing the
+        detector stopped finding where it is mapped, shown that place (no: gone; yes: still there). On the detector's
+        misses alone the robot gave up real things mid-approach, seen up close or from aside: a bike seen 110 times,
+        a plant 53 times, beanbags; false ones it named from afar (a table as "tv") go as before, on the model's no."""
         while not self._stop:
+            # New things first: tools drive to them, and a doubted thing stays until it is answered. Asked after the
+            # doubts, the bike YOLOE called an umbrella (the model's yes to that crop: 0%) was driven to unchecked.
             with self.lock:
                 track = self.tracker.to_name(self.crops)
-                crop = self.crops.get(track.id) if track is not None else None
-            if track is None:
+                doubt = next(iter(self.doubts), None) if track is None else None
+                if track is not None:
+                    label = track.votes.most_common(1)[0][0] if track.votes else track.label
+                    picture = self.crops[track.id]
+                elif doubt is not None:
+                    label, picture = self.doubts[doubt]
+            if doubt is None and track is None:
                 time.sleep(0.2)
                 continue
-            guess = track.votes.most_common(1)[0][0] if track.votes else track.label
-            # the vision model checks the detector's word on the crop: yes keeps it, no drops the thing. YOLOE fires
-            # on an asked word too easily (black panels as "tv", 12% of ball-free pictures as "ball"); renaming a
-            # no to another of the few asked words instead turned a false "tv" into a "sofa"
             try:
-                question = f"Is there a {guess} in the middle of this picture? Answer yes or no."
-                yes = self.brain.yes_probability(_with_image(data_url(crop), question)) >= 0.5
+                yes = is_there(self.brain, picture, label)
             except Exception as exc:  # noqa: BLE001 - unchecked when the model is unreachable: asked again later
-                print(f"perception: checking {track.label} {track.id}: {exc}", flush=True)
+                print(f"perception: checking {label}: {exc}", flush=True)
                 time.sleep(1.0)
                 continue
             with self.lock:
-                self.tracker.verify(track, guess if yes else None, pixels(crop), sure=yes)
-
-    def _depth_for(self, name_or_stamp: Any, stamp_or_pose: Any = None,
-                   maybe_pose: tuple[float, float, float] | None = None) -> tuple[np.ndarray | None, float]:
-        """The depth image seen from where the colour frame was: taken within 30 ms of it, or taken while the robot
-        stood (moved under 1 cm and half a degree in between). The depth stream runs slower than the colour one,
-        so only one colour frame in four had a depth image of its own moment; standing still, any recent one serves,
-        while turning a mismatched one would read the wrong pixels. Waits briefly for a depth image still on its way."""
-        if maybe_pose is not None:
-            name, stamp, pose = name_or_stamp, stamp_or_pose, maybe_pose
-        elif isinstance(name_or_stamp, str):
-            name, stamp, pose = name_or_stamp, stamp_or_pose, (0.0, 0.0, 0.0)
-        else:
-            name, stamp, pose = "front_camera", name_or_stamp, stamp_or_pose
-        buf = self.cam_depths.get(name, self.depths)
-        t, waited = _seconds(stamp), time.monotonic()
-        while True:
-            depth, gap = taken_with(buf, t, 0.08)
-            if depth is not None:
-                return depth[1], gap
-            near, gap = taken_with(buf, t, 0.3)
-            if near is not None:
-                then = self.pose_at(near[0])
-                moved_little = (
-                    then is not None
-                    and math.dist(then[:2], pose[:2]) < 0.01
-                    and abs(math.atan2(math.sin(then[2] - pose[2]), math.cos(then[2] - pose[2]))) < math.radians(0.5)
-                )
-                if moved_little or abs(self.turn_rate) < 0.05:
-                    return near[1], gap
-            if time.monotonic() - waited > 0.15:
-                return None, gap
-            time.sleep(0.01)
+                if track is not None:
+                    self.tracker.verify(track, label if yes else None, pixels(picture), sure=yes)
+                    continue
+                del self.doubts[doubt]
+                doubted = self.tracker.tracks.get(doubt)
+                if doubted is not None and doubted.misses >= GONE_AFTER:  # not seen again while the model looked
+                    if yes:
+                        doubted.misses = 0
+                    else:
+                        doubted.present = False
 
     def process(self, name: str) -> None:
         stamp, rgb = self.frames[name]
@@ -570,18 +644,19 @@ class Perception:
             return
         cam = RIG[name]
         started = time.perf_counter()
+        words = list(getattr(self.detector, "vocabulary", ()))  # this frame's words: one asked for from now on is not
         seen = self.detector(rgb)
         self.timings = (self.timings + [time.perf_counter() - started])[-20:]
-        self.counts[name] = self.counts.get(name, 0) + 1
+        self.looks.setdefault(name, Counter()).update(words)
         t = _seconds(stamp)
         roll, pitch = self.tilt_at(stamp)
-        depth, gap = self._depth_for(name, stamp, pose)  # gap: how much later the depth estimate's frame was taken
-        self.depth_pairs.append(gap if depth is None else 0.0)  # for the report: misses and how far off
+        depth, gap = self.scan_bridge.depth_for(name, stamp)
+        self.depth_pairs.append(gap)
         if depth is not None and depth.shape != rgb.shape[:2]:  # estimated smaller: one value per block of pixels
             ky, kx = rgb.shape[0] // depth.shape[0], rgb.shape[1] // depth.shape[1]
             depth = np.repeat(np.repeat(depth, ky, axis=0), kx, axis=1)
         scan, _ = taken_with(self.scans, t, 0.3)  # /scan from the depth node, near this frame's moment
-        detections, boxes, hows = [], {}, {}
+        detections, hows = [], {}
         for s in seen:
             x1, y1, x2, y2 = (int(v) for v in s.box)
             cut = x1 <= 4 or x2 >= rgb.shape[1] - 4
@@ -614,31 +689,38 @@ class Perception:
             is_person = canonical(s.label) == "person"
             human_pose = (estimate_pose_from_keypoints(s.keypoints, cam, reach, pose)
                           if is_person and getattr(s, "keypoints", None) is not None else None)
+            ray = math.atan2(place.y - cam.y, place.x - cam.x) + pose[2] if cut else 0.0
             detection = Detection(s.label, mx, my, place.radius, colour.name(core), s.score, name, cut, sigma,
                                   look(core) if is_person else None,
                                   width=place.width, depth_extent=place.depth_extent,
-                                  orientation_yaw=place.orientation_yaw, pose=human_pose)
+                                  orientation_yaw=place.orientation_yaw, pose=human_pose, box=(x1, y1, x2, y2),
+                                  normal=(-math.sin(ray), math.cos(ray)) if cut else None)
             detections.append(detection)
-            boxes[id(detection)] = (x1, y1, x2, y2)
             hows[id(detection)] = place.how
         now = time.monotonic()
         with self.lock:
             pairs = self.tracker.update(detections, now)
             matched = {id(t) for _, t in pairs}
-            self.boxes[name] = [(boxes[id(det)], track.id) for det, track in pairs]
-            self.detected[name] = rgb  # the picture those boxes belong to (the newest may be a later one)
-            self.sightings.extend((now, name, track.id, det.x, det.y, hows[id(det)], pose[0], pose[1], gap)
-                                  for det, track in pairs)
-            for det, track in pairs:  # pairs come sorted by score: find each detection's own box
+            # A split outline is one object. Keep all its pixels but only one badge and verification crop.
+            boxes = {}
+            for det, track in pairs:
                 if det.pose is not None:
                     track.pose = det.pose
-                if det.cut and track.id in self.crops:
+                x, y, xx, yy = det.box
+                left, top, right, bottom = boxes.get(track.id, det.box)
+                boxes[track.id] = (min(left, x), min(top, y), max(right, xx), max(bottom, yy))
+            self.boxes[name] = [(box, tid) for tid, box in boxes.items()]
+            self.detected[name] = (t, rgb)
+            self.sightings.extend((now, name, track.id, det.x, det.y, hows[id(det)], pose[0], pose[1], gap)
+                                  for det, track in pairs)
+            for tid, box in boxes.items():
+                if (box[0] <= 4 or box[2] >= cam.width - 4) and tid in self.crops:
                     continue  # a part of the thing makes a poor picture of it; keep the whole one
-                x1, y1, x2, y2 = boxes[id(det)]
-                self.crops[track.id] = _only(rgb, (x1, y1, x2, y2), [boxes[id(d)] for d, _ in pairs if d is not det])
-            watched = {canonical(w) for w in getattr(self.detector, "vocabulary", ())}
+                self.crops[tid] = _only(rgb, box, [b for i, b in boxes.items() if i != tid])
+            watched = {canonical(w) for w in words}
             for track in self.tracker.objects():  # negative evidence: viewed clearly, not seen, while looked for
-                if id(track) in matched or not track.present or track.person or canonical(track.label) not in watched:
+                if (id(track) in matched or not track.present or track.person or track.visual
+                        or canonical(track.label) not in watched):
                     continue  # (a ball seen while asked for is not gone because the detector stopped looking)
                 bx, by = to_robot(pose, track.x, track.y)
                 dist = math.hypot(bx, by)
@@ -650,24 +732,27 @@ class Perception:
                 scan_r = lidar_range(self.scan, math.atan2(by, bx))
                 if scan_r is not None and scan_r < dist - track.radius - 0.3:  # something nearer hides it
                     continue
-                self.tracker.missed(track, now)
+                if self.tracker.missed(track, now):
+                    where = place_picture(rgb, cam, bx, by, track.radius) if self.brain is not None else None
+                    if where is None:
+                        track.present = False
+                    else:
+                        self.doubts.setdefault(track.id, (track.label, where))
 
-    def render_annotated_view(self, camera: str = "front_camera", width: int = 0, height: int = 0,
-                              newest: bool = False) -> np.ndarray | None:
-        """A frame from `camera` with the tracker's ids on its boxes: the frame the detector last ran on, so the boxes
-        fit it (what the model gets), or with `newest` the newest frame (for people watching: the boxes may trail
-        a little while the robot turns)."""
+    def render_annotated_view(self, camera: str, width: int, height: int, min_stamp: float) -> np.ndarray | None:
+        """Show badges only on their own recent exposure. If detection stalls, show current unmarked RGB instead."""
         with self.lock:
-            rgb = None if newest else self.detected.get(camera)
-            if rgb is None:
+            frame = self.detected.get(camera)
+            if frame is not None and frame[0] >= min_stamp:
+                rgb = frame[1]
+                raw_boxes = list(self.boxes.get(camera, ()))
+            else:
                 frame = self.frames.get(camera)
-                rgb = frame[1] if frame is not None else None
-            raw_boxes = list(self.boxes.get(camera, ()))
+                if frame is None or _seconds(frame[0]) < min_stamp:
+                    return None
+                rgb, raw_boxes = frame[1], []
             labels_by_id = {t.id: t.label for t in self.tracker.tracks.values()}
             rejected = {t.id for t in self.tracker.tracks.values() if t.rejected}
-        if rgb is None:
-            return None
-
         orig_h, orig_w = rgb.shape[:2]
         target_w = width if width > 0 else orig_w
         target_h = height if height > 0 else (int(round(target_w * 9 / 16)) if width > 0 else orig_h)

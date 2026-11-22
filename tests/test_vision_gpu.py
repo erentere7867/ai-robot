@@ -4,13 +4,19 @@ feet, and the tools that point at a floor spot or look back."""
 from __future__ import annotations
 
 import importlib.util
+import threading
+from contextlib import closing
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
+import pytest
 
 from robot.agent.agent import Agent
 from robot.eval.suite import living_room
 from robot.perception.detector import Detector, _box_mask, _foot
+from robot.perception.gpu import VisionServer
 from robot.sim.world import SimRobot
 from tests.test_agent import Scripted, call, say, tool_results
 
@@ -18,6 +24,24 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("vision_server", ROOT / "tools" / "vision_server.py")
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
+
+
+def test_streamed_pixels_round_trip_through_the_real_http_handler():
+    models = Mock(slots=8, times={})
+    models.yoloe.get_providers.return_value = []
+    models.run_depth.side_effect = lambda rgb: {"inverse": rgb[..., 0].astype(np.float16)}
+    with ThreadingHTTPServer(("127.0.0.1", 0), server.handler(models)) as http:
+        threading.Thread(target=http.serve_forever, daemon=True).start()
+        try:
+            client = VisionServer(f"http://127.0.0.1:{http.server_port}")
+            with closing(client.http):
+                image = np.arange(256 * 256 * 3, dtype=np.uint8).reshape(256, 256, 3)
+                assert np.array_equal(client.depth(image), image[..., 0])
+                models.run_depth.side_effect = ValueError("bad depth input")
+                with pytest.raises(RuntimeError, match="bad depth input"):
+                    client.depth(image)
+        finally:
+            http.shutdown()
 
 
 def _raw(boxes: list[tuple[float, float, float, float]], scores: list[list[float]], slots: int = 3):
@@ -135,8 +159,6 @@ def test_a_flickering_thing_is_not_gone_until_unseen_for_a_while():
     tr.update([Detection("plant", 1.0, 0.0, 0.3)], 9.5)
     tr.update([Detection("plant", 1.0, 0.0, 0.3)], 10.0)  # seen twice: a thing, not a one-frame blip
     plant = tr.objects()[0]
-    for _ in range(GONE_AFTER + 2):  # two cameras missing it for a few frames, a second after it was seen
-        tr.missed(plant, 11.0)
-    assert plant.present
-    tr.missed(plant, 10.0 + GONE_S + 0.1)
-    assert not plant.present
+    # two cameras missing it for a few frames, a second after it was seen
+    assert not any([tr.missed(plant, 11.0) for _ in range(GONE_AFTER + 2)])
+    assert tr.missed(plant, 10.0 + GONE_S + 0.1)

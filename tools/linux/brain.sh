@@ -33,8 +33,8 @@ else
 fi
 [ -f "$MODEL" ] || { echo "missing model: $MODEL (see tools/linux/setup_models.sh)"; exit 1; }
 [ -f "$MMPROJ" ] || { echo "missing vision projector: $MMPROJ (see tools/linux/setup_models.sh)"; exit 1; }
-nohup "$bin" -m "$MODEL" --mmproj "$MMPROJ" $gpu -c 32768 -np 2 --jinja --swa-full --port 8081 -t "$threads" \
-  > ~/llama-wsl.log 2>&1 &
+nohup "$bin" -m "$MODEL" --mmproj "$MMPROJ" $gpu -c 32768 -np 2 --jinja --swa-full --reasoning-budget 128 --port 8081 \
+  -t "$threads" > ~/llama-wsl.log 2>&1 &
 echo "starting LFM3-VL-2B on the $where ($MODEL)..."
 for _ in $(seq 1 120); do curl -s http://127.0.0.1:8081/health | grep -q ok && break; sleep 2; done
 if curl -s http://127.0.0.1:8081/health | grep -q ok; then echo "the model is ready on port 8081"

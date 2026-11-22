@@ -35,16 +35,21 @@ class Seen:
     mask: np.ndarray | None = None  # bool, the box's size: which of its pixels are the thing
 
 
+MAX_ASKED = 3  # keep only the 3 most recent asked words active so old requests stop spawning stale false tracks
+
+
 class Detector:
     def __init__(self, server: Any = None, text_weights: str = "yoloe-26l-seg.pt", always: tuple[str, ...] = ALWAYS,
-                 confidence: float = 0.22, pose_weights: str = "yolo26n-pose.pt") -> None:
+                 confidence: float = 0.22, pose_weights: str = "yolo26n-pose.pt",
+                 max_asked: int = MAX_ASKED) -> None:
         """`server`: the GPU vision server (a VisionServer; one is made when None). It has a fixed number of word
-        slots; the words asked for most recently fill the ones `always` leaves."""
+        slots; the words asked for most recently fill the ones `always` leaves (capped at `max_asked`)."""
         from robot.perception.gpu import VisionServer
 
         self.server = server if server is not None else VisionServer()
         self.always = [w.lower() for w in always]
         self.asked: list[str] = []  # newest last
+        self.max_asked = max_asked
         self.confidence = confidence
         self.text_weights, self.pose_weights = text_weights, pose_weights
         self._features: dict[str, np.ndarray] = {}
@@ -64,7 +69,8 @@ class Detector:
                 self.asked.remove(w)
             self.asked.append(w)
             self._feature(w)  # made now, not on the next frame
-        del self.asked[:max(0, len(self.asked) - (self.server.slots - len(self.always)))]
+        cap = min(self.max_asked, max(0, self.server.slots - len(self.always)))
+        del self.asked[:max(0, len(self.asked) - cap)]
 
     def _feature(self, word: str) -> np.ndarray:
         if word not in self._features:

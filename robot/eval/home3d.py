@@ -67,22 +67,22 @@ def out_dir() -> Path:
 
 
 def keep_pictures(robot: Any, folder: Path) -> list[tuple[float, str]]:
-    """Save every picture the model is given (the agent takes them with camera_view) as numbered JPEGs, so what it
-    said it saw can be checked against what it was shown; the list fills with (simulated time, file name)."""
+    """Save camera views and object evidence as numbered JPEGs; the report shows which track produced a crop."""
     import cv2
 
     folder.mkdir(parents=True, exist_ok=True)
     view, kept = robot.camera_view, []
 
-    def saving(camera: str = "front_camera", width: int = 512, height: int = 288) -> Any:
-        frame = view(camera, width, height)
+    def save(label: str, frame: Any) -> Any:
         if frame is not None and getattr(frame, "size", 0):
-            name = f"{len(kept) + 1:03d}_{camera}.jpg"
+            name = f"{len(kept) + 1:03d}_{label}.jpg"
             cv2.imwrite(str(folder / name), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             kept.append((round(robot.t, 1), name))
         return frame
 
-    robot.camera_view = saving
+    robot.camera_view = lambda camera="front_camera", width=512, height=288: save(camera, view(camera, width, height))
+    if crop := getattr(robot, "target_crop", None):
+        robot.target_crop = lambda i: save(f"candidate_{i}", crop(i))
     return kept
 
 
@@ -171,7 +171,8 @@ def says_number(text: str, n: int) -> bool:
 
 
 def says_no(text: str) -> bool:
-    return bool(re.search(r"\b(no|not|n't|cannot|unable)\b", text)) and not re.search(r"\byes\b", text)
+    low = text.lower().replace("’", "'")
+    return bool(re.search(r"\b(no|not|cannot|unable)\b|n't\b", low)) and not re.search(r"\byes\b", low)
 
 
 def says_cannot(text: str) -> bool:
@@ -277,7 +278,7 @@ def start_facts(home: Home) -> dict:
 
 
 def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: str, think: str,
-        rtf: float, review: bool = True, think_when: str = "always", live_port: int = 0) -> list[dict]:
+        rtf: float, review: bool = False, think_when: str = "always", live_port: int = 0) -> list[dict]:
     from robot.agent.agent import Agent
     from robot.mind.brain import Brain
     from robot.perception.detector import Detector
@@ -384,16 +385,16 @@ def main() -> None:
     parser.add_argument("--brain", default="http://127.0.0.1:8081")
     parser.add_argument("--cameras", choices=("front", "all", "none"), default="all",
                         help="pictures with each request; none: the object list only, pictures when it looks")
-    parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="medium",
+    parser.add_argument("--think", choices=("off", "low", "medium", "high"), default="low",
                         help="how long the model may reason before each turn")
     parser.add_argument("--rtf", type=float, default=0.33, help="simulated seconds per wall-clock second")
-    parser.add_argument("--no-review", action="store_true", help="end a task on the model's first plain reply")
+    parser.add_argument("--review", action="store_true", help="ask the model for a second check before finishing")
     parser.add_argument("--think-when", choices=("always", "news"), default="always",
                         help="news: reason only after the request, the user's words or a failed call")
     parser.add_argument("--live", type=int, default=0, metavar="PORT",
                         help="serve the live page on this port to watch the run (0: off)")
     args = parser.parse_args()
-    run(args.tag, args.only, args.scenes, args.brain, args.cameras, args.think, args.rtf, not args.no_review,
+    run(args.tag, args.only, args.scenes, args.brain, args.cameras, args.think, args.rtf, args.review,
         args.think_when, args.live)
 
 

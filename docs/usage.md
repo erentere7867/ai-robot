@@ -59,6 +59,16 @@ powershell -ExecutionPolicy Bypass -File tools\demo.ps1           # or both of t
 powershell -ExecutionPolicy Bypass -File tools\brain.ps1 -Stop    # stop the model; tools\win\vision.ps1 -Stop for the other
 ```
 
+To control the simulator from a second device on a trusted LAN, pass `--host 0.0.0.0` to `tools\demo.ps1`
+or `python -m robot.interfaces.demo`. Open `http://<PC-LAN-IP>:8765` on that device, not `0.0.0.0`.
+The dashboard has no authentication. Keep it off public networks; without the flag it listens only on loopback.
+
+If model turns suddenly slow down on the RX 6600, check `eval time` in `%TEMP%\sprocket-llama.log` (generation,
+not `prompt eval time`). In one apartment session it fell from about 60 to 10 tokens/s while llama-server held
+1.9 GiB of shared GPU memory. Restarting llama-server alone did not help. With the demo stopped, stop **both**
+Windows servers, start `tools\brain.ps1`, wait until ready, then start `tools\win\vision.ps1` and the demo.
+With the original full-GPU settings, a three-camera turn then generated 541 tokens at 59 tokens/s.
+
 ## Tests and lint (in WSL, from the repo)
 
 How to test a change, and how to set up a plain Linux machine for it: [testing.md](testing.md).
@@ -93,9 +103,10 @@ dependencies and the model files from setup above.
 
 To compare model-server settings, restart the model server before each run and use `--only agent` with the same
 sample and warmup counts. The Linux launcher defaults to half the available cores, rounded up. On an idle CPU-only
-8-vCPU Xeon with llama.cpp b11960, setting `SPROCKET_BRAIN_THREADS=8` instead of four threads reduced agent p95 from
-139 s to 105 s over 12 requests. The override does not affect GPU launchers. More threads can take CPU away from
-perception or ROS, so measure with the rest of the stack before using it on the robot.
+8-vCPU Xeon with llama.cpp b11960 and the original agent and server settings (`a755aca`), setting
+`SPROCKET_BRAIN_THREADS=8` instead of four threads reduced agent p95 from 139 s to 105 s over 12 requests. The
+override does not affect GPU launchers. More threads can take CPU away from perception or ROS, so measure with
+the rest of the stack before using it on the robot.
 
 ## The 3D apartment
 
