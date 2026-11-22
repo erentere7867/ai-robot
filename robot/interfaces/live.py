@@ -15,6 +15,7 @@ It listens on this computer only by default: the page can command the robot.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import threading
@@ -22,7 +23,9 @@ from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+from robot.interfaces.viewer3d import VIEWER_JS
 
 
 @dataclass
@@ -53,6 +56,10 @@ class State:
     voice: bool = False
     heard: str = ""
     said_total: int = 0
+    true_pose: tuple[float, float, float] | None = None
+    true_trail: list[tuple[float, float]] = field(default_factory=list)
+    dock: tuple[float, float, float] | None = None
+    true_objects: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Live:
@@ -63,8 +70,10 @@ class Live:
         self.inbox: queue.Queue[tuple[str, str]] = queue.Queue()  # ("instruct", text), ("stop", ""), ("scene", name)
         self.camera: Any = None  # name -> PNG bytes or None, for multi-camera panel
         self.files: Any = None  # a folder served at /runs/ (the 3D eval's reports), or None
+        self.world3d: Any = None  # optional () -> 3D scene manifest dict for the WebGL viewer
         self.ears: Any = None
         self.mouth: Any = None
+        self._assets: dict[str, Path] = {}
         self._lock = threading.Lock()
 
     def update(self, **changes: Any) -> None:
@@ -78,7 +87,44 @@ class Live:
         with self._lock:
             return json.dumps(asdict(self.state), default=str)
 
-    def show_world(self, sim: Any) -> None:
+    def scene_3d_payload(self) -> dict[str, Any]:
+        """Build the /scene3d JSON manifest and whitelist any local GLB assets it references."""
+        raw = self.world3d() if self.world3d is not None else None
+        if not raw or raw.get("mode") != "3d":
+            out: dict[str, Any] = {"mode": "2d"}
+            if raw and raw.get("slam"):
+                out["slam"] = raw["slam"]
+            return out
+
+        def asset_url(path_str: str | None) -> str | None:
+            if not path_str:
+                return None
+            p = Path(path_str)
+            if not p.is_file():
+                return None
+            key = f"{hashlib.sha1(path_str.encode()).hexdigest()[:10]}_{p.name}"
+            with self._lock:
+                self._assets[key] = p
+            return f"/assets/{key}"
+
+        instances = []
+        for inst in raw.get("instances", ()):
+            url = asset_url(inst.get("path"))
+            if url:
+                instances.append({"url": url, "mat": inst["mat"]})
+        payload: dict[str, Any] = {
+            "mode": "3d",
+            "cx": raw["cx"],
+            "cy": raw["cy"],
+            "ground_y": raw["ground_y"],
+            "stage": asset_url(raw.get("stage")),
+            "instances": instances,
+        }
+        if raw.get("slam"):
+            payload["slam"] = raw["slam"]
+        return payload
+
+    def show_world(self, sim: Any, home: Any = None) -> None:
         """Copy the robot pose, trail, objects, walls, and speech from a SimRobot (or RosRobot)."""
         scene = sim.scene
         w, h = scene.width, scene.height
@@ -133,6 +179,17 @@ class Live:
             changes["posture"] = sim.posture
         if hasattr(sim, "search_log"):  # a search running now: where the model thinks the thing is, stop by stop
             changes["searching"] = list(sim.search_log)
+        if home is not None and hasattr(home, "truth") and hasattr(home, "path"):
+            path = list(home.path)
+            if path:
+                changes["true_pose"] = (round(path[-1][1], 3), round(path[-1][2], 3), round(path[-1][3], 4))
+                changes["true_trail"] = [(round(x, 2), round(y, 2)) for _, x, y, _ in path[-1500::5]]
+            changes["dock"] = tuple(round(float(v), 4) for v in home.dock())
+            changes["true_objects"] = [
+                {"label": o["label"], "x": round(o["x"], 2), "y": round(o["y"], 2),
+                 "r": round(o["radius"], 2), "height": o["height"]}
+                for o in home.truth.get("objects", ())
+            ]
         self.update(**changes)
 
     def hear(self, audio: bytes) -> None:
@@ -157,13 +214,13 @@ class Live:
         class Handler(BaseHTTPRequestHandler):
             timeout = 5.0
 
-            def _send(self, body: bytes, kind: str, status: int = 200) -> None:
+            def _send(self, body: bytes, kind: str, status: int = 200, cache: str = "no-store") -> None:
                 try:
                     self.send_response(status)
                     self.send_header("Content-Type", kind)
                     if status != 204:
                         self.send_header("Content-Length", str(len(body)))
-                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Cache-Control", cache)
                     self.end_headers()
                     if body and status != 204:
                         self.wfile.write(body)
@@ -204,6 +261,21 @@ class Live:
                     if text:
                         self._send(live.mouth.say(text), "audio/wav")
                         return
+                if self.path.startswith("/viewer3d.js"):
+                    self._send(VIEWER_JS.encode("utf-8"), "application/javascript; charset=utf-8")
+                    return
+                if self.path.startswith("/scene3d"):
+                    self._send(json.dumps(live.scene_3d_payload()).encode("utf-8"), "application/json")
+                    return
+                if self.path.startswith("/assets/"):
+                    key = unquote(urlparse(self.path).path.removeprefix("/assets/"))
+                    with live._lock:
+                        asset = live._assets.get(key)
+                    if asset is not None and asset.is_file():
+                        self._send(asset.read_bytes(), "model/gltf-binary", cache="public, max-age=86400")
+                    else:
+                        self._send(b"not found", "text/plain", 404)
+                    return
                 if self.path.startswith("/state"):
                     self._send(live.snapshot().encode("utf-8"), "application/json")
                 else:
@@ -290,6 +362,19 @@ button.stop{background:var(--bad)}.cams{display:grid;gap:8px;grid-template-colum
 .reply-tag{display:inline-block;padding:2px 8px;border-radius:4px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;letter-spacing:.05em}
 .reply[hidden],.badge[hidden]{display:none}
 #reply-text{font-weight:500;line-height:1.4}
+.map-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.map-head h2{margin:0}
+.map-tabs,.bar3d{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.bar3d{margin-bottom:8px;font-size:12px}
+button.tab{padding:3px 9px;font-size:12px;border-radius:6px;background:var(--bg);color:var(--ink);border:1px solid var(--line)}
+button.tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.sep{width:1px;height:16px;background:var(--line);margin:0 2px}
+.cut-ctl{display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:12px;margin-left:2px}
+.cut-ctl input{width:76px;min-width:0;padding:0;accent-color:var(--accent)}
+.stage3d{position:relative;width:100%;aspect-ratio:4/3;border-radius:8px;overflow:hidden;background:var(--bg)}
+.stage3d canvas{position:absolute;inset:0;width:100%;height:100%;aspect-ratio:auto;display:block;touch-action:none;background:transparent}
+#labels3d{cursor:grab}#labels3d:active{cursor:grabbing}
+.hint3d{position:absolute;left:8px;bottom:6px;padding:2px 7px;border-radius:5px;background:rgba(0,0,0,.45);color:#fff;font-size:11px;pointer-events:none}
+#mapsec.expanded3d{grid-column:1/-1}#mapsec.expanded3d .stage3d{aspect-ratio:auto;height:72vh}
 </style></head><body><main>
 <section class="wide">
 <h1 id="instruction">Tell the robot what to do</h1>
@@ -328,9 +413,35 @@ Faded objects are remembered.</div>
 <ol id="searching" class="steps"></ol>
 </section>
 
-<section>
-<h2>Map</h2>
-<canvas id="map" width="800" height="600"></canvas>
+<section id="mapsec">
+<div class="map-head"><h2>Map</h2><div class="map-tabs">
+<button type="button" class="tab active" id="mode-3d" onclick="setMapMode('3d')">3D View</button>
+<button type="button" class="tab" id="mode-2d" onclick="setMapMode('2d')">2D Map</button>
+<button type="button" class="tab" id="btn-expand-map">Expand</button>
+</div></div>
+<div id="view3d-wrap">
+<div class="bar3d">
+<button type="button" class="tab" id="cam-orbit" title="Free orbit camera">Orbit</button>
+<button type="button" class="tab" id="cam-follow" title="Follow robot">Follow</button>
+<button type="button" class="tab" id="cam-chase" title="3rd-person view behind robot">Chase</button>
+<button type="button" class="tab" id="cam-top" title="Top-down floorplan">Top</button>
+<button type="button" class="tab" id="cam-reset" title="Reset camera (R)">Reset</button>
+<span class="sep"></span>
+<button type="button" class="tab" id="tog-fov" title="Camera FOV cones">FOV</button>
+<button type="button" class="tab" id="tog-trail" title="Robot path trails">Trail</button>
+<button type="button" class="tab" id="tog-beliefs" title="Believed objects">Beliefs</button>
+<button type="button" class="tab" id="tog-slam" title="SLAM occupancy map">SLAM</button>
+<button type="button" class="tab" id="tog-labels" title="3D labels">Labels</button>
+<label class="cut-ctl" title="Slice walls and ceiling height">Cut <input type="range" id="cut-z" min="1.2" max="3.5" step="0.05" value="2.35"><span id="cut-z-val">2.4m</span></label>
+<span id="status3d" class="muted"></span>
+</div>
+<div class="stage3d">
+<canvas id="view3d"></canvas>
+<canvas id="labels3d"></canvas>
+<div class="hint3d">Drag: orbit · Right/Shift-drag: pan · Scroll: zoom · WASD/QE: fly · F: focus · R: reset</div>
+</div>
+</div>
+<canvas id="map" width="800" height="600" hidden></canvas>
 </section>
 
 
@@ -485,6 +596,11 @@ const status=$('status');
 if(status.textContent!==text)status.textContent=text;
 status.className='status '+style;
 }
+function setMapMode(m){
+const v3=m==='3d';
+$('view3d-wrap').hidden=!v3;$('map').hidden=v3;
+if($('mode-3d').classList){$('mode-3d').classList.toggle('active',v3);$('mode-2d').classList.toggle('active',!v3)}
+}
 function render(s,picksSeen){
 $('instruction').textContent=s.instruction||'Tell the robot what to do';
 showStatus(s.status||'idle');
@@ -532,6 +648,7 @@ if($('scene').value!==room)$('scene').value=room;
 $('scene').disabled=!!s.scene_loading;
 }
 draw(s);
+if(typeof window!=='undefined'&&window.sprocket3d)window.sprocket3d.update(s);
 voice(s);
 cams(s);
 }
@@ -655,4 +772,4 @@ setTimeout(pollLoop,350);
 }
 }
 pollLoop();
-</script></body></html>"""
+</script><script src="/viewer3d.js" defer></script></body></html>"""

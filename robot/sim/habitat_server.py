@@ -26,6 +26,7 @@ import queue
 import re
 import sys
 import threading
+import xml.etree.ElementTree as ET
 from multiprocessing.connection import Listener
 
 import habitat_sim
@@ -59,8 +60,27 @@ def _hab_offset(forward: float, left: float, up: float) -> list:
     return [-left, up, -forward]
 
 
+def _urdf_visual_matrix(vis: ET.Element, mesh: ET.Element) -> np.ndarray:
+    """4x4 local transform for a URDF <visual> element (origin xyz/rpy and mesh scale)."""
+    orig = vis.find("origin")
+    xyz = [float(v) for v in orig.attrib.get("xyz", "0 0 0").split()] if orig is not None else [0.0, 0.0, 0.0]
+    rpy = [float(v) for v in orig.attrib.get("rpy", "0 0 0").split()] if orig is not None else [0.0, 0.0, 0.0]
+    sc = [float(v) for v in mesh.attrib.get("scale", "1 1 1").replace(",", " ").split()]
+    cr, sr = math.cos(rpy[0]), math.sin(rpy[0])
+    cp, sp = math.cos(rpy[1]), math.sin(rpy[1])
+    cy, sy = math.cos(rpy[2]), math.sin(rpy[2])
+    rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], float)
+    ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], float)
+    rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], float)
+    mat = np.eye(4, dtype=float)
+    mat[:3, :3] = (rz @ ry @ rx) * np.array(sc, float)
+    mat[:3, 3] = xyz
+    return mat
+
+
 class Home:
     def __init__(self, data: str, scene: str) -> None:
+        self.data = data
         cfg = habitat_sim.SimulatorConfiguration()
         cfg.scene_dataset_config_file = os.path.join(data, "replica_cad", "replicaCAD.scene_dataset_config.json")
         cfg.scene_id = scene
@@ -195,6 +215,55 @@ class Home:
                 "navmesh_above_floor": round(self.floor_y - self.ground_y, 3),
                 "free": np.packbits(self.free).tobytes(), "objects": objects, "start": self.start}
 
+    def scene_3d(self) -> dict:
+        """Render assets and world transforms for the live 3D viewer (viewer-only, never handed to the robot)."""
+        rcad = os.path.join(self.data, "replica_cad")
+
+        def resolve(handle: str) -> str:
+            for base in (os.path.join(rcad, "configs"), rcad):
+                candidate = os.path.normpath(os.path.join(base, handle))
+                if os.path.exists(candidate):
+                    return candidate
+            return os.path.normpath(os.path.join(rcad, handle))
+
+        instances = []
+        rom = self.sim.get_rigid_object_manager()
+        for handle in sorted(rom.get_object_handles()):
+            obj = rom.get_object_by_handle(handle)
+            path = resolve(obj.creation_attributes.render_asset_handle)
+            if os.path.exists(path):
+                mat = np.array(obj.transformation, dtype=float).reshape(-1).tolist()
+                instances.append({"path": path, "mat": mat})
+
+        aom = self.sim.get_articulated_object_manager()
+        for handle in sorted(aom.get_object_handles()):
+            ao = aom.get_object_by_handle(handle)
+            urdf_path = os.path.normpath(os.path.join(rcad, "urdf", ao.creation_attributes.urdf_filepath))
+            if not os.path.exists(urdf_path):
+                continue
+            scale = 1.0
+            if len(ao.visual_scene_nodes) >= 2:
+                scale = float(np.linalg.norm(np.array(ao.visual_scene_nodes[1].absolute_transformation())[:3, 0]))
+            scale_mat = np.diag([scale, scale, scale, 1.0])
+            links = {lk.attrib["name"]: lk for lk in ET.parse(urdf_path).getroot().findall("link")}
+            for lid in [-1, *ao.get_link_ids()]:
+                lk = links.get(ao.get_link_name(lid))
+                if lk is None:
+                    continue
+                link_mat = np.array(ao.get_link_scene_node(lid).absolute_transformation(), dtype=float)
+                for vis in lk.findall("visual"):
+                    mesh = vis.find("geometry/mesh")
+                    if mesh is None or "filename" not in mesh.attrib:
+                        continue
+                    mesh_path = os.path.normpath(os.path.join(os.path.dirname(urdf_path), mesh.attrib["filename"]))
+                    if not os.path.exists(mesh_path):
+                        continue
+                    mat = link_mat @ scale_mat @ _urdf_visual_matrix(vis, mesh)
+                    instances.append({"path": mesh_path, "mat": mat.reshape(-1).tolist()})
+
+        stage = resolve(self.sim.get_stage_initialization_template().render_asset_handle)
+        return {"cx": self.cx, "cy": self.cy, "ground_y": self.ground_y, "stage": stage, "instances": instances}
+
     # ---- the body ----------------------------------------------------------------------------------------------
     def _place(self, pose: tuple) -> None:
         x, y, yaw = pose
@@ -272,6 +341,8 @@ def answer(home: Home, req: dict):  # noqa: ANN201
     op = req.get("op")
     if op == "info":
         return home.info()
+    if op == "scene_3d":
+        return home.scene_3d()
     if op == "reset":
         return home.reset(tuple(req["pose"]))
     if op == "step":

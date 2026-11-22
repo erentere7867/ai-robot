@@ -14,11 +14,16 @@ picker swaps the room ("random room" builds a new one each time).
 from __future__ import annotations
 
 import argparse
+import base64
 import queue
 import random
+import struct
 import threading
 import time
+import zlib
 from typing import Any
+
+import numpy as np
 
 from robot.agent.agent import Agent
 from robot.agent.api import Preempted
@@ -66,8 +71,46 @@ def make_scene(name: str) -> Any:
 class Holder:
     """The robot now on screen; swapped by the room picker."""
 
-    def __init__(self, sim: Any) -> None:
+    def __init__(self, sim: Any, home: Any = None) -> None:
         self.sim = sim
+        self.home = home
+
+
+def _slam_overlay(sim: Any) -> dict[str, Any] | None:
+    """Encode the robot's 2D occupancy grid as a transparent RGBA PNG for the 3D floor overlay."""
+    grid = getattr(sim, "walls", None)
+    if not isinstance(grid, np.ndarray) or grid.ndim != 2 or not grid.size:
+        return None
+    occ = np.ascontiguousarray(grid.T[::-1, :])
+    h, w = occ.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[occ] = (47, 111, 222, 145)
+    raw = np.hstack([np.zeros((h, 1), dtype=np.uint8), rgba.reshape(h, w * 4)]).tobytes()
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, level=1)) + chunk(b"IEND", b"")
+    return {"cx": 0.0, "cy": 0.0, "w": float(sim.scene.width), "h": float(sim.scene.height),
+            "png": base64.b64encode(png).decode("ascii")}
+
+
+def attach_3d(live: Live, holder: Holder) -> None:
+    """Expose the 3D scene manifest (ReplicaCAD meshes when in a 3D home, plus SLAM floor overlay) to `Live`."""
+
+    def world3d() -> dict[str, Any]:
+        home = holder.home
+        slam = _slam_overlay(holder.sim) if holder.sim is not None else None
+        if home is None or not hasattr(home, "world"):
+            return {"mode": "2d", "slam": slam}
+        cached = getattr(home, "_scene_3d", None)
+        if cached is None:
+            cached = home.world.call(op="scene_3d")
+            home._scene_3d = cached
+        return {"mode": "3d", **cached, "slam": slam}
+
+    live.world3d = world3d
 
 
 CAMERAS = ("front_camera", "rear_left_camera", "rear_right_camera")
@@ -92,7 +135,7 @@ def refresh(live: Live, holder: Holder, stop_event: threading.Event | None = Non
     while stop_event is None or not stop_event.is_set():
         if holder.sim is not None:
             try:
-                live.show_world(holder.sim)
+                live.show_world(holder.sim, home=holder.home)
             except (RuntimeError, AttributeError):  # world swapped mid-copy; take the next frame
                 pass
         time.sleep(0.2)
@@ -181,6 +224,7 @@ def main() -> None:
 
         case = next(c for c in CASES if c.id == args.case)
         holder = Holder(SimRobot(case.scene(), realtime=True))
+        attach_3d(live, holder)
         live.update(scene=case.id, scenes=[case.id])
         show_cameras(live, holder)
         threading.Thread(target=refresh, args=(live, holder), daemon=True).start()
@@ -189,7 +233,8 @@ def main() -> None:
         while True:
             time.sleep(1)
 
-    holder = Holder(make_robot(args.scene, brain))
+    holder = Holder(make_robot(args.scene, brain), HOMES.get("home") if args.scene == "3D apartment" else None)
+    attach_3d(live, holder)
     live.update(scene=args.scene, scenes=list(SCENES))
     show_cameras(live, holder)
     threading.Thread(target=refresh, args=(live, holder), daemon=True).start()
@@ -197,11 +242,13 @@ def main() -> None:
     def new_scene(name: str) -> None:
         previous = holder.sim
         holder.sim = make_robot(name, brain)
+        holder.home = HOMES.get("home") if name == "3D apartment" else None
         if isinstance(previous, RosRobot):
             previous.perception.stop()
             previous.shutdown()
         agent.forget()  # a new room: earlier requests no longer apply
-        live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], said=[], chime="")
+        live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], said=[], chime="",
+                    true_pose=None, true_trail=[], dock=None, true_objects=[])
 
     drive(live, agent, holder, new_scene)
 

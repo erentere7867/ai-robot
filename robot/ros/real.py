@@ -381,10 +381,26 @@ class RealRobot(RosRobot):
         """Seen by the detector a moment ago, or else by the vision model in the part of the front picture where the
         thing is mapped. Parked facing a real beanbag 1 m away, YOLOE had not named it for 6-160 s, and all seven
         arrivals were refused as "not confirmed" until the task ran out of turns 0.86 m from it. A visual-only target
-        also confirms against the 768px front picture, or — when elevated above the 22 cm camera (z > 0.45 m, e.g. a
-        monitor on a desk has 0 visible pixels once closer than 1.15 m, 76-89% at 1.5-1.7 m) — against a closer
-        approach snapshot taken during the drive, and drops itself otherwise."""
-        if target.last_seen <= SEEN_NOW:
+        always verifies against the post-arrival front picture (never fast-passing on last_seen alone), confirms
+        against the 768px front picture or — when elevated above the 22 cm camera (z > 0.45 m, e.g. a monitor on a
+        desk has 0 visible pixels once closer than 1.15 m, 76-89% at 1.5-1.7 m) — against a closer approach snapshot
+        taken during the drive, and drops itself otherwise."""
+        tracker = getattr(self.perception, "tracker", None)
+        track = None
+        visual = elevated = on_floor = False
+        vcolor = ""
+        first_seen, spotted_from = 0.0, (0.0, 0.0)
+        if tracker is not None:
+            with self.perception.lock:
+                track = tracker.tracks.get(tracker.current(target.id))
+                if track is not None:
+                    visual = bool(track.visual)
+                    elevated = bool(track.z > ELEVATED_Z)
+                    on_floor = bool(track.radius == 0.0)
+                    vcolor = track.visual_color
+                    first_seen = track.first_seen
+                    spotted_from = track.spotted_from
+        if not visual and target.last_seen <= SEEN_NOW:
             return True
         # Right after face() finishes spinning, frames["front_camera"] can still hold a mid-spin picture; wait up to
         # 1 s for one frame taken after the robot settled before deciding the target isn't there.
@@ -399,22 +415,23 @@ class RealRobot(RosRobot):
         pose = self._pose_at(frame[0]) if frame is not None else None
         if pose is None or self.brain is None:
             return False
-        where = place_picture(frame[1], RIG["front_camera"], *to_robot(pose, *target.position), target.radius)
-        if where is not None and is_there(self.brain, where, target.label):
+        # Include the VLM-verified requested colour (never raw noisy pixel median colours): passing only target.label
+        # ("bike") let a distant black wheel under a desk confirm arrival for "red bike" (0.78 vs 0.36; 768px 0.001).
+        label = f"{vcolor} {target.label}".strip() if vcolor else target.label
+        bx, by = to_robot(pose, *target.position)
+        where = place_picture(frame[1], RIG["front_camera"], bx, by, target.radius)
+        if where is not None and is_there(self.brain, where, label):
             return True
-        tracker = getattr(self.perception, "tracker", None)
-        if tracker is None:
-            return False
-        with self.perception.lock:
-            track = tracker.tracks.get(tracker.current(target.id))
-            visual = bool(track and track.visual)
-            elevated = bool(track and track.z > ELEVATED_Z)
-            on_floor = bool(track and track.radius == 0.0)
-            first_seen = track.first_seen if track is not None else 0.0
-            spotted_from = track.spotted_from if track is not None else (0.0, 0.0)
         if not visual:
+            if track is not None and where is not None and not elevated and math.hypot(bx, by) <= target.radius + 1.0:
+                wrong_color_only = bool(vcolor) and is_there(self.brain, where, target.label)
+                with self.perception.lock:
+                    if vcolor:
+                        track.visual_color, track.color_from = "", 0
+                    if not wrong_color_only:
+                        track.present = False
+                self._perceive_objects()
             return False
-        label = f"{target.color} {target.label}".strip() if target.color else target.label
         if see_probability(self.brain, frame[1], label, max_dim=768) >= 0.5:
             return True
         if on_floor and is_there(self.brain, frame[1][frame[1].shape[0] // 2:], label):
@@ -441,6 +458,7 @@ class RealRobot(RosRobot):
         with self.perception.lock:
             if track is not None:
                 track.present = False
+        self._perceive_objects()
         return False
 
     def _visible(self) -> list[Thing]:
@@ -456,6 +474,15 @@ class RealRobot(RosRobot):
 
     def _in_view(self) -> list[Thing]:
         return self._visible()
+
+    def _ask_color(self, crop: np.ndarray, label: str) -> str:
+        """Ask the vision model what colour the `label` in the middle of `crop` is (ignoring the background)."""
+        question = (f"What colour would a person call the {label} in the middle of this picture? "
+                    "Ignore the background. Answer with one colour or unknown.")
+        scores = self.brain.decide(_with_image(data_url(crop), question), choices=COLOR_WORDS)
+        scores["grey"] += scores.pop("gray")
+        word = max(scores, key=scores.get)
+        return word if scores[word] > 0.5 else "unknown"
 
     def _matching(self, description: str, things: list[Thing]) -> list[Thing]:
         wanted = set(description.lower().split()) & COLORS
@@ -504,12 +531,7 @@ class RealRobot(RosRobot):
                 if need_color:
                     # Most of a bicycle box was wall or tyres. Ask about its colour, not the median pixel;
                     # only when a tool needs the attribute, and never while holding the camera worker's lock.
-                    question = (f"What colour would a person call the {thing.label} in the middle of this picture? "
-                                "Ignore the background. Answer with one colour or unknown.")
-                    scores = self.brain.decide(_with_image(data_url(crop), question), choices=COLOR_WORDS)
-                    scores["grey"] += scores.pop("gray")
-                    word = max(scores, key=scores.get)
-                    color = word if scores[word] > 0.5 else "unknown"
+                    color = self._ask_color(crop, thing.label)
                     with p.lock:
                         if p.tracker.tracks.get(thing.id) is not track or track.rejected or not track.present:
                             continue
@@ -638,6 +660,8 @@ class RealRobot(RosRobot):
         p = self.perception
         bridge = getattr(p, "scan_bridge", None)
         wanted = set(phrase.split()) & COLORS
+        if "grey" in wanted or "gray" in wanted:
+            wanted.update(("grey", "gray"))
         wanted_color = "grey" if ("grey" in wanted or "gray" in wanted) else next(iter(wanted), "")
         base = visual_name(phrase)
         label = canonical(base) if base else phrase
@@ -660,6 +684,10 @@ class RealRobot(RosRobot):
                 if hit is None:
                     continue
                 (x1, y1, x2, y2), on_floor = hit
+                # When a colour was requested ("red bike"), verify the crop's colour before placing a track: a
+                # distant black wheel peeking under a desk scored black=98.8%, red=0.7% on _ask_color.
+                if wanted and hasattr(self.brain, "decide") and self._ask_color(rgb[y1:y2, x1:x2], base or label) not in wanted:
+                    continue
                 scan, _ = taken_with(p.scans, _seconds(stamp), 0.5)
                 if scan is None:
                     scan = p.scan

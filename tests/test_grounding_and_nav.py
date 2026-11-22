@@ -1111,6 +1111,59 @@ def test_sync_vlm_vetting_cluster_pick_and_semantic_places(tmp_path):
     assert rec.steps[1].calls[0][3] is False and "made this exact call" in rec.steps[1].calls[0][2]
 
 
+def test_color_qualified_sees_now_and_visual_target_color_check():
+    from collections import deque
+
+    from robot.perception.rig import RIG
+
+    real = object.__new__(RealRobot)
+    SimRobot.__init__(real, _make_scene())
+    real._ready = False
+    tracker = Tracker()
+    cam = RIG["front_camera"]
+    rgb = np.zeros((cam.height, cam.width, 3), dtype=np.uint8)
+    stamp = SimpleNamespace(sec=1, nanosec=0)
+    real.perception = SimpleNamespace(
+        lock=Lock(), tracker=tracker, frames={"front_camera": (stamp, rgb)},
+        scans=deque(), scan=None, crops={},
+        scan_bridge=SimpleNamespace(cam_depths={"front_camera": deque([(1_000_000_000, np.full((360, 640), 2.0, np.float32))])}),
+    )
+    real._pose_at = lambda _s: (0.0, 0.0, 0.0)
+
+    # 1. Visual track "red bike" with last_seen=0.0 must still verify post-arrival with "red bike" (not bare "bike")
+    t3 = Track(3, "bike", 0.8, 0.0, 0.19, 0.0, 0.0, hits=2, verified=True, sure=True, visual=True, visual_color="red")
+    tracker.tracks[3] = t3
+    asked: list[str] = []
+
+    def yes_prob(msgs):
+        q = msgs[0]["content"][-1]["text"]
+        asked.append(q)
+        return 0.85 if ("bike" in q and "red" not in q) else 0.10
+
+    real.brain = SimpleNamespace(yes_probability=yes_prob)
+    bike3 = Object(3, "bike", (0.8, 0.0), 0.8, 0.0, "ahead", 0.19, "red", 0.1)
+    assert real.sees_now(bike3) is False and t3.present is False
+    assert all("red bike" in q for q in asked)
+
+    # 2. Non-visual track parked close up with wrong colour clears visual_color without dropping a real bike
+    t4 = Track(4, "bike", 0.8, 0.0, 0.25, 0.0, 0.0, hits=4, verified=True, sure=True, visual=False,
+               visual_color="red", color_from=500)
+    tracker.tracks[4] = t4
+    bike4 = Object(4, "bike", (0.8, 0.0), 0.8, 0.0, "ahead", 0.25, "red", 5.0)
+    assert real.sees_now(bike4) is False and t4.visual_color == "" and t4.present is True
+
+    # 3. _see_target("red bike") rejects a crop when _ask_color says "black"
+    rgb_bright = np.zeros((cam.height, cam.width, 3), dtype=np.uint8)
+    rgb_bright[80:320, 480:780] = 255
+    real.perception.frames["front_camera"] = (stamp, rgb_bright)
+    real.brain = SimpleNamespace(
+        yes_probability=lambda _m: 0.9,
+        decide=lambda _m, choices: {c: (0.98 if c == "black" else 0.0) for c in choices},
+    )
+    assert real._see_target("red bike") is None
+
+
+
 
 
 

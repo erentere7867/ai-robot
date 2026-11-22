@@ -289,10 +289,11 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
     detector = Detector()
     live, holder = None, None
     if live_port:  # watch it run: the live page shows the prompt, each call, the pictures, the map and the cameras
-        from robot.interfaces.demo import Holder, refresh, show_cameras
+        from robot.interfaces.demo import Holder, attach_3d, refresh, show_cameras
         from robot.interfaces.live import Live
 
         live, holder = Live(), Holder(None)
+        attach_3d(live, holder)
         live.files = out_dir()  # the run's reports, at /runs/<tag>/index.html
         live.serve(live_port)
         show_cameras(live, holder)
@@ -305,6 +306,8 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
     out.write_text("", encoding="utf-8")
     for scene in scenes:
         home = Home(scene, rtf=rtf)
+        if holder is not None:
+            holder.home = home
         try:
             labels = {o["label"] for o in home.truth["objects"]}
             for task in TASKS:
@@ -363,6 +366,8 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                 print(f"[{'ok' if rows[-1]['passed'] else 'XX'}] {scene:<18} {task.id:<3} "
                       f"{' / '.join(task.says)[:58]:<58} | {last[:70]}", flush=True)
         finally:
+            if holder is not None:
+                holder.home = None
             home.close()
     n = sum(r["passed"] for r in rows)
     print(f"\n{tag}: {n}/{len(rows)} passed in {', '.join(scenes)}")
