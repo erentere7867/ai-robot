@@ -1005,6 +1005,24 @@ def test_locate_crop_ranks_returns_by_distance_from_the_photo_pose():
     assert math.hypot(place.x - 4.0, place.y) - place.radius == pytest.approx(3.0)
 
 
+@pytest.mark.parametrize("usable_range", [3.0, np.inf])
+def test_locate_crop_ignores_unplaceable_returns(usable_range):
+    from robot.perception.locate import locate_crop
+
+    cam = RIG["front_camera"]
+    box = (560, 550, 720, 700)
+    ranges = np.full(360, np.inf)
+    ranges[1], ranges[359] = 7.0, usable_range
+    place = locate_crop(cam, box, scan=(ranges, -math.pi, math.tau / 360), scan_in_camera=(8.0, 0.0, 0.0))
+    assert place is not None
+    if np.isfinite(usable_range):
+        assert place.how == "lidar"
+        assert math.hypot(place.x - 8.0, place.y) - place.radius == pytest.approx(usable_range)
+    else:
+        assert place.how == "floor"
+        assert place == locate_crop(cam, box)
+
+
 def test_locate_in_picture_refines_the_strongest_third_when_every_third_is_positive():
     from robot.ros.perceive import locate_in_picture
 

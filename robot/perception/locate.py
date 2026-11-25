@@ -35,6 +35,7 @@ import numpy as np
 from robot.perception.rig import Camera, to_map
 
 SCAN_Z = 0.25  # beam height for scan refinement (replaces legacy spinning lidar)
+PLACE_RANGE = (0.15, 6.0)
 LIDAR_AGREES = 0.12  # the lidar is trusted within this fraction of the floor estimate (its middle half was within 7%)
 # A person's middle lies this far beyond their nearest point: their arms make their box wide, but the body is about a
 # quarter metre deep (the lidar found a standing person's legs 0.12 m nearer than their middle).
@@ -66,13 +67,18 @@ def lidar_range(scan: tuple[np.ndarray, float, float] | None, bearing: float, sp
 
 def _lidar_return(
     scan: tuple[np.ndarray, float, float] | None, bearing: float, spread: float,
-    scan_in_camera: tuple[float, float, float] | None = None,
+    scan_in_camera: tuple[float, float, float] | None = None, *,
+    range_limits: tuple[float, float] | None = None,
 ) -> tuple[float, float] | None:
     if scan is None:
         return None
     ranges, angle_min, step = scan
     angles = angle_min + np.arange(len(ranges)) * step
-    valid = np.flatnonzero(np.isfinite(ranges) & (ranges > 0.05))
+    usable = np.isfinite(ranges) & (ranges > 0.05)
+    if range_limits is not None:
+        lo, hi = range_limits
+        usable &= (ranges >= lo) & (ranges <= hi)
+    valid = np.flatnonzero(usable)
     headings, distances = angles[valid], ranges[valid]
     if scan_in_camera is not None:
         x, y, yaw = scan_in_camera
@@ -284,13 +290,13 @@ def locate_crop(cam: Camera, box: tuple[float, float, float, float], depth: np.n
             mostly_floor = floor_n >= 12 and int(np.count_nonzero(below_floor)) >= 0.6 * max(1, below_n)
             if not (on_floor and mostly_floor) and np.count_nonzero(obj_px) >= 12:
                 cand = float(np.percentile(r_patch[obj_px], 25))
-                if cand <= 6.0:
+                if cand <= PLACE_RANGE[1]:
                     seen, how, obj_z = cand, "depth", float(np.median(heights[obj_px]))
             if seen is None and floor_n >= 12:
                 vals = r_patch[floor_px]
                 seen, how, floor_flat = float(np.average(vals, weights=vals ** 2)), "floor", True
     if seen is None and scan is not None:
-        hit = _lidar_return(scan, bearing, max(0.06, span / 3.0), scan_in_camera)
+        hit = _lidar_return(scan, bearing, max(0.06, span / 3.0), scan_in_camera, range_limits=PLACE_RANGE)
         if hit is not None:
             sr, beam = hit
             radius = 0.2
@@ -319,7 +325,7 @@ def _radius(seen: float, span: float) -> float:
 def _place(x: float, y: float, radius: float, how: str, seen: float,
            width: float = 0.0, depth_extent: float = 0.0, orientation_yaw: float = 0.0,
            z: float = 0.0) -> Place | None:
-    if not 0.15 <= seen <= 6.0:
+    if not PLACE_RANGE[0] <= seen <= PLACE_RANGE[1]:
         return None
     base, per_metre = SIGMA[how]
     w = width if width > 0.0 else 2 * radius
