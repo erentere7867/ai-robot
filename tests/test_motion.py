@@ -32,6 +32,16 @@ def test_sim_drive_path_stops_before_contact_between_waypoints():
     assert robot.x < obstacle.x and robot.trace.bumps == 0
 
 
+def test_sim_orbit_continues_past_a_held_waypoint_without_contact():
+    desk = Thing("desk", 0, 0, radius=0.5)
+    robot = SimRobot(Scene(10, 10, [desk], {}, start=Pose(1.5, 0, 90)))
+    robot.orbit("desk", distance=0.2)
+    bearings = [math.atan2(y, x) for _, x, y, _ in robot.trace.poses]
+    travelled = sum(math.remainder(b - a, math.tau) for a, b in zip(bearings, bearings[1:], strict=False))
+    assert travelled == pytest.approx(math.tau, abs=0.1)
+    assert robot.trace.bumps == 0
+
+
 @pytest.mark.parametrize("side", [-1, 1])
 def test_body_drives_through_doorway_from_off_center_without_contact(side):
     robot = SimRobot(two_rooms(start=Pose(-0.22, side * 0.36, 0)))

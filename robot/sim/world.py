@@ -428,9 +428,10 @@ class SimRobot:
             self.ended_by = "budget"
             raise BudgetSpent(f"used {self.max_time:.0f} s of simulated time")
 
-    def _clearance(self, direction: float) -> float:
+    def _clearance(self, direction: float, *, yaw: float | None = None) -> float:
         """Free distance from the robot's edge to the nearest obstacle in the direction of travel."""
-        c, s = math.cos(self.yaw) * direction, math.sin(self.yaw) * direction
+        heading = self.yaw if yaw is None else yaw
+        c, s = math.cos(heading) * direction, math.sin(heading) * direction
         people = [p for _, p in self._people()]
         for d in np.arange(0.0, SLOW_ZONE + RES, RES):
             for lat in (-RADIUS, 0.0, RADIUS):
@@ -589,7 +590,12 @@ class SimRobot:
                 self._halt()
                 raise PathBlocked("cable snag detected, backed off")
 
-            if d <= (0.08 if last else 1e-6):
+            advance = d <= (0.08 if last else 1e-6)
+            if not advance and not last and self.held and d <= 0.28:
+                nx, ny = points[idx + 1]
+                next_yaw = math.atan2(ny - self.y, nx - self.x)
+                advance = self._clearance(1.0, yaw=next_yaw) >= STOP_ZONE
+            if advance:
                 idx += 1
                 progress.stalled((self.x, self.y), self.t, advanced=True)
                 continue
