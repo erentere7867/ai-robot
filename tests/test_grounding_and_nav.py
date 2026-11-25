@@ -401,9 +401,9 @@ def test_nav_planner_outage_is_not_a_blocked_goal(monkeypatch, ready):
     monkeypatch.setattr("robot.ros.robot.PLAN_TIMEOUT_S", 0.0)
     tools = Tools(robot)
     monkeypatch.setattr(tools, "_resolve", lambda _: (2.0, 0.0))
-    res = tools.execute("go_to", {"target": "lounge"})
-    assert not res.ok
-    assert res.text.startswith("Timed out: navigation planner unavailable")
+    result = tools.execute("go_to", {"target": "lounge"})
+    assert not result.ok
+    assert result.text.startswith("Timed out: navigation planner unavailable")
     if ready:
         cancels = []
         sent.set_result(SimpleNamespace(accepted=True, get_result_async=Future,
@@ -1475,25 +1475,6 @@ def test_sync_vlm_vetting_cluster_pick_and_semantic_places(tmp_path):
     # Out-of-view go_to("kitchen") resolves to mapped "kitchen: cabinets, counter" and drives there without blind search
     res2 = tools.execute("go_to", {"target": "kitchen"})
     assert res2.ok and "Arrived at kitchen: cabinets, counter" in res2.text and sim.x > 2.0
-
-    # 4. Unvisited mapped areas hint + Agent blocks repeating identical search() after moving
-    from robot.mind.brain import Reply, ToolCall
-
-    sim2 = SimRobot(Scene(10.0, 6.0, [], {}, start=Pose(0.0, 0.0, 0.0)))
-    sim2.places["far hall: doors"] = Pose(4.5, 0.0, 0.0)
-    sim2.search = lambda *a, **kw: None
-    t2 = Tools(sim2)
-    miss = t2.execute("search", {"what": "umbrella"})
-    assert miss.ok and "Areas not visited closely yet: far hall: doors." in miss.text
-
-    calls = iter([
-        Reply("", tool_calls=[ToolCall("1", "search", {"what": "umbrella"})]),
-        Reply("", tool_calls=[ToolCall("2", "search", {"what": "umbrella"})]),
-        Reply("No umbrella found."),
-    ])
-    fake_llm = SimpleNamespace(chat=lambda *_a, **_kw: next(calls))
-    rec = Agent(fake_llm, cameras="none").do("Find the umbrella.", sim2, speak=False)
-    assert rec.steps[1].calls[0][3] is False and "made this exact call" in rec.steps[1].calls[0][2]
 
 
 def test_color_qualified_sees_now_and_visual_target_color_check():

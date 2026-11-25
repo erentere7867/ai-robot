@@ -28,6 +28,7 @@ IMAGE_WIDTH = 768  # pixels across each picture; at 512 the 2B model misjudged c
 THINK = {"off": 0, "low": 128, "medium": 512, "high": 2048}  # most tokens of reasoning before each turn
 EARLIER = 4  # earlier tasks summarised at the start of a new one
 REPEATS = 2  # the same call (same arguments) this many times in a row runs; the next is refused with a note
+FRONT_CHECK = {"go_toward", "drive", "move", "turn"}
 
 SYSTEM = """You are Sprocket, a small wheeled robot who lives with people, like a friendly pet that can also help.
 You have three cameras: front, rear-left (behind you on the left) and rear-right (behind you on the right). You act
@@ -48,6 +49,8 @@ How you work:
   wide camera pictures can mislead. Use go_toward only for an unnamed spot in robot directions.
 - Call tools to act. You get each result back, then decide what to do next. If one fails, read why and try another
   way, or ask the user.
+- Keep the user's conditions, order, and limits. Check a condition before acting on it. If a missing detail would
+  change what you do, ask a specific question and do not act on a guess. Follow any later correction from the user.
 - If something is not in view, reason about where it likely belongs and give search a room, a visible landmark/area in
   near (e.g. near="kitchen" or near="stairs"), or a promising camera direction in toward before saying it is not there.
 - For a request with several parts, first write a to-do list with todo, then tick each step off with todo_done.
@@ -195,7 +198,7 @@ class Agent:
         return prefix + "; ".join(here) if here else ""
 
     def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str, *,
-                     include_scene: bool = True) -> dict[str, Any]:
+                     include_scene: bool = True, camera_limit: int | None = None) -> dict[str, Any]:
         parts: list[dict[str, Any]] = []
         if include_scene:
             text = f"{header}\n{self._scene_text(robot)}"
@@ -213,6 +216,8 @@ class Agent:
             name = CAMERA_NAMES.get(cam, cam)
             parts += [{"type": "text", "text": f"{name} camera:"}, _image_part(url)]
             shown.append(name)
+            if len(shown) == camera_limit:
+                break
         for caption, rgb in tools.pictures:
             parts += [{"type": "text", "text": caption}, _image_part(data_url(rgb, max_width=width))]
             shown.append(caption)
@@ -282,12 +287,14 @@ class Agent:
         first["content"].append({"type": "text", "text": f'\nThe user says: "{instruction}"'})
         messages.append(first)
         reviewed = False
+        retried_empty = False
         last_said = ""
         spoke_since_action = False
         last_call, repeats = None, 0
         seen_calls: dict[tuple[str, ...], int] = {}
         looks_here = 0
         blocked_tools: set[str] = set()
+        schemas = tools.schemas()
         think = self.think  # the request is news
         sorry = "Sorry, I couldn't finish that. Could you tell me another way?"
 
@@ -298,14 +305,22 @@ class Agent:
                 self._trim_images(messages)
                 self._push(thought="(thinking...)")
                 t0, began = time.perf_counter(), round(float(getattr(robot, "t", 0.0)), 1)
-                schemas = [s for s in tools.schemas() if s["function"]["name"] not in blocked_tools]
-                reply = self.brain.chat(messages, schemas, think=think)
+                available = (
+                    [s for s in schemas if s["function"]["name"] not in blocked_tools] if blocked_tools else schemas
+                )
+                reply = self.brain.chat(messages, available, think=think)
                 step = Step("", model_s=round(time.perf_counter() - t0, 3), tokens=reply.write_tokens,
                             thought=reply.thought.strip(), t=began)
                 record.steps.append(step)
                 if self._stopped.is_set():
                     return self._finish(robot, record, "preempted", last_said)
-                if reply.finish_reason == "length":
+                cut_off = reply.finish_reason == "length"
+                if (cut_off or not reply.tool_calls) and (heard := self._drain()):
+                    messages.append(self._correction(robot, tools, heard))
+                    reviewed = spoke_since_action = False
+                    think = self.think
+                    continue
+                if cut_off:
                     sorry = "The model reply was cut off; I didn't run anything from that turn."
                     record.problems.append(sorry)
                     break
@@ -319,10 +334,14 @@ class Agent:
                 messages.append(assistant)
 
                 if not reply.tool_calls:
-                    heard = self._drain()
-                    if heard:  # the user spoke while the model was answering: carry on with their words
-                        messages.append({"role": "user", "content": "".join(f'The user says: "{h}"\n'
-                                                                            for h in heard).strip()})
+                    if not reply.text:
+                        if retried_empty:
+                            record.problems.append("the model returned another empty answer")
+                            break
+                        retried_empty = True
+                        messages.append({"role": "user", "content":
+                                         "Your last turn had no answer or tool call. Continue the current request: "
+                                         "call a tool for your next step, or reply to the user."})
                         think = self.think
                         continue
                     if not reviewed and (tools.todo.open_steps() or (self.review and any(s.calls for s in record.steps))):
@@ -340,30 +359,29 @@ class Agent:
                     last_said = (reply.text if not spoke_since_action else "") or last_said
                     return self._finish(robot, record, "done", last_said)
 
-                failed = False
-                partial = False
+                barrier = ""
+                plan_renumbered = False
+                news = False
                 visual_result = None
+                visual_parts = []
+                recorded = 0
                 for call in reply.tool_calls:
                     if self._stopped.is_set():
                         return self._finish(robot, record, "preempted", last_said)
-                    if not self._heard.empty():
-                        result, ok = "Not run: the user spoke (their words follow).", False
-                        failed = True
-                        step.calls.append((call.name, call.args, result, ok))
-                        messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                    skipped = "Not run: the user spoke (their words follow)." if not self._heard.empty() else barrier
+                    if not skipped and plan_renumbered and call.name == "todo_done":
+                        skipped = "Not run: read the updated step numbers before ticking a step."
+                    if skipped:
+                        step.calls.append((call.name, call.args, skipped, False))
+                        messages.append({"role": "tool", "tool_call_id": call.id, "content": skipped})
                         continue
                     key = ("say",) if call.name == "say" else (call.name, json.dumps(call.args, sort_keys=True))
                     repeats = repeats + 1 if key == last_call else 1
                     last_call = key
-                    seen_calls[key] = seen_calls.get(key, 0) + 1
-                    if failed:
-                        result, ok = (
-                            "Not run: an earlier call in this turn ended short; inspect the result before deciding "
-                            "the next action." if partial else "Skipped: an earlier call in this turn failed."
-                        ), False
-                    elif visual_result is not None:
-                        result, ok = "Not run: inspect the returned pictures before deciding the next action.", False
-                    elif call.name == "say" and repeats > 1:
+                    if call.name == "look":
+                        seen_calls[key] = seen_calls.get(key, 0) + 1
+                    move_cams: tuple[str, ...] = ()
+                    if call.name == "say" and repeats > 1:
                         result, ok = ("Not run: you already spoke. If the request is finished, end with plain text "
                                       "and no tool call."), False
                         blocked_tools.add("say")
@@ -373,27 +391,37 @@ class Agent:
                                       "or move somewhere else to see new views."), False
                         blocked_tools.update(("look", "look_back"))
                         record.problems.append("look: already looked around here")
-                    elif (call.name == "search" and seen_calls[key] > 1) or (
-                        repeats > REPEATS and call.name != "look"
-                    ) or (call.name == "look" and seen_calls[key] > REPEATS + 1):
-                        n_prev = (seen_calls[key] if call.name in ("look", "search") else repeats) - 1
+                    elif (repeats > REPEATS and call.name not in ("look", "search")
+                          or call.name == "look" and seen_calls[key] > REPEATS + 1):
+                        n_prev = (seen_calls[key] if call.name == "look" else repeats) - 1
                         result, ok = (f"Not run: you made this exact call {n_prev} times. Do something "
                                       "different, or if the request is done, reply to the user."), False
-                        if call.name != "search":  # other search(near=...) areas remain valid
-                            blocked_tools.add(call.name)
+                        blocked_tools.add(call.name)
                         record.problems.append(f"{call.name}: repeated {n_prev} times")
                     else:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
                         self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
+                        prior_steps = tools.todo.steps if call.name == "todo" else []
                         try:
                             res = self._run(robot, tools, call.name, call.args, record)
                         except Preempted:
                             step.calls.append((call.name, call.args, "Interrupted before returning a result.", False))
                             raise
                         result, ok = res.text, res.ok
-                        failed = not ok
+                        if prior_steps:
+                            revised = tools.todo.steps
+                            plan_renumbered |= len(revised) < len(prior_steps) or any(
+                                old is not new and (old.done or new.done or old.title != new.title)
+                                for old, new in zip(prior_steps, revised, strict=False)
+                            )
                         if res.status == "partial":
-                            partial = True
+                            barrier = ("Not run: an earlier call in this turn ended short; inspect the result before "
+                                       "deciding the next action.")
+                        if self.see_after_moves is True and tools.moved:
+                            move_cams = self.cameras
+                        elif (self.see_after_moves == "front" and self.cameras and call.name in FRONT_CHECK
+                              and (ok or tools.moved) and not tools.looked and not tools.pictures):
+                            move_cams = ("front_camera",)
                         if call.name == "say" and ok:
                             last_said = str(call.args.get("text", ""))
                             spoke_since_action = True
@@ -406,16 +434,37 @@ class Agent:
                                     blocked_tools.update(("look", "look_back"))
                             elif call.name != "look":
                                 blocked_tools.discard(call.name)
+                    news = not ok or call.name == "ask"
+                    if not ok:
+                        barrier = barrier or "Skipped: an earlier call in this turn failed."
+                    elif call.name == "ask":
+                        barrier = "Not run: read the result of asking the user before deciding the next action."
+                    cameras = list(dict.fromkeys([*move_cams, *tools.looked]))
+                    if cameras or tools.pictures:
+                        recorded = len(tools.pictures)
+                        seen = self._observation(robot, tools, cameras, "What you sense now:",
+                                                 include_scene=self.see_after_moves is True and tools.moved)
+                        if any(part["type"] == "image_url" for part in seen["content"]):
+                            visual_parts = seen["content"]
+                            barrier = barrier or (
+                                "Not run: inspect the returned pictures before deciding the next action."
+                            )
+                        else:
+                            news = True
+                            barrier = barrier or (
+                                "Not run: no recent camera pictures were available after the previous action."
+                            )
+                            result += " No recent camera pictures are available."
                     step.calls.append((call.name, call.args, result, ok))
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
-                    if visual_result is None and (tools.looked or tools.pictures):
+                    if visual_parts:
                         visual_result = messages[-1]
                 self._push(status="acting", steps=record.lines(thoughts=True), todo=tools.todo.text() if tools.todo.steps else "",
                            problems=list(record.problems))
                 if tools.todo.steps and not {c.name for c in reply.tool_calls} & {"todo", "todo_done"}:
                     messages[-1]["content"] += f"\nTo-do list now:\n{tools.todo.text()}"
                 if tools.moved:
-                    seen_calls = {k: v for k, v in seen_calls.items() if k[0] == "search"}
+                    seen_calls.clear()
                     looks_here = 0
                     blocked_tools.clear()
                 if tools.moved and self.see_after_moves is not True:  # where places are from here now ("come back here")
@@ -425,23 +474,13 @@ class Agent:
                         messages[-1]["content"] += f"\nNow in the {snap.get('room') or 'room'}. {places}"
 
                 heard = self._drain()
-                think = self._budget(news=failed or bool(heard))
-                full_move = self.see_after_moves is True and tools.moved
-                open_loop = any((ok or tools.moved) and name in ("go_toward", "drive", "move", "turn")
-                                for name, _, _, ok in step.calls)
-                front_move = (self.see_after_moves == "front" and open_loop and bool(self.cameras)
-                              and not tools.looked and not tools.pictures)
-                move_cams = self.cameras if full_move else ("front_camera",) if front_move else ()
-                cameras = list(dict.fromkeys([*move_cams, *tools.looked]))
+                think = self._budget(news=news or bool(heard))
+                if visual_result is not None:  # pictures come back inside the requesting tool result, as trained: a
+                    # new user message would end its tool-use turn and drop the reasoning so far.
+                    visual_result["content"] = [{"type": "text", "text": visual_result["content"]}, *visual_parts]
                 if heard:  # the user spoke mid-task: a new user turn with their words and what the robot senses now
-                    header = "".join(f'The user says: "{h}"\n' for h in heard) + "What you sense now:"
-                    messages.append(self._observation(robot, tools, cameras, header))
-                elif cameras or tools.pictures:  # pictures come back inside the requesting tool result, as trained: a
-                    # new user message would end its tool-use turn and drop the reasoning so far. Skip re-sending the
-                    # full scene list on stationary looks/crops and single-frame post-move snapshots.
-                    seen = self._observation(robot, tools, cameras, "What you sense now:", include_scene=full_move)
-                    result_msg = visual_result if visual_result is not None else messages[-1]
-                    result_msg["content"] = [{"type": "text", "text": result_msg["content"]}, *seen["content"]]
+                    messages.append(self._correction(robot, tools, heard, recorded=recorded))
+                    reviewed = spoke_since_action = False
                 tools.moved, tools.looked = False, []
             else:
                 record.problems.append(f"no answer after {self.max_turns} turns")
@@ -469,6 +508,12 @@ class Agent:
             heard.append(self._heard.get_nowait())
         return heard
 
+    def _correction(self, robot: Any, tools: Tools, heard: list[str], *, recorded: int = 0) -> dict[str, Any]:
+        words = "".join(f'The user says: "{h}"\n' for h in heard)
+        # Leave room for recorded evidence, but never let it crowd out what the user is asking about now.
+        return self._observation(robot, tools, list(self.cameras), words + "What you sense now:",
+                                 camera_limit=max(1, MAX_IMAGES - recorded))
+
     @staticmethod
     def _review(instruction: str, record: TaskRecord, tools: Tools) -> str:
         """Before a task ends: the request, what was done, and any open to-do steps, for one last check."""
@@ -479,6 +524,7 @@ class Agent:
         open_steps = tools.todo.open_steps()
         todo = f"\nOpen to-do steps: {'; '.join(open_steps)}." if open_steps else ""
         return (f'Before you finish, check every part of the request: "{instruction}"\nWhat you did:\n{done}{todo}\n'
+                "Use the user's later corrections if they changed the request. "
                 "If something is still missing, do it now with tools. If everything is done, give your final short "
                 "reply to the user, with no tool call.")
 
