@@ -10,6 +10,7 @@ from robot.perception.locate import locate
 from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import GONE_AFTER, Detection, Track, Tracker
 from robot.ros.perceive import SyntheticScanPublisher
+from tests.perception_fakes import make_detector, make_image_brain
 
 
 def test_a_pixel_and_its_depth_give_back_the_point():
@@ -987,21 +988,8 @@ def test_locate_in_picture_localises_by_crops_centres_straddling_objects_and_rej
     rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
     rgb[50:250, 150:350] = 255
 
-    def make_brain(predicate):
-        import base64
-
-        import cv2
-
-        def yes_prob(messages):
-            url = messages[0]["content"][0]["image_url"]["url"]
-            raw = base64.b64decode(url.split(",", 1)[1])
-            arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-            return predicate(arr)
-
-        return SimpleNamespace(yes_probability=yes_prob)
-
     # Object straddles the boundary between [0, 0.2] and [0.2, 0.4] -> weighted centre near x=250, upper half wins
-    brain = make_brain(lambda arr: 0.95 if (arr > 200).mean() > 0.05 else 0.05)
+    brain = make_image_brain(lambda arr: 0.95 if (arr > 200).mean() > 0.05 else 0.05)
     hit = locate_in_picture(brain, rgb, "computer monitor")
     assert hit is not None
     (x0, y0, x1, y1), on_floor = hit
@@ -1017,7 +1005,7 @@ def test_locate_in_picture_localises_by_crops_centres_straddling_objects_and_rej
     # Narrow standing object centred at u=0.50 (both overlapping halves see it whole; non-overlapping would slice it)
     tall_rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
     tall_rgb[180:640, 615:665] = 255
-    tall_brain = make_brain(lambda arr: 0.95 if (arr > 200).any(axis=2).any(axis=0).sum() >= 20 else 0.05)
+    tall_brain = make_image_brain(lambda arr: 0.95 if (arr > 200).any(axis=2).any(axis=0).sum() >= 20 else 0.05)
     hit_tall = locate_in_picture(tall_brain, tall_rgb, "umbrella")
     assert hit_tall is not None and hit_tall[1] is False and 580 <= (hit_tall[0][0] + hit_tall[0][2]) / 2 <= 700
 
@@ -1070,7 +1058,7 @@ def test_visual_tracks_are_not_evicted_by_detector_misses():
 
 
 def test_badge_deoverlap_and_detector_max_asked():
-    from robot.perception.detector import MAX_ASKED, Detector
+    from robot.perception.detector import MAX_ASKED
     from robot.perception.overlay import _place_badge, draw_set_of_mark
 
     placed: list[tuple[int, int, int, int]] = []
@@ -1087,9 +1075,9 @@ def test_badge_deoverlap_and_detector_max_asked():
     assert out.shape == rgb.shape and (out > 0).any()
 
     # Even with plenty of GPU prompt slots, Detector keeps only MAX_ASKED recent asked words so stale tasks don't leak.
-    fake_server = SimpleNamespace(slots=12)
-    det = Detector(server=fake_server, always=("person",))
-    for w in ("umbrella", "shoes", "stool", "mug", "bicycle"):
+    words = ("umbrella", "shoes", "stool", "mug", "bicycle")
+    det = make_detector(SimpleNamespace(slots=12), words)
+    for w in words:
         det.watch(w)
     assert len(det.asked) == MAX_ASKED == 3
     assert det.asked == ["stool", "mug", "bicycle"]

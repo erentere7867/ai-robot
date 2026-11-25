@@ -10,31 +10,32 @@
 //     - dz > 40 mm: obstacle
 //   * Sub-150 ms anti-cable / wheel snag reflex:
 //     - Cuts forward drive within 150 ms if cmdV / duty is high while wheel speed stalls on flat pitch
-//   * Command watchdog: no velocity command for 300 ms -> stop
+//   * Interrupt-timed motor gate: command loss or stalled control -> standby
 //   * 50 Hz telemetry to Linux: pose, velocities, raw ticks, range, fault flags, battery, head
 //
 // Link: Arduino Router Bridge (msgpack-RPC; Linux side is robot/hardware/ventuno_body.py over
 // /var/run/arduino-router.sock). Methods:
-//   cmd_vel(v_mm_s, w_mdeg_s)   head(tilt_ddeg)   stop()   estop(on)   reset_odom()
+//   cmd_vel(v_mm_s, w_mdeg_s)   head(tilt_ddeg)   stop()   estop(on)   reset_faults()   reset_odom()
 // Telemetry notification:
 //   [ms, x_mm, y_mm, heading_mdeg, v_mm_s, w_mdeg_s, ticks_l, ticks_r, range_mm, flags, battery_mv, head_ddeg]
 // flags: 1 bumper, 2 cliff, 4 estop, 8 picked up, 16 charging, 32 forward blocked, 64 wheel stall/snag,
-//        128 IMU fault, 256 range sensor fault, 512 battery low, 1024 torque boost active
+//        128 IMU fault, 256 range sensor fault, 512 battery low, 1024 torque boost active, 2048 watchdog
 
 #include <Arduino_RouterBridge.h>
 #include <Wire.h>
 #include <Servo.h>
 #include <SparkFun_VL53L5CX_Library.h>
 #include <Adafruit_MPU6050.h>
+#include <zephyr/kernel.h>
 
 // ---- wiring --------------------------------------------------------------------------------------
 const int PIN_L_PWM = 3, PIN_L_IN1 = 4, PIN_L_IN2 = 5;
 const int PIN_R_PWM = 6, PIN_R_IN1 = 7, PIN_R_IN2 = 8;
-const int PIN_STBY = 9;
+const int PIN_STBY = 9;                               // active high; requires a hardware pull-down during reset
 const int PIN_ENC_LA = 2, PIN_ENC_LB = 10, PIN_ENC_RA = 11, PIN_ENC_RB = 12;
 const int PIN_BUMP_L = A0, PIN_BUMP_R = A1;            // microswitches to GND (active low)
-const int PIN_CLIFF[4] = {A2, A3, 13, 14};             // backup IR floor sensors, LOW = floor seen
-const int PIN_SERVO = 15;
+const int PIN_CLIFF[4] = {25, 26, 13, 27};             // LOW = floor seen; D25–D27 are JMISC pins 1–3
+const int PIN_SERVO = 28;                             // JMISC pin 4
 const int PIN_ESTOP = 16;                              // latching button to GND
 const int PIN_BATT = A4;                               // battery divider
 const int PIN_CHARGE = 17;                             // dock contacts sense, HIGH = charging
@@ -61,8 +62,11 @@ const float OBSTACLE_DZ_MM = 40.0f;
 const uint32_t CONTROL_US = 5000;                      // 200 Hz
 const uint32_t TELEMETRY_MS = 20;                      // 50 Hz
 const uint32_t WATCHDOG_MS = 300;
+const uint32_t CONTROL_WATCHDOG_MS = 50;              // provisional until measured with I2C/Router loaded
+const uint32_t SAFETY_POLL_MS = 5;
 const uint32_t RANGE_TIMEOUT_MS = 250;
 const uint32_t SNAG_TIMEOUT_MS = 150;                  // 150 ms anti-cable / wheel snag reflex
+const int MIN_VALID_ZONES = 32;                        // require at least half the grid; not a floor calibration
 
 // ---- loop gains (per side, mm/s error -> PWM fraction) --------------------------------------------
 const float KFF = 1.0f / (MAX_V * 1.2f), KP = 0.0028f, KI = 0.022f, KAW = 2.0f;
@@ -78,8 +82,13 @@ bool imuOk = false, tofOk = false;
 // commands
 float targetV = 0, targetW = 0;
 uint32_t lastCmdMs = 0;
-bool estopCmd = false, latched = false;
 int headDdeg = 0;
+
+// The timer ISR and sketch share the motor gate, deadlines and hard-stop latch under this lock.
+struct k_spinlock safetyLock;
+bool estopCmd = false, motorsEnabled = false;
+uint32_t lastDriveMs = 0;
+int latchedFlags = 0;
 
 // state
 float cmdV = 0, cmdW = 0;
@@ -93,14 +102,57 @@ float measV = 0, measW = 0;
 uint32_t stillSinceMs = 0, snagSinceMs = 0, lastRangeMs = 0;
 float biasAcc = 0;
 int biasN = 0;
-int minRangeMm = 2000;
-bool cliffDetected = false;
+int minRangeMm = -1;
+bool rangeValid = false, cliffDetected = false;
 bool torqueBoostActive = false;
 uint32_t lastControlUs = 0, lastTelemetryMs = 0;
 int faults = 0;
 
 void encL() { ticksL += (digitalRead(PIN_ENC_LA) == digitalRead(PIN_ENC_LB)) ? 1 : -1; }
 void encR() { ticksR += (digitalRead(PIN_ENC_RA) == digitalRead(PIN_ENC_RB)) ? -1 : 1; }
+
+int physicalFlags() {
+  int f = 0;
+  if (!digitalRead(PIN_BUMP_L) || !digitalRead(PIN_BUMP_R)) f |= 1;
+  int floorless = 0;
+  for (int p : PIN_CLIFF) floorless += digitalRead(p) ? 1 : 0;
+  if (floorless >= 1) f |= 2;
+  if (floorless >= 3) f |= 8;
+  if (!digitalRead(PIN_ESTOP)) f |= 4;
+  return f;
+}
+
+void setMotorGate(bool enable) {
+  digitalWrite(PIN_STBY, enable ? HIGH : LOW);
+  motorsEnabled = enable;
+}
+
+bool rangeFresh(uint32_t now) {
+  return rangeValid && now - lastRangeMs < RANGE_TIMEOUT_MS;
+}
+
+int checkSafety(uint32_t now) {
+  int rangeFault = rangeFresh(now) ? 0 : 256;
+  latchedFlags |= physicalFlags();
+  if (estopCmd) latchedFlags |= 4;
+  if (motorsEnabled) {
+    latchedFlags |= rangeFault;
+    if (now - lastCmdMs >= WATCHDOG_MS || now - lastDriveMs >= CONTROL_WATCHDOG_MS) latchedFlags |= 2048;
+    if (latchedFlags) setMotorGate(false);
+  }
+  return latchedFlags | rangeFault;
+}
+
+void safetyTick(struct k_timer *) {
+  auto key = k_spin_lock(&safetyLock);
+  checkSafety(k_uptime_get_32());
+  k_spin_unlock(&safetyLock, key);
+}
+K_TIMER_DEFINE(safetyTimer, safetyTick, nullptr);
+
+bool motionBlocked(uint32_t now, bool freshCommand = false) {
+  return checkSafety(now) || (!freshCommand && now - lastCmdMs >= WATCHDOG_MS);
+}
 
 void setMotor(int pwmPin, int in1, int in2, float duty) {
   duty = constrain(duty, -1.0f, 1.0f);
@@ -110,6 +162,9 @@ void setMotor(int pwmPin, int in1, int in2, float duty) {
 }
 
 void motorsOff() {
+  auto key = k_spin_lock(&safetyLock);
+  setMotorGate(false);
+  k_spin_unlock(&safetyLock, key);
   setMotor(PIN_L_PWM, PIN_L_IN1, PIN_L_IN2, 0);
   setMotor(PIN_R_PWM, PIN_R_IN1, PIN_R_IN2, 0);
   integL = integR = dutyL = dutyR = 0;
@@ -122,30 +177,46 @@ void haltAll() {
 
 // ---- Bridge methods (Linux -> MCU) ------------------------------------------------------------------
 void onCmdVel(int v, int wMdeg) {
+  auto key = k_spin_lock(&safetyLock);
+  uint32_t now = k_uptime_get_32();
+  if (motionBlocked(now, true)) {
+    k_spin_unlock(&safetyLock, key);
+    return;
+  }
+  lastCmdMs = now;
+  k_spin_unlock(&safetyLock, key);
   targetV = constrain((float)v, -MAX_V, MAX_V);
   targetW = constrain(wMdeg / 1000.0f, -MAX_W, MAX_W);
-  lastCmdMs = millis();
-  if (targetV <= 0) latched = false;
 }
 void onHead(int ddeg) {
   headDdeg = constrain(ddeg, -250, 350);
   head.write(constrain(90 + headDdeg / 10, 60, 130));
 }
-void onStop() { haltAll(); latched = false; }
-void onEstop(bool on) { estopCmd = on; if (on) haltAll(); }
+void onStop() { haltAll(); }
+void onEstop(bool on) {
+  auto key = k_spin_lock(&safetyLock);
+  estopCmd = on;
+  checkSafety(k_uptime_get_32());
+  k_spin_unlock(&safetyLock, key);
+  if (on) haltAll();
+}
+bool onResetFaults() {
+  haltAll();
+  auto key = k_spin_lock(&safetyLock);
+  bool healthy = !estopCmd && !physicalFlags() && rangeFresh(k_uptime_get_32()) && !cliffDetected;
+  if (healthy) latchedFlags = 0;
+  k_spin_unlock(&safetyLock, key);
+  return healthy;
+}
 void onResetOdom() { odomX = odomY = odomTh = 0; }
 
 // ---- sensing ----------------------------------------------------------------------------------------
 int readFlags() {
-  int f = 0;
-  if (!digitalRead(PIN_BUMP_L) || !digitalRead(PIN_BUMP_R)) f |= 1;
-  int floorless = 0;
-  for (int i = 0; i < 4; i++) floorless += digitalRead(PIN_CLIFF[i]) ? 1 : 0;
-  if (floorless >= 1 || cliffDetected) f |= 2;        // cliff detected (IR or VL53L5CX)
-  if (floorless >= 3) f |= 8;                         // picked up
-  if (!digitalRead(PIN_ESTOP) || estopCmd) f |= 4;
+  auto key = k_spin_lock(&safetyLock);
+  int f = checkSafety(k_uptime_get_32());
+  k_spin_unlock(&safetyLock, key);
   if (digitalRead(PIN_CHARGE)) f |= 16;
-  if (targetV > 0 && minRangeMm <= STOP_MM) f |= 32;
+  if (targetV > 0 && rangeValid && minRangeMm <= STOP_MM) f |= 32;
   if (torqueBoostActive) f |= 1024;
   return f | faults;
 }
@@ -154,7 +225,7 @@ float batteryMv() { return analogRead(PIN_BATT) * ADC_VREF / ADC_MAX * BATT_DIVI
 
 // ---- control ----------------------------------------------------------------------------------------
 void control(float dt) {
-  uint32_t nowMs = millis();
+  uint32_t nowMs = k_uptime_get_32();
   if (imuOk) {
     sensors_event_t a, g, t;
     imu.getEvent(&a, &g, &t);
@@ -195,7 +266,6 @@ void control(float dt) {
   // Faults and reflexes
   faults = 0;
   if (!imuOk) faults |= 128;
-  if (!tofOk || nowMs - lastRangeMs > RANGE_TIMEOUT_MS) faults |= 256;
   if (batteryMv() < BATT_LOW_MV) faults |= 512;
 
   // Sub-150 ms anti-cable / wheel snag reflex on flat pitch (< 7 deg):
@@ -212,14 +282,18 @@ void control(float dt) {
     snagSinceMs = nowMs;
   }
 
-  int f = readFlags();
-  if (f & (1 | 2 | 4 | 8 | 64)) latched = true;
-
-  float v = targetV, w = targetW;
-  if (nowMs - lastCmdMs > WATCHDOG_MS || latched || (f & 4)) v = w = 0;
+  auto key = k_spin_lock(&safetyLock);
+  latchedFlags |= faults & 64;
+  bool blocked = motionBlocked(k_uptime_get_32());
+  k_spin_unlock(&safetyLock, key);
+  if (blocked) {
+    haltAll();
+    return;
+  }
 
   // Safety envelope based on min range
-  float clear = (faults & 256) ? 0.0f : max(0.0f, (float)minRangeMm - STOP_MM);
+  float v = targetV, w = targetW;
+  float clear = max(0.0f, (float)minRangeMm - STOP_MM);
   if (v > 0) v = min(v, sqrtf(2.0f * BRAKE_DECEL * clear));
 
   float accV = (fabsf(v) < fabsf(cmdV) || v * cmdV < 0) ? DECEL : ACCEL;
@@ -247,25 +321,30 @@ void control(float dt) {
   dutyR = sR;
   setMotor(PIN_L_PWM, PIN_L_IN1, PIN_L_IN2, dutyL);
   setMotor(PIN_R_PWM, PIN_R_IN1, PIN_R_IN2, dutyR);
+
+  key = k_spin_lock(&safetyLock);
+  uint32_t now = k_uptime_get_32();
+  if (now - nowMs >= CONTROL_WATCHDOG_MS) latchedFlags |= 2048;
+  blocked = motionBlocked(now);
+  if (!blocked) {
+    lastDriveMs = now;
+    if (!motorsEnabled) setMotorGate(true);
+  }
+  k_spin_unlock(&safetyLock, key);
+  if (blocked) haltAll();
 }
 
 void telemetry() {
   Bridge.notify("telemetry", (uint32_t)millis(), (int32_t)odomX, (int32_t)odomY,
                 (int32_t)(odomTh * 57295.78), (int32_t)measV, (int32_t)(measW * 1000), (int32_t)ticksL,
-                (int32_t)ticksR, minRangeMm, readFlags(), (int32_t)batteryMv(), headDdeg);
+                (int32_t)ticksR, rangeFresh(k_uptime_get_32()) ? minRangeMm : -1, readFlags(),
+                (int32_t)batteryMv(), headDdeg);
 }
 
 void setup() {
-  Bridge.begin();
-  Bridge.provide_safe("cmd_vel", onCmdVel);
-  Bridge.provide_safe("head", onHead);
-  Bridge.provide_safe("stop", onStop);
-  Bridge.provide_safe("estop", onEstop);
-  Bridge.provide_safe("reset_odom", onResetOdom);
-
-  analogReadResolution(12);
   pinMode(PIN_STBY, OUTPUT);
-  digitalWrite(PIN_STBY, HIGH);
+  setMotorGate(false);
+  analogReadResolution(12);
   for (int p : {PIN_L_PWM, PIN_L_IN1, PIN_L_IN2, PIN_R_PWM, PIN_R_IN1, PIN_R_IN2}) pinMode(p, OUTPUT);
   for (int p : {PIN_ENC_LA, PIN_ENC_LB, PIN_ENC_RA, PIN_ENC_RB, PIN_BUMP_L, PIN_BUMP_R, PIN_ESTOP})
     pinMode(p, INPUT_PULLUP);
@@ -274,6 +353,15 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_LA), encL, CHANGE);
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_RA), encR, CHANGE);
   haltAll();
+  k_timer_start(&safetyTimer, K_MSEC(SAFETY_POLL_MS), K_MSEC(SAFETY_POLL_MS));
+
+  Bridge.begin();
+  Bridge.provide_safe("cmd_vel", onCmdVel);
+  Bridge.provide_safe("head", onHead);
+  Bridge.provide_safe("stop", onStop);
+  Bridge.provide_safe("estop", onEstop);
+  Bridge.provide_safe("reset_faults", onResetFaults);
+  Bridge.provide_safe("reset_odom", onResetOdom);
 
   Wire.begin();
   Wire.setClock(1000000);  // 1 MHz Fast-Mode Plus for VL53L5CX 8x8 streaming
@@ -302,36 +390,45 @@ void setup() {
   head.attach(PIN_SERVO);
   head.write(90);
   lastControlUs = micros();
-  snagSinceMs = millis();
+  snagSinceMs = k_uptime_get_32();
+}
+
+void readRange() {
+  if (!tofOk) return;
+  bool ready = tof.isDataReady();
+  if (!ready && tof.lastError.lastErrorCode == SF_VL53L5CX_ERROR_TYPE::NO_ERROR) return;
+  int closest = 4000, validZones = 0;
+  bool cliff = false, stepUp = false;
+  if (ready && tof.getRangingData(&tofData)) {
+    for (int i = 0; i < 64; i++) {
+      if (!tofData.nb_target_detected[i]) continue;
+      int zone = i * VL53L5CX_NB_TARGET_PER_ZONE;
+      int status = tofData.target_status[zone], d = tofData.distance_mm[zone];
+      if ((status != 5 && status != 9) || d <= 20 || d >= 4000) continue;
+      validZones++;
+      closest = min(closest, d);
+      float deltaZ = EXPECTED_FLOOR_MM - (float)d;
+      cliff |= deltaZ < CLIFF_DROP_DZ_MM;
+      stepUp |= deltaZ >= TORQUE_BOOST_DZ_MM && deltaZ <= TRAVERSABLE_DZ_MM;
+    }
+  }
+  auto key = k_spin_lock(&safetyLock);
+  uint32_t now = k_uptime_get_32();
+  if (cliff) latchedFlags |= 2;
+  checkSafety(now);
+  bool expired = rangeValid && !rangeFresh(now);
+  rangeValid = validZones >= MIN_VALID_ZONES;
+  if (rangeValid) lastRangeMs = now;
+  k_spin_unlock(&safetyLock, key);
+
+  minRangeMm = rangeValid ? closest : -1;
+  cliffDetected = cliff;
+  torqueBoostActive = rangeValid && stepUp;
+  if (expired || !rangeValid || cliff) haltAll();
 }
 
 void loop() {
-  // Read VL53L5CX 8x8 matrix and classify step vs cliff across 64 zones
-  if (tofOk && tof.isDataReady()) {
-    if (tof.getRangingData(&tofData)) {
-      lastRangeMs = millis();
-      int closest = 4000;
-      bool cliff = false;
-      bool stepUp = false;
-
-      for (int i = 0; i < 64; i++) {
-        int d = tofData.distance_mm[i];
-        if (d > 20 && d < 4000) {
-          if (d < closest) closest = d;
-          float deltaZ = EXPECTED_FLOOR_MM - (float)d;
-          if (deltaZ < CLIFF_DROP_DZ_MM) {
-            cliff = true;
-          } else if (deltaZ >= TORQUE_BOOST_DZ_MM && deltaZ <= TRAVERSABLE_DZ_MM) {
-            stepUp = true;
-          }
-        }
-      }
-      minRangeMm = closest;
-      cliffDetected = cliff;
-      torqueBoostActive = stepUp;
-    }
-  }
-
+  readRange();
   uint32_t now = micros();
   if (now - lastControlUs >= CONTROL_US) {
     control((now - lastControlUs) / 1e6f);

@@ -11,13 +11,14 @@ from typing import Any
 import numpy as np
 import pytest
 
-from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted, TargetLost
+from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted, SafetyStop, TargetLost
 from robot.interfaces.live import PAGE
 from robot.perception.tracker import Track, Tracker
 from robot.ros.perceive import Perception
 from robot.ros.real import RealRobot
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
+from tests.perception_fakes import make_detector, make_image_brain
 
 
 def _make_scene(things: list[Thing] | None = None) -> Scene:
@@ -133,11 +134,17 @@ class MockRosRobot(RosRobot):
     """Subclass of RosRobot that mocks ROS2 action communication for testing."""
 
     def __init__(self, scene: Scene) -> None:
+        from robot.ros.motion import MotionGate
+
         super(RosRobot, self).__init__(scene)
         self.nav_calls: list[tuple[str, dict[str, Any]]] = []
         self.rotate_calls: list[float] = []
         self.fail_nav_counts: int = 0
         self.sync_calls: int = 0
+        self._goal = None
+        self._publish = lambda *_: None
+        self._motion = MotionGate(lambda: round(self.t * 1e9), lambda *_: None,
+                                  lambda v, w, _: self._publish(v, w), 0.35, 1.8)
 
     def _sync(self) -> None:
         self.sync_calls += 1
@@ -185,6 +192,8 @@ def test_ros_robot_goal_point_heading_faces_object():
 
 @pytest.mark.parametrize("when", ["before acceptance", "while driving"])
 def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
+    from robot.agent.api import SafetyStop
+
     robot = MockRosRobot(_make_scene([Thing("bag", 1.5, 0.0)]))
     target, = robot.detect("bag")
     sent, result = Future(), Future()
@@ -200,12 +209,12 @@ def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
     robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
     robot._publish = lambda v, w: velocities.append((v, w))
 
-    def step(v, w):
+    def step(goal):
         if when == "before acceptance":
             raise Preempted("stop")
         robot.things.pop(target.id)  # perception withdrew the ID after Nav2 accepted it
 
-    robot._step = step
+    robot._nav_tick = step
     if when == "while driving":
         sent.set_result(handle)
         with pytest.raises(TargetLost, match="stopped approaching"):
@@ -214,7 +223,11 @@ def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
     else:
         with pytest.raises(Preempted):
             RosRobot._act(robot, "navigate_to_pose", watch=target)
+        assert robot._motion.owner is None and velocities[-1] == (0.0, 0.0)
+        with pytest.raises(SafetyStop, match="previous motion goal"):
+            RosRobot._act(robot, "navigate_to_pose")
         sent.set_result(handle)
+        robot._motion_available()
     assert cancelled == [True]
 
 
@@ -234,11 +247,11 @@ def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled():
     robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
     robot._publish = lambda v, w: None
 
-    def step(v, w):  # Nav2 backs up, spins and replans: a second passes and the robot is no nearer
+    def step(goal):  # Nav2 backs up, spins and replans: a second passes and the robot is no nearer
         robot.t += 1.0
         robot.x = 0.3 * math.sin(robot.t)
 
-    robot._step = step
+    robot._nav_tick = step
     goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
     with pytest.raises(PathBlocked, match="no nearer"):
         RosRobot._act(robot, "navigate_to_pose", pose=goal)
@@ -284,6 +297,9 @@ def test_nav2_and_slam_parameters_fit_this_robot(tmp_path):
     if not (bringup.NAV2 / "params" / "nav2_params.yaml").exists() or not Path(bringup.SLAM_DEFAULTS).exists():
         pytest.skip("Nav2 and slam_toolbox are not installed here")
     cfg = yaml.safe_load(bringup.params(tmp_path).read_text())
+    cm = cfg["collision_monitor"]["ros__parameters"]
+    assert (cm["cmd_vel_in_topic"], cm["cmd_vel_out_topic"]) == (bringup.SELECTED, bringup.CHECKED)
+    assert cm["enable_stamped_cmd_vel"] and cm["source_timeout"] == 1.0
     for name in ("local_costmap", "global_costmap"):
         assert cfg[name][name]["ros__parameters"]["robot_radius"] == BODY_R
     assert cfg["amcl"]["ros__parameters"]["max_beams"] == bringup.AMCL["max_beams"]
@@ -315,12 +331,45 @@ def test_ros_robot_shutdown_cleans_up_action_node_and_executor():
     robot.node = FakeNode()
     robot._executor = FakeExecutor()
 
+    stopped_at_destroy = []
+    robot.actions = {"navigate_to_pose": SimpleNamespace(
+        destroy=lambda: stopped_at_destroy.append(robot._action_executor.shutdown_called),
+    )}
     robot.shutdown()
 
     assert robot._action_node.destroyed
     assert robot._action_executor.shutdown_called
+    assert stopped_at_destroy == [True]
     assert robot.node.destroyed
     assert robot._executor.shutdown_called
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_ros_shutdown_waits_for_pending_goal_before_destroying_client(monkeypatch, confirmed):
+    from robot.ros.motion import NavGoal
+
+    robot = MockRosRobot(_make_scene())
+    sent, result = Future(), Future()
+    destroyed = []
+    robot._goal = NavGoal(sent, robot._motion.lock)
+    robot.actions = {"navigate_to_pose": SimpleNamespace(destroy=lambda: destroyed.append(True))}
+
+    def accept_during_shutdown(_):
+        assert not destroyed and robot._motion.owner is None and robot._goal.cancelled
+        sent.set_result(SimpleNamespace(
+            accepted=True, cancel_goal_async=lambda: result.set_result(SimpleNamespace(status=5)),
+            get_result_async=lambda: result,
+        ))
+
+    if confirmed:
+        monkeypatch.setattr("robot.ros.motion.time.sleep", accept_during_shutdown)
+        robot.shutdown()
+        assert result.done()
+    else:
+        monkeypatch.setattr("robot.ros.robot.CANCEL_WAIT_S", 0)
+        with pytest.raises(SafetyStop, match="restart Nav2"):
+            robot.shutdown()
+    assert destroyed == [True]
 
 
 def test_ros_robot_act_recreates_action_client_on_timeout():
@@ -801,16 +850,7 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
 
     real._step = step
     # Vision model says yes wherever the white patch is present
-    import base64
-
-    import cv2
-
-    def yes_prob(messages):
-        url = messages[0]["content"][0]["image_url"]["url"]
-        arr = cv2.imdecode(np.frombuffer(base64.b64decode(url.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
-        return min(0.98, 0.05 + 12.0 * float((arr > 200).mean()))
-
-    real.brain = SimpleNamespace(yes_probability=yes_prob)
+    real.brain = make_image_brain(lambda arr: min(0.98, 0.05 + 12.0 * float((arr > 200).mean())))
     found = real.detect("computer monitor")
     assert len(found) == 1 and found[0].label == "computer monitor" and 1.7 <= found[0].distance <= 2.3
     tid = found[0].id
@@ -1168,7 +1208,6 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     from robot.agent.agent import Agent
     from robot.agent.tools import Tools
     from robot.mind.brain import Reply, ToolCall
-    from robot.perception.detector import Detector
 
     # 1. Location phrases ("chair in living room") and object IDs ("bike 7") never leak into YOLOE vocabulary
     sim = SimRobot(Scene(8.0, 6.0, [Thing("chair", 2.0, 0.0, 0.3)], {}, start=Pose(0.0, 0.0, 0.0)))
@@ -1200,7 +1239,7 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     assert not any("What you sense now:" in p.get("text", "") for p in tool_content)
 
     # 3. Detector.clear() drops previous request's asked words while preserving `always`
-    det = Detector(server=SimpleNamespace(slots=8), always=("person",))
+    det = make_detector(SimpleNamespace(slots=8), ("shoes", "umbrella"))
     det.watch("shoes", "umbrella")
     assert det.vocabulary == ["person", "shoes", "umbrella"]
     det.clear()
@@ -1237,4 +1276,3 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     perc.tracker.tracks[25].present = True
     out_present = perc.render_annotated_view("front_camera", 640, 360, 5.0)
     assert out_present is not None and int(out_present.sum()) > 0
-

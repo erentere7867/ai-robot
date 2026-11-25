@@ -132,9 +132,11 @@ class Home:
         finally:  # whatever ended the exploring, the map so far is the robot's map
             MAPS.mkdir(parents=True, exist_ok=True)
             explorer.save(self.map.with_suffix(""), (0.0, 0.0))
-            robot.shutdown()
-            self.software.stop()
-            self.software = None
+            try:
+                robot.shutdown()
+            finally:
+                self.software.stop()
+                self.software = None
         print(f"explored {self.scene}: {stats}", flush=True)
         self.reset(localise=False)
         return stats
