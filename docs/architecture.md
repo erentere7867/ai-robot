@@ -33,6 +33,12 @@ Brain board: **Arduino VENTUNO Q** (Qualcomm Dragonwing IQ-8275: 8-core Kryo CPU
 - **Multi-Zone ToF Reflex Sensors:** 2 × `VL53L5CX` 8×8 (64-zone) ToF laser arrays (front and rear) on the MCU I2C bus for cliff/step measurement, glass/blank-wall protection, and metric depth laser anchoring.
 - **Audio Rig:** 4-microphone array (`ReSpeaker XVF3800`) providing real-time Direction of Arrival (DOA) angle + 5 W speaker for Piper TTS and procedural chimes.
 
+**STM32 motor safety:** On the VENTUNO Q, wire the cliff inputs in sketch order to D25, D26, D13 and D27,
+and the head servo to D28 (D25–D28 are JMISC pins 1–4). Do not use the old overlapping pin assignments.
+To re-arm after a latched stop, stop sending velocity commands, release the e-stop and clear the hazard.
+If software e-stop is set, call the Router Bridge RPC `estop(false)`. Then call `reset_faults()` and wait for
+`true` before sending a new velocity command; `false` means a safety input or the ToF is still unhealthy.
+
 ### Compute Allocation (~10 GB / 16 GB RAM)
 | Processor | Workloads | Rate / Latency |
 | :--- | :--- | :--- |

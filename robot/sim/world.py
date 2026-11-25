@@ -967,7 +967,7 @@ class SimRobot:
         thing = self.things.get(person.id) if isinstance(person, Object) else None
         if thing is None:
             raise TypeError("follow needs a person Object, such as robot.user()")
-        control = self._follower(thing, float(distance))
+        control, blocked = self._follower(thing, float(distance))
         if background:  # keep following while the program goes on, until the next motion or "stop"
             self._behaviour = control
             return
@@ -975,10 +975,12 @@ class SimRobot:
         while self.t < end:
             self._step(*control())
         self._halt()
+        if blocked():
+            raise PathBlocked("no route to the target was found; stayed put")
 
     def _follower(self, thing: Thing, distance: float) -> Any:
         """A controller that keeps `distance` m from a person: a route round obstacles, renewed twice a second."""
-        state: dict[str, Any] = {"lost": None, "route": [], "replan": 0.0}
+        state: dict[str, Any] = {"lost": None, "route": [], "replan": 0.0, "followed": None}
 
         def control() -> tuple[float, float]:
             p = self._where(thing)
@@ -991,18 +993,24 @@ class SimRobot:
             state["lost"] = None
             d = math.dist(p, (self.x, self.y))
             if d <= distance + 0.3:  # close enough: keep facing them
+                state["followed"] = True
                 state["route"] = []
                 return (-0.15 if d < distance - 0.3 else 0.0), 2.5 * wrap(math.atan2(p[1] - self.y, p[0] - self.x)
                                                                           - self.yaw)
-            if self.t >= state["replan"] or not state["route"]:
+            if self.t >= state["replan"]:
                 state["route"], state["replan"] = self._plan(p, distance) or [], self.t + 0.5
+                state["followed"] = bool(state["route"]) or bool(state["followed"])
             route = state["route"]
             while route and math.dist(route[0], (self.x, self.y)) < 0.2:
                 route.pop(0)
-            tx, ty = route[0] if route else p
+            if not route:
+                # In Habitat's 0.30 m gap probe, stopping cut the peak request from 0.40 to 0.00 m/s
+                # and displacement from 0.392 to 0.000 m.
+                return 0.0, 0.0
+            tx, ty = route[0]
             err = wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw)
             return (min(CRUISE, 0.8 * (d - distance)) if abs(err) < 0.7 else 0.0), 2.5 * err
-        return control
+        return control, lambda: state["followed"] is False
 
     def spot(self, target: Point | Pose | Object | str, side: str, distance: float = 0.5) -> Point:
         self._call()
