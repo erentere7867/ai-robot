@@ -634,14 +634,7 @@ class CirculatingMemory:
             if sim >= min_score:
                 scored.append((sim, float(created_at or 0.0), row_id, text))
         scored.sort(key=lambda x: (round(x[0], 4), x[1], x[2]), reverse=True)
-        picked = scored[:top_k]
-        if top_k > 1 and len(scored) > top_k:
-            cutoff = 0.8 * picked[0][0]
-            close = [item for item in scored if item[0] >= cutoff]
-            newest = max(close, key=lambda x: (x[1], x[2]))
-            if newest not in picked:
-                picked[-1] = newest
-        return [(text, created_at) for _, created_at, _, text in picked]
+        return [(text, created_at) for _, created_at, _, text in scored[:top_k]]
 
     def record_route_note(
         self,

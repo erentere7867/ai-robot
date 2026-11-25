@@ -85,13 +85,18 @@ def test_embed_text_semantic_matching_and_query_facts(tmp_path):
     assert len(matches) >= 1
     assert matches[0][0] == "the spare key is under the blue couch"
 
-    # A newer but much weaker match must not displace a stronger match
-    mem.remember_fact("the spare key is on the kitchen counter", room="kitchen", now_wall=100.0)
-    mem.remember_fact("I heard someone mention a key ring outside", room="hall", now_wall=200.0)
+    # A newer but weaker qualifying match (>= min_score) must not displace stronger matches
+    mem.remember_fact("spare keys in hall", room="hall", now_wall=100.0)
+    mem.remember_fact("the spare key is on the kitchen counter", room="kitchen", now_wall=200.0)
+    all_qualifying = mem.query_facts("backup keys under sofa", top_k=5, min_score=0.25)
+    assert len(all_qualifying) >= 3
     top1 = mem.query_facts("backup keys under sofa", top_k=1, min_score=0.25)
     assert top1[0][0] == "the spare key is under the blue couch"
     top2 = mem.query_facts("backup keys under sofa", top_k=2, min_score=0.25)
-    assert all("key ring" not in text for text, _ in top2)
+    assert [text for text, _ in top2] == [
+        "the spare key is under the blue couch",
+        "spare keys in hall",
+    ]
 
 
 def test_volatility_half_life_decay_and_circulate_eviction(tmp_path):
