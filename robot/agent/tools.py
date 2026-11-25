@@ -821,7 +821,8 @@ class Tools:
 
     def remember(self, fact: str) -> str:
         self.robot.remember(fact)
-        if self.memory is not None and hasattr(self.memory, "remember_fact"):
+        if (self.memory is not None and hasattr(self.memory, "remember_fact")
+                and not (self.memory is getattr(self.robot, "store", None) and hasattr(self.robot, "_owns_store"))):
             self.memory.remember_fact(fact)
         return "Remembered."
 
