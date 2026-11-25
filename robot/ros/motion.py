@@ -21,12 +21,13 @@ COMMAND_AGE_NS = 250_000_000
 
 class MotionGate:
     def __init__(self, now: Callable[[], int], select: Callable[[float, float, int], None],
-                 output: Callable[[float, float], None], max_v: float, max_w: float) -> None:
+                 output: Callable[[float, float, int], None], max_v: float, max_w: float) -> None:
         self.lock = RLock()
         self._now, self._select, self._output = now, select, output
         self._max_v, self._max_w = max_v, max_w
         self.owner: str | None = None
         self._clock = 0
+        self._clock_fault = False
         self._selected = self._checked = 0
         self._source_stamp = 0
         self._in_flight: deque[int] = deque(maxlen=32)
@@ -36,14 +37,14 @@ class MotionGate:
         now = self._now()
         if now < self._clock:
             self.stop()
-            self._selected = self._checked = 0
+            self._clock_fault = True  # stamps from before the reset cannot identify current collision replies
         self._clock = now
         return now
 
     def arm(self, owner: str) -> None:
         with self.lock:
             now = self._time()
-            if owner != self.owner:
+            if not self._clock_fault and owner != self.owner:
                 self.stop()
                 self.owner = owner
                 self._source_stamp = now
@@ -53,23 +54,22 @@ class MotionGate:
             self.owner = None
             self._moving = False
             self._in_flight.clear()
-            self._output(0.0, 0.0)
+            self._output(0.0, 0.0, self._now())
 
     def submit(self, owner: str, v: float, w: float, stamp: int | None = None) -> None:
         with self.lock:
             now = self._time()
-            if self.owner != owner or now <= self._selected:
+            stamp = now if stamp is None else stamp
+            if self.owner != owner or stamp <= self._selected:
                 return
-            if stamp is not None and not (self._source_stamp < stamp <= now and now - stamp <= COMMAND_AGE_NS):
+            if (owner == NAV and stamp <= self._source_stamp) or not 0 <= now - stamp <= COMMAND_AGE_NS:
                 return
             if not (math.isfinite(v) and math.isfinite(w)):
                 self.stop()
                 return
-            if stamp is not None:
-                self._source_stamp = stamp
-            self._selected = now
-            self._in_flight.append(now)
-            self._select(max(-0.25, min(self._max_v, v)), max(-self._max_w, min(self._max_w, w)), now)
+            self._selected = stamp
+            self._in_flight.append(stamp)
+            self._select(max(-0.25, min(self._max_v, v)), max(-self._max_w, min(self._max_w, w)), stamp)
 
     def checked(self, v: float, w: float, stamp: int) -> None:
         with self.lock:
@@ -86,14 +86,16 @@ class MotionGate:
                 self._in_flight.popleft()
             self._checked = stamp
             self._moving = bool(v or w)
-            self._output(v, w)
+            self._output(v, w, stamp)
 
     def expire(self) -> None:
         with self.lock:
             now = self._time()
             if self._moving and now - self._checked > COMMAND_AGE_NS:
                 self._moving = False
-                self._output(0.0, 0.0)
+                self._in_flight.clear()
+                self._selected = now
+                self._output(0.0, 0.0, now)
 
 
 class NavGoal:

@@ -143,7 +143,7 @@ class MockRosRobot(RosRobot):
         self._goal = None
         self._publish = lambda *_: None
         self._motion = MotionGate(lambda: round(self.t * 1e9), lambda *_: None,
-                                  lambda v, w: self._publish(v, w), 0.35, 1.8)
+                                  lambda v, w, _: self._publish(v, w), 0.35, 1.8)
 
     def _sync(self) -> None:
         self.sync_calls += 1

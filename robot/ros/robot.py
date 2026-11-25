@@ -193,13 +193,13 @@ class RosRobot(SimRobot):
         msg.twist.linear.x, msg.twist.angular.z = float(v), float(w)
         return msg
 
-    def _publish(self, v: float, w: float) -> None:
+    def _publish(self, v: float, w: float, stamp: int) -> None:
         if self._scan_bridge is not None and v:
             hazard = self._scan_bridge.hazards.get("front" if v > 0 else "rear")
             if getattr(hazard, "kind", "") == "cliff":
                 v = w = 0.0  # do not turn a cliff stop into motion toward the opposite side
         self.v_now, self.w_now = v, w
-        self.cmd.publish(self._twist_msg(v, w, self.node.get_clock().now().nanoseconds))
+        self.cmd.publish(self._twist_msg(v, w, stamp))
 
     @staticmethod
     def _command(msg: Any) -> tuple[float, float, int]:

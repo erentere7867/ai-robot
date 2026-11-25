@@ -14,7 +14,8 @@ from robot.sim.habitat_ros import Hardware
 def motion():
     clock = SimpleNamespace(now=1_000_000_000)
     selected, wheels = [], []
-    gate = MotionGate(lambda: clock.now, lambda *v: selected.append(v), lambda *v: wheels.append(v), 0.35, 1.8)
+    gate = MotionGate(lambda: clock.now, lambda *v: selected.append(v), lambda v, w, _: wheels.append((v, w)),
+                      0.35, 1.8)
     return gate, clock, selected, wheels
 
 
@@ -75,6 +76,32 @@ def test_unmatched_duplicate_and_out_of_order_replies_never_reach_wheels(motion)
     assert wheels == [(0.0, 0.0), (0.3, 0.0)]
 
 
+def test_collision_monitor_does_not_extend_the_age_of_a_nav2_command(motion):
+    gate, clock, selected, wheels = motion
+    gate.arm(NAV)
+    stamp = clock.now + 1
+    clock.now = stamp + COMMAND_AGE_NS - 10
+    gate.submit(NAV, 0.2, 0.0, stamp)
+    assert selected == [(0.2, 0.0, stamp)]
+    clock.now += 20
+    gate.checked(*selected[-1])
+    assert wheels == [(0.0, 0.0)]
+
+
+def test_wheel_output_keeps_nav2_source_stamp():
+    clock = SimpleNamespace(now=1_000_000_000)
+    select, output = Mock(), Mock()
+    gate = MotionGate(lambda: clock.now, select, output, 0.35, 1.8)
+    gate.arm(NAV)
+    stamp = clock.now + 20_000_000
+    clock.now += 60_000_000
+    gate.submit(NAV, 0.2, 0.0, stamp)
+    select.assert_called_once_with(0.2, 0.0, stamp)
+    clock.now += 60_000_000
+    gate.checked(0.1, 0.0, stamp)
+    output.assert_called_with(0.1, 0.0, stamp)
+
+
 @pytest.mark.parametrize("fault", ["invalid request", "invalid reply", "clock reset"])
 def test_fault_closes_gate(motion, fault):
     gate, clock, selected, wheels = motion
@@ -90,6 +117,8 @@ def test_fault_closes_gate(motion, fault):
     else:
         clock.now = 0
         gate.expire()
+        clock.now = 2_000_000_000
+        gate.arm("direct")
     assert gate.owner is None and wheels[-1] == (0.0, 0.0)
 
 
