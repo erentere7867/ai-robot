@@ -486,6 +486,8 @@ class Agent:
         """One call. A user who speaks during it interrupts it; a plain stop ends the task (Preempted)."""
         self._acting.set()
         try:
+            if not self._heard.empty():
+                return "Not run: the user spoke (their words follow).", False
             result, ok = tools.run(name, args)
         except Preempted:
             if self._stopped.is_set() or self._heard.empty():
