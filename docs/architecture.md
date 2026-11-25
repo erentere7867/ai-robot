@@ -59,9 +59,10 @@ is unverified on hardware. This software stop is not a hardware e-stop.
 **Navigation and search.** `RosRobot` checks a goal selected on the saved map against Nav2's live costmap:
 `ComputePathToPose` must return a path ending within 0.10 m of the goal. A rejected candidate does not end
 the search; it tries the next viewpoint or ranked frontier, without a candidate cap. A rejected frontier
-that caused no motion does not trigger a camera wait; search still takes a final fresh look. For Nav2 actions
-the progress guard credits reaching ground at least 0.25 m from earlier credited positions; it stops after
-30 simulated seconds without progress. Detours count; stationary replans and oscillation do not. Following
+that caused no motion does not trigger a camera wait; search still takes a final fresh look. The progress
+guard applies only to Nav2's `NavigateToPose`, not `FollowPath`, `Spin` or `DriveOnHeading`. It credits
+reaching ground at least 0.25 m from earlier credited positions and stops after 30 simulated seconds
+without progress. Detours count; stationary replans and oscillation do not. Following
 commands zero if there is no route and retries at most twice per simulated second.
 
 **Mapping.** For an unmapped layout, `Home` starts slam_toolbox and `Explorer.explore` drives to frontiers,
