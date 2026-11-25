@@ -213,6 +213,24 @@ def test_frontier_tries_next_candidate_when_nav2_success_ends_short():
     robot._found.assert_called_once()
 
 
+@pytest.mark.parametrize("has_frontiers", [False, True])
+def test_search_looks_once_at_the_end_only_if_the_last_look_was_skipped(has_frontiers):
+    # The object can come into view while Nav2 is rejecting the stops.
+    stops = [(1.0, 0.0), (2.0, 0.0)] if has_frontiers else []
+    robot, target, moves = _frontier_search_robot([])
+    robot._next_stops = lambda _desc, _region, tried: (stop for stop in stops if stop not in tried)
+    robot._nav_reaches = Mock(return_value=False)
+
+    def found(*_):
+        assert [call.args[0] for call in robot._nav_reaches.call_args_list] == stops
+        return target
+
+    robot._found = Mock(side_effect=found)
+    assert SimRobot.search(robot, target.label) is (target if has_frontiers else None)
+    assert robot._found.call_count == int(has_frontiers)
+    assert not moves
+
+
 def test_frontier_tries_a_reachable_candidate_after_six_blocked_ones():
     frontiers = [Pose(0.5 * i, 0.0, 0.0) for i in range(1, 7)] + [Pose(4.0, 1.0, 0.0)]
     robot, target, moves = _frontier_search_robot(frontiers, max_leg=5.0)

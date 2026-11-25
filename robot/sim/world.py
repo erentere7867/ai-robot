@@ -899,6 +899,7 @@ class SimRobot:
                 if found:
                     self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
                     return found
+        found, look_skipped = None, False
         for _ in range(SEARCH_STOPS):
             prior = len(tried)
             for stop in self._next_stops(description, region, tried):
@@ -910,15 +911,19 @@ class SimRobot:
                     reached = True
                 except PathBlocked:
                     if (self.x, self.y, self.yaw) == before:
+                        look_skipped = True
                         continue
+                look_skipped = False
                 found = self._found(description, started)
-                if found:
-                    self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
-                    return found
-                if reached:
+                if found or reached:
                     break
-            if len(tried) == prior:
+            if found or len(tried) == prior:
                 break
+        if look_skipped:
+            found = self._found(description, started)
+        if found:
+            self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
+            return found
         self._result("not found")
         return None
 
