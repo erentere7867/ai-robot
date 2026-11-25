@@ -271,17 +271,11 @@ def locate_crop(cam: Camera, box: tuple[float, float, float, float], depth: np.n
             obj_px = good & (heights > 0.04)
             below_n, floor_n = int(np.count_nonzero(below)), int(np.count_nonzero(floor_px))
             mostly_floor = floor_n >= 12 and int(np.count_nonzero(below_floor)) >= 0.6 * max(1, below_n)
-            if on_floor and mostly_floor:
-                vals = r_patch[floor_px]
-                seen, how, floor_flat = float(np.average(vals, weights=vals ** 2)), "floor", True
-            elif np.count_nonzero(obj_px) >= 12:
+            if not (on_floor and mostly_floor) and np.count_nonzero(obj_px) >= 12:
                 cand = float(np.percentile(r_patch[obj_px], 25))
                 if cand <= 6.0:
                     seen, how, obj_z = cand, "depth", float(np.median(heights[obj_px]))
-                elif floor_n >= 12:  # far back wall behind a distant floor target
-                    vals = r_patch[floor_px]
-                    seen, how, floor_flat = float(np.average(vals, weights=vals ** 2)), "floor", True
-            elif floor_n >= 12:
+            if seen is None and floor_n >= 12:
                 vals = r_patch[floor_px]
                 seen, how, floor_flat = float(np.average(vals, weights=vals ** 2)), "floor", True
     if seen is None and scan is not None:
