@@ -113,11 +113,13 @@ class RealRobot(RosRobot):
         """Write memory every few seconds, so a crash loses little."""
         while not self._closed:
             time.sleep(5.0)
+            if self._closed:
+                break
             self._save()
 
     def _save(self) -> None:
-        if self.store is not None:
-            with self.perception.lock:
+        with self.perception.lock:
+            if self.store is not None:
                 self.store.save(self.perception.tracker, self.notes, self.places)
 
     def remember(self, fact: str) -> None:
@@ -126,10 +128,13 @@ class RealRobot(RosRobot):
             self.store.remember_fact(fact, room=self._room_at(self.x, self.y))
 
     def shutdown(self) -> None:
-        self._save()
         self._closed = True
-        if self.store is not None and self._owns_store and hasattr(self.store, "close"):
-            self.store.close()
+        with self.perception.lock:
+            if self.store is not None:
+                self.store.save(self.perception.tracker, self.notes, self.places)
+                if self._owns_store and hasattr(self.store, "close"):
+                    self.store.close()
+                self.store = None
         super().shutdown()
 
     # ---- perception from the cameras ------------------------------------------------------------------------------
