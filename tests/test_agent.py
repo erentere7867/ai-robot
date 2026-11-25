@@ -178,7 +178,7 @@ def test_the_same_search_can_run_again_after_repositioning(monkeypatch):
     Agent(brain, cameras="none").do("Look for the umbrella.", sim)
     before, after = viewpoints
     assert after.x > before.x
-    assert "Searched here: no umbrella found." in _text(tool_results(brain.seen[3])[-1])
+    assert "No umbrella found in the views checked. Search scope: living." in _text(tool_results(brain.seen[3])[-1])
 
 
 def test_search_returns_its_crop_before_a_queued_drive(monkeypatch):
@@ -302,28 +302,27 @@ def test_empty_model_reply_gets_one_repair_turn():
     assert len(silent.seen) == 2
 
 
-def test_search_miss_is_read_before_motion_and_same_search_can_retry_after_repositioning(monkeypatch):
+def test_search_miss_defers_motion_and_rejects_an_immediate_retry(monkeypatch):
     sim = SimRobot(living_room())
     viewpoints = []
 
     def miss(*args, **kwargs):
         viewpoints.append(sim.pose().x)
-        if len(viewpoints) == 1:
-            sim.x -= 0.5
+        sim.x -= 0.5
         return None
 
     monkeypatch.setattr(sim, "search", miss)
     search = call("search", what="towel")
     move = call("move", metres=0.75, direction="backward")
     batch = Reply("", tool_calls=search.tool_calls + move.tool_calls)
-    brain = Scripted(batch, search, move, search, say("I didn't find a towel."))
+    brain = Scripted(batch, search, say("I didn't find a towel."))
     record = Agent(brain, cameras="none").do("Find a towel.", sim)
     miss_result, skipped_move = tool_results(brain.seen[1])
     assert "No towel found in the views checked. Search scope: living." in miss_result
     assert skipped_move.startswith("Not run: read the search result before deciding the next action.")
     assert "you made this exact call from here already" in tool_results(brain.seen[2])[-1]
-    assert len(viewpoints) == 2 and viewpoints[1] < -1.0
-    assert sum(e.name == "move" for e in sim.trace.events) == 1
+    assert len(viewpoints) == 1
+    assert not any(e.name == "move" for e in sim.trace.events)
     assert record.steps[0].calls[0][-1]  # a search miss is evidence, not a failed call
 
 
