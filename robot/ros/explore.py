@@ -204,72 +204,20 @@ class Explorer:
         return yaml
 
 
-def annotate_map_places(robot: Any, brain: Any, save_path: Path, *, max_nodes: int = MAX_PLACES,
-                        min_gap: float = PLACE_GAP) -> dict[str, Pose]:
-    """Visit up to `max_nodes` well-spaced free spots on the robot's own map with Nav2, caption each area from the
-    cameras via `brain`, and save them to `save_path` (no simulator truth reaches the robot)."""
-    from robot.sim.world import RES
-
-    # Pick open cells with generous wall clearance (~0.55 m, avoiding tight corners behind furniture) via
-    # farthest-point sampling from the dock.
-    clear = _box_sum(robot.occupied, max(1, round(0.55 / RES))) == 0
-    ix, iy = np.nonzero(clear)
-    if not len(ix):
-        ix, iy = np.nonzero(~robot.inflated)
-    xs = -robot.scene.width / 2 + (ix + 0.5) * RES
-    ys = -robot.scene.height / 2 + (iy + 0.5) * RES
-    cands = list(zip(xs.tolist(), ys.tolist(), strict=True))[::max(1, len(ix) // 500)]
-
-    chosen: list[tuple[float, float]] = [(robot.x, robot.y)]
-    while len(chosen) < max_nodes and cands:
-        far = max(cands, key=lambda c: min(math.dist(c, s) for s in chosen))
-        if min(math.dist(far, s) for s in chosen) < min_gap:
-            break
-        if robot._plan(far, 0.25) is not None:
-            chosen.append(far)
-        cands = [c for c in cands if math.dist(c, far) >= 0.8]
-
-    # Order extra viewpoints as a short greedy tour from the dock instead of zigzagging across the home.
-    tour: list[tuple[float, float]] = [chosen[0]]
-    remaining = list(chosen[1:])
-    while remaining:
-        nxt = min(remaining, key=lambda c: math.dist(tour[-1], c))
-        tour.append(nxt)
-        remaining.remove(nxt)
-
-    places: dict[str, Pose] = {}
-    for k, pt in enumerate(tour):
-        if k > 0:
-            try:
-                robot.go_to(pt)
-            except Exception as exc:  # noqa: BLE001 - unreachable or snagged spot on live costmap: back clear and skip
-                print(f"skipped ({pt[0]:.2f}, {pt[1]:.2f}): {exc}", flush=True)
-                try:
-                    robot.move(0.35, direction="backward")
-                except Exception:  # noqa: BLE001
-                    pass
-                continue
-            for _ in range(4):
-                robot._step(0.0, 0.0)
-        frames = {c: f[1] for c, f in robot.perception.frames.items() if f is not None}
-        name = describe_place(brain, frames)
-        if name:
-            places[unique_place_name(name, places)] = Pose(robot.x, robot.y, math.degrees(robot.yaw))
-            print(f"mapped place: {name!r} at ({robot.x:.2f}, {robot.y:.2f})", flush=True)
-    if places:
-        save_places(save_path, places)
-    return places
-
-
-def load_grid(yaml: Path, shape: tuple[int, int], size: tuple[float, float]) -> np.ndarray:
-    """A saved map as the planner's occupancy grid: indexed [x, y], `shape` cells over a `size` (width, height) area
-    centred on the house frame's origin. Unknown space counts as blocked: the robot has not seen it is free."""
-    import re
-
+def read_map(yaml: Path) -> tuple[float, tuple[float, float], np.ndarray]:
+    """Read a saved Nav2 map: returns `(resolution, (ox, oy), image)` with the PGM top row first."""
     text = yaml.read_text()
     resolution = float(re.search(r"resolution: ([\d.]+)", text).group(1))
     ox, oy, _ = (float(v) for v in re.search(r"origin: \[([^\]]+)\]", text).group(1).split(","))
     image = _pgm(yaml.with_name(re.search(r"image: (.+)", text).group(1).strip()))
+    return resolution, (ox, oy), image
+
+
+def load_grid(saved: tuple[float, tuple[float, float], np.ndarray], shape: tuple[int, int],
+              size: tuple[float, float]) -> np.ndarray:
+    """A saved map (from `read_map`) as the planner's occupancy grid: indexed [x, y], `shape` cells over a `size`
+    (width, height) area centred on the house frame's origin. Unknown space counts as blocked."""
+    resolution, (ox, oy), image = saved
     nx, ny = shape
     xs = -size[0] / 2 + (np.arange(nx) + 0.5) * size[0] / nx
     ys = -size[1] / 2 + (np.arange(ny) + 0.5) * size[1] / ny
@@ -278,31 +226,6 @@ def load_grid(yaml: Path, shape: tuple[int, int], size: tuple[float, float]) -> 
     inside = (cols[:, None] >= 0) & (cols[:, None] < image.shape[1]) & (rows[None, :] >= 0) & (rows[None, :] < image.shape[0])
     values = image[np.clip(rows, 0, image.shape[0] - 1)[None, :], np.clip(cols, 0, image.shape[1] - 1)[:, None]]
     return ~(inside & (values > 250))
-
-
-def coverage(yaml: Path, truth: Any) -> float:
-    """Share of the floor the simulator (a SimRobot of the true scene) knows to be free that the saved map shows as
-    free. The simulator's grid is indexed [x, y]; a map image's first row is its largest y."""
-    import re
-
-    text = yaml.read_text()
-    resolution = float(re.search(r"resolution: ([\d.]+)", text).group(1))
-    ox, oy, _ = (float(v) for v in re.search(r"origin: \[([^\]]+)\]", text).group(1).split(","))
-    image = _pgm(yaml.with_name(re.search(r"image: (.+)", text).group(1).strip()))
-    occupied = truth.occupied
-    nx, ny = occupied.shape
-    sx, sy = truth.scene.width / nx, truth.scene.height / ny
-    free = mapped = 0
-    for i in range(nx):
-        for j in range(ny):
-            if occupied[i, j]:
-                continue
-            x, y = -truth.scene.width / 2 + (i + 0.5) * sx, -truth.scene.height / 2 + (j + 0.5) * sy
-            row, col = image.shape[0] - 1 - int((y - oy) / resolution), int((x - ox) / resolution)
-            free += 1
-            if 0 <= row < image.shape[0] and 0 <= col < image.shape[1] and image[row, col] > 250:
-                mapped += 1
-    return mapped / max(free, 1)
 
 
 def _pgm(path: Path) -> np.ndarray:

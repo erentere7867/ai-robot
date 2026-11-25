@@ -55,3 +55,11 @@ def test_a_room_keeps_its_name_until_another_answer_clearly_leads():
     later = name(rooms, CELL, (10.0, 5.0), _votes(rooms, west=((-3.0, 1.5), {"living room": 1, "office": 3})), {},
                  before=list(first))
     assert "office" in later  # 3 against 1
+
+
+def test_segment_edge_cases():
+    # All-free grid with no walls stays a single room; empty grid returns no rooms.
+    all_free = np.ones((20, 20), dtype=bool)
+    rooms = segment(all_free, CELL)
+    assert len(rooms) == 1 and rooms[0].all()
+    assert segment(np.zeros((20, 20), dtype=bool), CELL) == []

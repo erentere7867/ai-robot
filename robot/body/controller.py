@@ -28,10 +28,6 @@ def _clear(a: tuple[float, float], b: tuple[float, float], occupied_fn: Callable
     return not any(occupied_fn(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n) for k in range(1, n + 1))
 
 
-def _wrap(angle: float) -> float:
-    return math.atan2(math.sin(angle), math.cos(angle))
-
-
 class BodyController:
     """30-50 Hz Living Body Engine for driverless-car trajectory rollout, predictive social yielding,
 
@@ -195,7 +191,7 @@ class BodyController:
         else:
             speed = v_cruise
 
-        err = _wrap(math.atan2(waypoints[idx][1] - pose[1], waypoints[idx][0] - pose[0]) - pose[2])
+        err = math.remainder(math.atan2(waypoints[idx][1] - pose[1], waypoints[idx][0] - pose[0]) - pose[2], math.tau)
         # A waypoint well off to the side or behind: turn on the spot to face it first, as a differential drive can
         # (arcs need room a corner may not have), and keep turning until nearly facing it, not just under the limit.
         if abs(err) > 0.8 or (self._turning_to == waypoints[idx] and abs(err) > 0.15):
@@ -218,20 +214,10 @@ class BodyController:
         posture: str,
         t_in_posture: float,
         pose: tuple[float, float, float],
-        speaker_doa: float | None = None,
-        nearest_person_ahead: float | None = None,
     ) -> tuple[float, float]:
         """Calculates procedural aliveness velocity and turn reflexes based on posture and elapsed time."""
         if posture == "listening":
-            if nearest_person_ahead is not None and nearest_person_ahead < 0.45:
-                v = -0.15
-            else:
-                v = 0.04 * math.sin(2.0 * math.pi * 1.2 * t_in_posture) * math.exp(-0.3 * t_in_posture)
-            if speaker_doa is not None:
-                w = max(-1.8, min(1.8, 2.5 * _wrap(speaker_doa)))
-            else:
-                w = 0.0
-            return v, w
+            return 0.04 * math.sin(2.0 * math.pi * 1.2 * t_in_posture) * math.exp(-0.3 * t_in_posture), 0.0
 
         if posture == "curious":
             return 0.0, 0.35 * math.sin(2.0 * math.pi * 0.6 * t_in_posture)

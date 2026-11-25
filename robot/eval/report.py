@@ -15,13 +15,11 @@ from typing import Any
 
 import numpy as np
 
+from robot.perception.rig import to_map
+from robot.sim.habitat import free_mask
+
 PX = 900  # the map's longer side, in pixels
 NEAR = 0.75  # metres beyond its edge for a believed thing to count as a real one of its name
-
-
-def to_house(dock: tuple[float, float, float], x: float, y: float) -> tuple[float, float]:
-    dx, dy, dyaw = dock
-    return dx + x * math.cos(dyaw) - y * math.sin(dyaw), dy + x * math.sin(dyaw) + y * math.cos(dyaw)
 
 
 def same_name(a: str, b: str) -> bool:
@@ -51,10 +49,8 @@ def map_picture(truth: dict, dock: tuple, path: list, believed_path: list, thing
     def px(x: float, y: float) -> tuple[int, int]:
         return round((x + w / 2) * k), round((h / 2 - y) * k)
 
-    nx, ny = truth["shape"]
-    free = np.unpackbits(np.frombuffer(truth["free"], np.uint8))[: nx * ny].reshape(nx, ny).astype(bool)
     cell = max(1, round(res * k))
-    for i, j in np.argwhere(free):
+    for i, j in np.argwhere(free_mask(truth)):
         u, v = px(i * res - w / 2, (j + 1) * res - h / 2)
         img[v:v + cell, u:u + cell] = (90, 90, 90)
     named = {t.label for t in things} | words
@@ -68,14 +64,14 @@ def map_picture(truth: dict, dock: tuple, path: list, believed_path: list, thing
     pts = [px(x, y) for _, x, y, _ in path]
     if len(pts) > 1:
         cv2.polylines(img, [np.array(pts, np.int32)], False, (0, 140, 255), 2, cv2.LINE_AA)
-    bpts = [px(*to_house(dock, x, y)) for _, x, y, _ in believed_path]
+    bpts = [px(*to_map(dock, x, y)) for _, x, y, _ in believed_path]
     if len(bpts) > 1:
         cv2.polylines(img, [np.array(bpts, np.int32)], False, (255, 160, 60), 1, cv2.LINE_AA)
     if pts:
         cv2.circle(img, pts[0], 7, (0, 255, 0), -1)
         cv2.circle(img, pts[-1], 7, (0, 0, 255), -1)
     for t, gone in [*((t, False) for t in things), *((t, True) for t in rejected)]:
-        x, y = to_house(dock, t.x, t.y)
+        x, y = to_map(dock, t.x, t.y)
         colour = (150, 150, 150) if gone else (255, 160, 60) if real_match(t, x, y, truth["objects"]) else \
             (60, 60, 255)
         u, v = px(x, y)
@@ -83,7 +79,7 @@ def map_picture(truth: dict, dock: tuple, path: list, believed_path: list, thing
         cv2.putText(img, f"{t.label} {t.id}", (u + 6, v - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.42, colour, 1,
                     cv2.LINE_AA)
     for n, (_, _, _, pose) in enumerate(events, 1):
-        u, v = px(*to_house(dock, pose[0], pose[1]))
+        u, v = px(*to_map(dock, pose[0], pose[1]))
         cv2.circle(img, (u, v), 9, (255, 255, 255), -1)
         cv2.putText(img, str(n), (u - 4 * len(str(n)), v + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 0, 0), 1,
                     cv2.LINE_AA)
@@ -130,7 +126,7 @@ def write(folder: Path, task: Any, row: dict, records: list, robot: Any, home: A
     legend = "".join(f"<li>{n}. {t:.1f} s {html.escape(name)}({html.escape(', '.join(f'{v}' for v in args.values()))})"
                      f"</li>" for n, (t, name, args, _) in enumerate(events, 1))
     def belief(t: Any) -> str:
-        x, y = to_house(dock, t.x, t.y)
+        x, y = to_map(dock, t.x, t.y)
         real = real_match(t, x, y, home.truth["objects"])
         nearest = min(home.truth["objects"], key=lambda o: math.dist((x, y), (o["x"], o["y"])) - o["radius"])
         what = ("rejected by the vision model" if t.rejected else "a real one is there" if real else
