@@ -57,9 +57,10 @@ on stale wheel commands using the same age limit. Keep the ROS stop independent 
 is unverified on hardware. This software stop is not a hardware e-stop.
 
 **Navigation and search.** `RosRobot` checks a goal selected on the saved map against Nav2's live costmap:
-`ComputePathToPose` must return a path ending within 0.10 m of the goal. A rejected candidate does not end
-the search; it tries the next viewpoint or ranked frontier, without a candidate cap. A rejected frontier
-that caused no motion does not trigger a camera wait; search still takes a final fresh look. The progress
+`ComputePathToPose` must return a path ending within 0.10 m of the goal. `SimRobot.search` tries the next
+viewpoint or ranked frontier after a rejection, without a per-round candidate cap, for at most 20 rounds.
+A failed stop that caused no motion skips the camera wait; search takes an extra final look only if its
+last attempted stop failed without motion. The progress
 guard applies only to Nav2's `NavigateToPose`, not `FollowPath`, `Spin` or `DriveOnHeading`. It credits
 reaching ground at least 0.25 m from earlier credited positions and stops after 30 simulated seconds
 without progress. Detours count; stationary replans and oscillation do not. Following
