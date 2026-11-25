@@ -34,6 +34,7 @@ WORDS = {"sofa": ("sofa", "couch"), "bike": ("bike", "bicycle"), "tv": ("tv", "t
 SEEN = 94  # pixels (of the judge's 640 x 360 picture) for a thing to be in view: a detector might find it
 CLEAR = 625  # pixels for a thing to be plainly in view, not just detectable
 WATCH = 6.0  # simulated seconds the robot looks around on its dock before a task
+STOP_DWELL = 0.5  # simulated seconds of stillness at the end of a return
 NUMBERS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
 
 
@@ -41,8 +42,16 @@ NUMBERS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight
 class Task:
     id: str
     says: tuple[str, ...]  # one request, or several in a row to the same agent
-    check: Callable[[Referee, dict], bool]
+    criterion: Callable[[Referee, dict], bool | str]  # a string explains a failed condition
     needs: tuple[str, ...] = ()  # labels the layout must have, or the task is skipped there
+    observe_after: float = 0.0
+
+    def check(self, referee: Referee, start: dict) -> bool:
+        return not self.problem(referee, start)
+
+    def problem(self, referee: Referee, start: dict) -> str:
+        result = self.criterion(referee, start)
+        return result if isinstance(result, str) else "" if result else "task criterion not met"
 
 
 class Referee:
@@ -137,11 +146,31 @@ def visited_in_order(sim: Referee, targets: list[Any], margin: float = 0.75) -> 
     return k == len(targets)
 
 
+def relative_xy(x: float, y: float, origin: tuple[float, float, float]) -> tuple[float, float]:
+    sx, sy, yaw = origin
+    dx, dy = x - sx, y - sy
+    return dx * math.cos(yaw) + dy * math.sin(yaw), -dx * math.sin(yaw) + dy * math.cos(yaw)
+
+
 def forward(sim: Referee, start: dict) -> float:
     """Metres moved along the starting heading (+ forward)."""
-    x, y, _ = end(sim)
-    sx, sy, syaw = start["pose"]
-    return (x - sx) * math.cos(syaw) + (y - sy) * math.sin(syaw)
+    return relative_xy(*end(sim)[:2], start["pose"])[0]
+
+
+def straight_drive(sim: Referee, start: dict, metres: float) -> bool | str:
+    if not sim.trace.poses:
+        return "no ground-truth drive samples"
+    along = forward(sim, start)
+    if abs(along - metres) > 0.2:
+        return f"travelled {along:.2f} m forward; expected {metres:g} m within 0.20 m"
+    origin = start["pose"]
+    lateral = max(abs(relative_xy(x, y, origin)[1]) for _, x, y, _ in sim.trace.poses)
+    if lateral > 0.2:
+        return f"strayed {lateral:.2f} m sideways; allowed 0.20 m"
+    yaw_error = max(abs(wrap(yaw - origin[2])) for _, _, _, yaw in sim.trace.poses)
+    if yaw_error > 0.3:
+        return f"heading changed by {math.degrees(yaw_error):.0f}°; allowed {math.degrees(0.3):.0f}°"
+    return True
 
 
 def spun(sim: Referee) -> float:
@@ -153,6 +182,28 @@ def spun(sim: Referee) -> float:
 def moved(sim: Referee, start: dict) -> float:
     x, y, _ = end(sim)
     return math.dist((x, y), start["pose"][:2])
+
+
+def out_and_back(sim: Referee, start: dict, targets: list[Any], margin: float) -> bool | str:
+    if not start.get("ends"):
+        return "no ground-truth pose at the end of the outbound request"
+    origin, arrival = start["pose"][:2], start["ends"][0][:2]
+    if not any(gap(arrival, t) <= margin and gap(origin, t) - gap(arrival, t) >= 0.10 for t in targets):
+        return "did not reach the target before the return request"
+    poses = sim.trace.poses
+    if not poses:
+        return "no ground-truth return samples"
+    remaining = moved(sim, start)
+    if remaining >= 0.8 or math.dist(origin, arrival) - remaining < 0.10:
+        return f"did not return to the start after the outbound leg (ended {remaining:.2f} m away)"
+    cutoff = poses[-1][0] - STOP_DWELL
+    ex, ey, eyaw = end(sim)
+    for t, x, y, yaw in reversed(poses):
+        if math.dist((x, y), (ex, ey)) > 0.02 or abs(wrap(yaw - eyaw)) > 0.05:
+            break
+        if t <= cutoff:
+            return True
+    return f"did not hold still at the finish for {STOP_DWELL:g} simulated seconds"
 
 
 def first_named(text: str, a: str, b: str) -> bool:
@@ -180,6 +231,27 @@ def says_cannot(text: str) -> bool:
                           text.replace("’", "'")))
 
 
+def confirms_presence(sim: Referee, label: str) -> bool | str:
+    """The final spoken answer must assert presence, not just contain an affirmative word."""
+    answers = [text.lower().replace("’", "'").strip() for _, text in sim.trace.said if text.strip()]
+    target = rf"(?:{'|'.join(map(re.escape, WORDS.get(label, (label,))))})s?\b"
+    negation = re.compile(r"\b(?:no|not|never|cannot|unable|none)\b|n't\b")
+    failure = f"final answer did not unambiguously confirm that a {label} is present"
+    if not answers or negation.search(answers[-1]) or "?" in answers[-1]:
+        return failure
+    affirmative = re.match(r"^(?:yes|yeah|yep)\b[\s,.!:-]*", answers[-1])
+    answer = answers[-1][affirmative.end():] if affirmative else answers[-1]
+    claim = r"(?:there (?:is|are)|there's|i (?:(?:can )?see|found|spotted))"
+    if re.match(rf"{claim}\s+(?:(?:a|an|the|one)\s+)?(?:\w+\s+){{0,2}}{target}", answer):
+        return True
+    # An elliptical answer has no subject to disambiguate it after a denial.
+    if any(negation.search(text) and (mentions(text, label) or text.startswith("no")) for text in answers[:-1]):
+        return failure
+    if (affirmative and not answer) or re.fullmatch(r"(?:there (?:is|are) one|there's one)[.! ]*", answer):
+        return True
+    return failure
+
+
 def between(sim: Referee, a: str, b: str, margin: float = 1.0) -> bool:
     """Ends in the gap between an `a` and the `b` nearest it: within `margin` of both edges, and along the line from
     one to the other rather than off beyond either."""
@@ -204,7 +276,7 @@ TASKS = [
     Task("M1", ("Turn left 90 degrees.",),
          lambda s, st: abs(turned(s) - math.pi / 2) < 0.3 and moved(s, st) < 0.2),
     Task("M2", ("Turn around.",), lambda s, st: abs(abs(turned(s)) - math.pi) < 0.35 and moved(s, st) < 0.2),
-    Task("M3", ("Drive forward one metre.",), lambda s, st: 0.8 <= forward(s, st) <= 1.2),
+    Task("M3", ("Drive forward one metre.",), lambda s, st: straight_drive(s, st, 1.0)),
     Task("M4", ("Back up half a metre, then turn right 90 degrees.",),
          lambda s, st: -0.65 <= forward(s, st) <= -0.35 and abs(turned(s) + math.pi / 2) < 0.35),
     Task("M5", ("Spin around twice.",), lambda s, st: spun(s) >= 4 * math.pi - 0.5 and moved(s, st) < 0.3),
@@ -233,7 +305,7 @@ TASKS = [
     Task("Q4", ("Which is closer to you, the sofa or the TV?",),
          lambda s, st: first_named(said(s, last_only=True), *(lambda c: (c, "tv" if c == "sofa" else "sofa"))(
              _closer(s, st, "sofa", "tv"))), ("sofa", "tv")),
-    Task("Q5", ("Is there a bike in the apartment?",), lambda s, st: bool(re.search(r"\byes\b", said(s))), ("bike",)),
+    Task("Q5", ("Is there a bike in the apartment?",), lambda s, st: confirms_presence(s, "bike"), ("bike",)),
     # finding things
     Task("S1", ("Find a plant and go to it.",), lambda s, st: ends_near(s, things(s, "plant")), ("plant",)),
     Task("S2", ("Is there a dog in the apartment?",), lambda s, st: says_no(said(s, last_only=True))),
@@ -247,7 +319,8 @@ TASKS = [
     # two requests in a row: context and memory
     Task("R1", ("Remember that my keys are on the sofa.", "Where are my keys?"),
          lambda s, st: mentions(said(s, last_only=True), "sofa")),
-    Task("R2", ("Go to the TV.", "Come back."), lambda s, st: moved(s, st) < 0.8, ("tv",)),
+    Task("R2", ("Go to the TV.", "Come back."), lambda s, st: out_and_back(s, st, things(s, "tv"), 0.9),
+         ("tv",), observe_after=2 * STOP_DWELL),
     Task("R3", ("Go to the sofa.", "Now turn around."),
          lambda s, st: ends_near(s, things(s, "sofa"), 1.2) and abs(wrap(end(s)[2] - st["ends"][0][2])) >= 2.5,
          ("sofa",)),
@@ -332,13 +405,19 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                     for say in task.says:
                         records.append(agent.do(say, robot))
                         start.setdefault("ends", []).append(home.path[-1][1:])  # the true pose after each request
+                    if task.observe_after:
+                        home.wait(task.observe_after)
                     referee = Referee(home, robot, since=mark)
+                    problem = ""
+                    passed = False
                     try:
-                        passed = all(r.outcome in ("done", "preempted") for r in records) and bool(
-                            task.check(referee, start))
+                        if all(r.outcome in ("done", "preempted") for r in records):
+                            problem = task.problem(referee, start)
+                            passed = not problem
                     except Exception as exc:  # noqa: BLE001 - a check that cannot be evaluated is a failure
-                        passed = False
-                        records[-1].problems.append(f"check: {exc}")
+                        problem = str(exc) or type(exc).__name__
+                    if problem:
+                        records[-1].problems.append(f"check: {problem}")
                     rows.append({"scene": scene, "id": task.id, "says": task.says, "passed": passed,
                                  "outcomes": [r.outcome for r in records],
                                  "problems": [p for r in records for p in r.problems],  # why, when it failed
@@ -364,7 +443,8 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                                                                 else "FAILED"}])[-30:])
                 last = rows[-1]["said"][-1] if rows[-1]["said"] else ""
                 print(f"[{'ok' if rows[-1]['passed'] else 'XX'}] {scene:<18} {task.id:<3} "
-                      f"{' / '.join(task.says)[:58]:<58} | {last[:70]}", flush=True)
+                      f"{' / '.join(task.says)[:58]:<58} | {last[:70]}"
+                      + (f" | check: {problem}" if problem else ""), flush=True)
         finally:
             if holder is not None:
                 holder.home = None

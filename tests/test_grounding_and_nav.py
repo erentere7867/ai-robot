@@ -1201,6 +1201,7 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
 
     # 3. Detector.clear() drops previous request's asked words while preserving `always`
     det = Detector(server=SimpleNamespace(slots=8), always=("person",))
+    det._features = {w: np.zeros(512, np.float32) for w in ("shoes", "umbrella")}
     det.watch("shoes", "umbrella")
     assert det.vocabulary == ["person", "shoes", "umbrella"]
     det.clear()
