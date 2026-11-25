@@ -204,6 +204,20 @@ def test_frontier_tries_a_reachable_candidate_after_six_blocked_ones():
     assert robot._frontier_step(frontiers, max_leg=5.0) == (4.0, 1.0)
 
 
+def test_object_approach_tries_farther_spot_after_rejecting_same_side_goals():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    target = Object(1, "bag", (3.0, 0.0), 3.0, 0.0, "ahead", 0.15, "", 0.0)
+    tracker = Tracker()
+    tracker.tracks[1] = Track(1, "bag", 3.0, 0.0, 0.15, 0.0, 0.0, present=True, visual=True,
+                              spotted_from=(2.0, 0.0))
+    robot.perception = SimpleNamespace(tracker=tracker, lock=Lock())
+    robot._route = lambda *_: [(2.3, 0.0)]
+    robot._plan = lambda end, _: [end]
+    robot._nav_reaches = lambda end, _: end[0] <= 2.0
+    assert robot._goal_point(target, 0.0) == ((2.0, 0.0), 0.0)
+
+
 def test_ros_robot_goal_point_heading_faces_object():
     scene = _make_scene()
     robot = MockRosRobot(scene)

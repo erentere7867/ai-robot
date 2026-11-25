@@ -629,18 +629,19 @@ class RealRobot(RosRobot):
             yield where
             return
         end, _ = where
-        # If A* stopped >60 deg off the side the robot actually saw it from, step onto the spotted_from ray.
+        # Prefer the saved-map approach when it is already on the visible side.
         a_end = math.atan2(end[1] - goal[1], end[0] - goal[0])
         a_spot = math.atan2(spotted[1] - goal[1], spotted[0] - goal[0])
         if abs(math.atan2(math.sin(a_end - a_spot), math.cos(a_end - a_spot))) <= math.radians(60):
             yield where
-            return
+            where = None
         ux, uy = (spotted[0] - goal[0]) / ds, (spotted[1] - goal[1]) / ds
         for r in (reach, reach + 0.15, reach + 0.3, ds):
             cand = (goal[0] + min(r, ds) * ux, goal[1] + min(r, ds) * uy)
             if not self._occ(*cand, self.inflated) and self._plan(cand, 0.15) is not None:
                 yield cand, math.atan2(goal[1] - cand[1], goal[0] - cand[0])
-        yield where
+        if where is not None:
+            yield where
 
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
         if isinstance(target, Object) and hasattr(getattr(self, "perception", None), "detector"):
