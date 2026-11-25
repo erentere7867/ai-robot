@@ -370,7 +370,7 @@ class RosRobot(SimRobot):
             raise Timeout("navigation planner unavailable: Nav2's planner did not become ready")
         goal = self.kinds[name].Goal()
         goal.goal = self._pose_msg(*end, yaw)
-        pending = NavGoal(client.send_goal_async(goal), self._motion.lock)
+        pending = motion.NavGoal(client.send_goal_async(goal), self._motion.lock)
         try:
             if not pending.wait_terminal(PLAN_TIMEOUT_S, self._interrupts):
                 raise Timeout("navigation planner unavailable: Nav2's planner did not answer in time")
@@ -381,7 +381,7 @@ class RosRobot(SimRobot):
         if result is None:
             return False
         outcome = result.result()
-        if outcome.status != DONE:
+        if outcome.status != motion.DONE:
             return False
         path = outcome.result.path.poses
         if not path:
