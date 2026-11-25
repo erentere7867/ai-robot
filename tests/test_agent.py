@@ -178,7 +178,7 @@ def test_the_same_search_can_run_again_after_repositioning(monkeypatch):
     Agent(brain, cameras="none").do("Look for the umbrella.", sim)
     before, after = viewpoints
     assert after.x > before.x
-    assert "Searched here: no umbrella found." in _text(tool_results(brain.seen[3])[-1])
+    assert "No umbrella found in the views checked. Search scope: living." in _text(tool_results(brain.seen[3])[-1])
 
 
 def test_search_returns_its_crop_before_a_queued_drive(monkeypatch):
@@ -300,6 +300,105 @@ def test_empty_model_reply_gets_one_repair_turn():
     silent = Scripted(say(""), say(""), say("Should not be reached."))
     assert Agent(silent).do("What do you see?", SimRobot(living_room())).outcome == "failed"
     assert len(silent.seen) == 2
+
+
+def test_search_miss_defers_motion_and_rejects_an_immediate_retry(monkeypatch):
+    sim = SimRobot(living_room())
+    viewpoints = []
+
+    def miss(*args, **kwargs):
+        viewpoints.append(sim.pose().x)
+        sim.x -= 0.5
+        return None
+
+    monkeypatch.setattr(sim, "search", miss)
+    search = call("search", what="towel")
+    move = call("move", metres=0.75, direction="backward")
+    batch = Reply("", tool_calls=search.tool_calls + move.tool_calls)
+    brain = Scripted(batch, search, say("I didn't find a towel."))
+    record = Agent(brain, cameras="none").do("Find a towel.", sim)
+    miss_result, skipped_move = tool_results(brain.seen[1])
+    assert "No towel found in the views checked. Search scope: living." in miss_result
+    assert skipped_move.startswith("Not run: read the search result before deciding the next action.")
+    assert "you made this exact call from here already" in tool_results(brain.seen[2])[-1]
+    assert len(viewpoints) == 1
+    assert not any(e.name == "move" for e in sim.trace.events)
+    assert record.steps[0].calls[0][-1]  # a search miss is evidence, not a failed call
+
+
+def test_review_shows_completed_and_blocked_steps_after_revising_a_plan():
+    sim = SimRobot(living_room())
+    brain = Scripted(call("todo", steps=["Turn left", "Enter the room"]),
+                     call("turn", degrees=90, direction="left"),
+                     call("todo_done", step=1),
+                     call("todo", steps=["Ask for the door to be opened", "Enter the room"]),
+                     call("todo_blocked", step=3, reason="door shut"),
+                     say("All done."), say("I turned left but couldn't enter."))
+    record = Agent(brain, cameras="none").do("Turn left and enter the room.", sim)
+    assert record.outcome == "failed"
+    assert "[x] Turn left" in tool_results(brain.seen[4])[-1]
+    assert "Step 3 blocked: door shut. It is not finished." in tool_results(brain.seen[5])[-1]
+    review = brain.seen[6][-1]["content"]
+    assert "Completed to-do steps: Turn left." in review
+    assert "Blocked to-do steps: Enter the room (blocked: door shut)." in review
+    assert "Open to-do steps: Ask for the door to be opened." in review
+    assert [text for _, text in sim.trace.said] == ["I turned left but couldn't enter."]
+
+
+def test_review_lists_only_blocked_steps_when_none_are_open():
+    brain = Scripted(call("todo", steps=["Enter the room"]),
+                     call("todo_blocked", step=1, reason="door shut"),
+                     say("I couldn't enter."), say("I couldn't enter."))
+    record = Agent(brain, cameras="none", review=False).do("Enter the room.", SimRobot(living_room()))
+    review = brain.seen[3][-1]["content"]
+    assert "Blocked to-do steps: Enter the room (blocked: door shut)." in review
+    assert "Open to-do steps:" not in review
+    assert record.outcome == "failed"
+
+
+def test_speech_deferred_by_a_search_miss_is_not_counted_as_spoken(monkeypatch):
+    sim = SimRobot(living_room())
+    monkeypatch.setattr(sim, "search", lambda *args, **kwargs: None)
+    search = call("search", what="towel")
+    speech = call("say", text="No towel in this room.")
+    brain = Scripted(Reply("", tool_calls=search.tool_calls + speech.tool_calls), speech, say("Done."))
+    Agent(brain, cameras="none").do("Look for my towel.", sim)
+    assert _text(tool_results(brain.seen[1])[-1]).startswith("Not run: read the search result")
+    assert tool_results(brain.seen[2])[-1].startswith("Said it.")
+    assert [text for _, text in sim.trace.said] == ["No towel in this room."]
+
+
+def test_plan_block_waits_for_the_model_to_see_revised_step_numbers():
+    sim = SimRobot(living_room())
+    plan = call("todo", steps=["Inspect the door", "Enter the room"])
+    old_update = call("todo_blocked", step=2, reason="door shut")
+    turn = call("turn", degrees=90, direction="left")
+    brain = Scripted(call("todo", steps=["Inspect the door", "Enter the room", "Turn left"]),
+                     call("todo_done", step=3),
+                     Reply("", tool_calls=plan.tool_calls + old_update.tool_calls + turn.tool_calls),
+                     call("todo_blocked", step=3, reason="door shut"),
+                     say("I couldn't enter."), say("The door was shut."))
+    Agent(brain, cameras="none").do("Inspect the door, enter the room, and turn left.", sim)
+    plan_result, skipped, turned = tool_results(brain.seen[3])[-3:]
+    assert "3. [ ] Enter the room" in plan_result
+    assert skipped == "Not run: read the updated step numbers before updating a step."
+    assert "Turned 90 degrees left." in turned
+    review = brain.seen[5][-1]["content"]
+    assert "Blocked to-do steps: Enter the room (blocked: door shut)." in review
+    assert "Open to-do steps: Inspect the door." in review
+
+
+def test_plan_revision_defers_block_when_same_title_steps_change_numbers():
+    batch = Reply("", tool_calls=[
+        ToolCall("revise", "todo", {"steps": ["Inspect the door"] * 2}),
+        ToolCall("block", "todo_blocked", {"step": 2, "reason": "door shut"}),
+    ])
+    brain = Scripted(call("todo", steps=["Inspect the door"] * 3),
+                     call("todo_done", step=3), batch, call("todo", steps=[]), say("Done."))
+    record = Agent(brain, cameras="none").do("Inspect the doors.", SimRobot(living_room()))
+    revised, blocked = record.steps[2].calls
+    assert revised[3] and "1. [x] Inspect the door" in revised[2]
+    assert not blocked[3] and "updated step numbers" in blocked[2]
 
 
 def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
