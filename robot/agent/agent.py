@@ -360,6 +360,7 @@ class Agent:
                     return self._finish(robot, record, "done", last_said)
 
                 barrier = ""
+                plan_renumbered = False
                 news = False
                 visual_result = None
                 visual_parts = []
@@ -368,6 +369,8 @@ class Agent:
                     if self._stopped.is_set():
                         return self._finish(robot, record, "preempted", last_said)
                     skipped = "Not run: the user spoke (their words follow)." if not self._heard.empty() else barrier
+                    if not skipped and plan_renumbered and call.name == "todo_done":
+                        skipped = "Not run: read the updated step numbers before ticking a step."
                     if skipped:
                         step.calls.append((call.name, call.args, skipped, False))
                         messages.append({"role": "tool", "tool_call_id": call.id, "content": skipped})
@@ -398,12 +401,15 @@ class Agent:
                     else:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
                         self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
+                        prior_steps = tools.todo.steps if call.name == "todo" else None
                         try:
                             res = self._run(robot, tools, call.name, call.args, record)
                         except Preempted:
                             step.calls.append((call.name, call.args, "Interrupted before returning a result.", False))
                             raise
                         result, ok = res.text, res.ok
+                        if prior_steps and tools.todo.steps[:len(prior_steps)] != prior_steps:
+                            plan_renumbered = True
                         if res.status == "partial":
                             barrier = ("Not run: an earlier call in this turn ended short; inspect the result before "
                                        "deciding the next action.")

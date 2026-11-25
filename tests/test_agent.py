@@ -535,6 +535,33 @@ def test_correction_between_batched_calls_cancels_remaining_calls() -> None:
     assert "Not run: the user spoke" in _text(tool_results(brain.seen[1])[1])
 
 
+@pytest.mark.parametrize(("finished", "revision", "renumbered"), [
+    (3, ["first", "second"], True),
+    (1, ["second", "third", "fourth"], False),
+])
+def test_todo_revision_blocks_queued_ticks_only_if_numbering_changes(finished, revision, renumbered):
+    batch = Reply("", tool_calls=[
+        ToolCall("revise", "todo", {"steps": revision}),
+        ToolCall("tick", "todo_done", {"step": 2}),
+        ToolCall("speak", "say", {"text": "Still working."}),
+    ])
+    brain = Scripted(
+        call("todo", steps=["first", "second", "third"]),
+        call("todo_done", step=finished),
+        batch,
+        call("todo", steps=[]),
+        say("Done."),
+    )
+    record = Agent(brain, cameras="none").do("Work through the plan.", SimRobot(living_room()))
+    revised, tick, speech = record.steps[2].calls
+    assert revised[3] and speech[3]
+    if renumbered:
+        assert "2. [ ] first\n3. [ ] second" in revised[2]
+        assert not tick[3] and "updated step numbers" in tick[2]
+    else:
+        assert tick[3] and tick[2].startswith("Ticked step 2.")
+
+
 def test_open_todo_steps_mark_task_failed() -> None:
     robot = SimRobot(living_room())
     brain = Scripted(
