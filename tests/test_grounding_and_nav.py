@@ -250,6 +250,34 @@ def test_object_approach_tries_farther_spot_after_rejecting_same_side_goals():
     assert robot._goal_point(target, 0.0) == ((2.0, 0.0), 0.0)
 
 
+def test_object_approach_does_not_drive_toward_a_rejected_spot():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    target = Object(1, "bag", (3.0, 0.0), 3.0, 0.0, "ahead", 0.15, "", 0.0)
+    preferred, fallback = (2.3, 0.0), (2.0, 0.0)
+    robot._spotted_standpoint = lambda *_: preferred
+    robot._goal_candidates = lambda *_: iter([(preferred, 0.0), (fallback, 0.0)])
+    checked = []
+
+    def reaches(end, _):
+        checked.append(end)
+        return end == fallback
+
+    def act(name, *, pose, **_):
+        assert name == "navigate_to_pose" and pose == fallback
+        robot.x, robot.y = pose
+
+    robot._nav_reaches = reaches
+    robot._act = act
+    robot._pose_msg = lambda x, y, yaw: (x, y)
+    robot._note_place = Mock()
+    robot._rotate = Mock()
+    robot._move = Mock()
+    robot._go(target, 0.0)
+    assert checked == [preferred, fallback]
+    robot._move.assert_not_called()
+
+
 def test_frontier_plans_only_once_before_dispatch():
     robot, target, moves = _frontier_search_robot([Pose(2.0, 0.0, 0.0)])
     checks = []
@@ -1149,10 +1177,12 @@ def test_floor_sees_now_and_spotted_standpoint_pull_in():
     moved: list[float] = []
     real._rotate = lambda a: setattr(real, "yaw", real.yaw + a)
     real._move = lambda d: (moved.append(d), setattr(real, "x", real.x + d * math.cos(real.yaw)))[0]
-    real._nav_reaches = lambda *_: pytest.fail("short heading drive should not ask the planner")
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(RosRobot, "_go", lambda self, *a, **kw: None)
-        real._go(umb, 0.0)
+    real._goal_candidates = lambda *_: iter([(cand, 0.0)])
+    real._nav_reaches = Mock(return_value=True)
+    real._act = Mock()
+    real._pose_msg = lambda *pose: pose
+    real._go(umb, 0.0)
+    real._nav_reaches.assert_called_once_with(cand, 0.0)
     assert len(moved) == 1 and 0.20 <= moved[0] <= 0.30
 
     # RealRobot.obj refreshes self.things when perception merges track 15 -> 11 between _perceive_objects() syncs

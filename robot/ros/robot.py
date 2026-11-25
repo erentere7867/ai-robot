@@ -430,6 +430,9 @@ class RosRobot(SimRobot):
             except PathBlocked:
                 pass
 
+    def _finish_approach(self, target: Object, distance: float, end: Point) -> None:
+        """Refine arrival at an object after Nav2 reaches its approved endpoint."""
+
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
         """Nav2 drives there; when it gives up short of the target, so does the robot, and the caller hears why."""
         watch = target if isinstance(target, Object) else None
@@ -446,6 +449,9 @@ class RosRobot(SimRobot):
                 if math.dist(goal, (self.x, self.y)) > reach + 0.35 and math.dist((gx, gy), (self.x, self.y)) > 0.35:
                     raise
                 self._face_goal(goal)  # stopped just short (or at nearest free cell beside furniture): face it
+            else:
+                if isinstance(target, Object):
+                    self._finish_approach(target, distance, (gx, gy))
         if isinstance(target, Pose):
             self._rotate(wrap(math.radians(target.yaw) - self.yaw))
 

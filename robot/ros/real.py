@@ -648,17 +648,16 @@ class RealRobot(RosRobot):
             self._watch(target.label)
         super()._go(target, distance, side=side)
         self._note_place()
-        if side or not isinstance(target, Object):
+
+    def _finish_approach(self, target: Object, distance: float, end: Point) -> None:
+        if end != self._spotted_standpoint(target, distance):
             return
-        cand = self._spotted_standpoint(target, distance)
-        if cand is None:
-            return
-        d = math.dist((self.x, self.y), cand)
-        if 0.10 < d <= 0.40 and self._clear_line((self.x, self.y), cand, grid=self.inflated):
+        d = math.dist((self.x, self.y), end)
+        if 0.10 < d <= 0.40 and self._clear_line((self.x, self.y), end, grid=self.inflated):
             # Nav2's xy_goal_tolerance (0.25 m) can stop just off a narrow corner sightline (E2 umbrella: ~18 cm off
             # hid it behind the wall corner); step straight onto the spotting standpoint via drive_on_heading.
             try:
-                self._rotate(wrap(math.atan2(cand[1] - self.y, cand[0] - self.x) - self.yaw))
+                self._rotate(wrap(math.atan2(end[1] - self.y, end[0] - self.x) - self.yaw))
                 self._move(d)
             except PathBlocked:
                 pass
