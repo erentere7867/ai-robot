@@ -4,6 +4,7 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from robot.perception import colour
 from robot.perception.locate import locate
@@ -974,11 +975,72 @@ def test_locate_crop_ignores_side_edge_clutter_ranges_floor_and_falls_back_to_sc
     # Scan fallback when depth is missing
     ranges = np.full(360, 2.4, dtype=np.float32)
     via_scan = locate_crop(cam, (560, 100, 720, 400), depth=None, scan=(ranges, -math.pi, 2 * math.pi / 360))
-    assert via_scan is not None and via_scan.how == "lidar" and abs(math.hypot(via_scan.x, via_scan.y) - 2.4) < 0.1
+    assert via_scan is not None and via_scan.how == "lidar"
+    assert math.hypot(via_scan.x, via_scan.y) - via_scan.radius == pytest.approx(2.4)
 
     # Floor-ray fallback when both depth and scan are missing
     via_ray = locate_crop(cam, (560, int(0.45 * h), 720, h), depth=None, scan=None, on_floor=True)
     assert via_ray is not None and via_ray.how == "floor" and via_ray.radius == 0.0
+
+
+def test_locate_crop_places_the_lidar_surface_on_the_returning_beam():
+    from robot.perception.locate import locate_crop
+
+    ranges = np.full(360, np.inf, dtype=np.float32)
+    ranges[241:248] = [2.706, 2.709, 2.778, 1.235, 1.247, 1.241, 1.232]
+    place = locate_crop(RIG["rear_left_camera"], (894, 0, 1150, 432),
+                        scan=(ranges, -math.pi, math.tau / 360))
+    assert place is not None and place.how == "lidar"
+    assert math.degrees(math.atan2(place.y, place.x)) == pytest.approx(67)
+    assert math.hypot(place.x, place.y) - place.radius == pytest.approx(1.232)
+
+
+def test_locate_crop_ranks_returns_by_distance_from_the_photo_pose():
+    from robot.perception.locate import locate_crop
+
+    ranges = np.full(360, np.inf)
+    ranges[1], ranges[359] = 3.0, 1.0
+    place = locate_crop(RIG["front_camera"], (560, 100, 720, 400),
+                        scan=(ranges, -math.pi, math.tau / 360), scan_in_camera=(4.0, 0.0, 0.0))
+    assert place is not None and place.how == "lidar"
+    assert math.hypot(place.x - 4.0, place.y) - place.radius == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize("usable_range", [3.0, np.inf])
+def test_locate_crop_ignores_unplaceable_returns(usable_range):
+    from robot.perception.locate import locate_crop
+
+    cam = RIG["front_camera"]
+    box = (560, 550, 720, 700)
+    ranges = np.full(360, np.inf)
+    ranges[1], ranges[359] = 7.0, usable_range
+    place = locate_crop(cam, box, scan=(ranges, -math.pi, math.tau / 360), scan_in_camera=(8.0, 0.0, 0.0))
+    assert place is not None
+    if np.isfinite(usable_range):
+        assert place.how == "lidar"
+        assert math.hypot(place.x - 8.0, place.y) - place.radius == pytest.approx(usable_range)
+    else:
+        assert place.how == "floor"
+        assert place == locate_crop(cam, box)
+
+
+def test_locate_in_picture_refines_the_strongest_third_when_every_third_is_positive():
+    from robot.ros.perceive import locate_in_picture
+
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    scores = iter([0.6792, 0.8221, 0.9941, 0.9999, 0.9759, 0.9919, 0.7078])
+    hit = locate_in_picture(SimpleNamespace(yes_probability=lambda _: next(scores)), rgb, "table")
+    assert hit == ((894, 0, 1150, 432), False)
+
+
+@pytest.mark.parametrize("refinement", [[0.1, 0.1], [0.9, 0.9, 0.1, 0.1]])
+def test_locate_in_picture_recovers_a_wide_rug_when_the_refined_crop_is_not_recognized(refinement):
+    from robot.ros.perceive import locate_in_picture
+
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    scores = iter([0.9, 0.9, 0.9, *refinement, 0.1, 0.9])
+    hit = locate_in_picture(SimpleNamespace(yes_probability=lambda _: next(scores)), rgb, "rug")
+    assert hit == ((512, 324, 768, 720), True)
 
 
 def test_locate_in_picture_localises_by_crops_centres_straddling_objects_and_rejects_false_positives():
@@ -1082,5 +1144,3 @@ def test_badge_deoverlap_and_detector_max_asked():
     assert len(det.asked) == MAX_ASKED == 3
     assert det.asked == ["stool", "mug", "bicycle"]
     assert det.vocabulary == ["person", "stool", "mug", "bicycle"]
-
-

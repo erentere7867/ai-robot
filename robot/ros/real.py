@@ -127,13 +127,17 @@ class RealRobot(RosRobot):
         super().shutdown()
 
     # ---- perception from the cameras ------------------------------------------------------------------------------
-    def _pose_at(self, stamp: Any) -> tuple[float, float, float] | None:
+    def _pose_at(self, stamp: Any, *, frame: str = "map") -> tuple[float, float, float] | None:
+        from rclpy.clock import ClockType
         from rclpy.time import Time
 
-        for when in (Time.from_msg(stamp), Time()):
+        when = (Time(nanoseconds=round(stamp * 1e9), clock_type=ClockType.ROS_TIME)
+                if isinstance(stamp, float) else Time.from_msg(stamp))
+        times = (when, Time()) if frame == "map" else (when,)
+        for when in times:
             try:
-                tr = self.tf.lookup_transform("map", "base_link", when).transform
-            except Exception:  # noqa: BLE001 - not at that time: try the latest
+                tr = self.tf.lookup_transform(frame, "base_link", when).transform
+            except Exception:  # noqa: BLE001 - transform not available at that time
                 self.stale_poses = getattr(self, "stale_poses", 0) + 1
                 continue
             q = tr.rotation
@@ -703,10 +707,21 @@ class RealRobot(RosRobot):
                 # distant black wheel peeking under a desk scored black=98.8%, red=0.7% on _ask_color.
                 if wanted and hasattr(self.brain, "decide") and self._ask_color(rgb[y1:y2, x1:x2], base or label) not in wanted:
                     continue
-                scan, _ = taken_with(p.scans, _seconds(stamp), 0.5)
-                if scan is None:
-                    scan = p.scan
-                place = locate_crop(RIG[cam_name], (x1, y1, x2, y2), depth, scan, on_floor=on_floor)
+                rgb_time = _seconds(stamp)
+                scan, offset = taken_with(p.scans, rgb_time, 0.5)
+                scan_time = rgb_time + offset
+                if scan is None and p.scans:
+                    scan_time, scan = p.scans[-1]
+                scan_in_camera = None
+                if scan is not None:
+                    photo_odom = self._pose_at(stamp, frame="odom")
+                    scan_odom = self._pose_at(scan_time, frame="odom")
+                    if photo_odom is not None and scan_odom is not None:
+                        sx, sy = to_robot(photo_odom, *scan_odom[:2])
+                        scan_in_camera = sx, sy, scan_odom[2] - photo_odom[2]
+                place = locate_crop(RIG[cam_name], (x1, y1, x2, y2), depth,
+                                    scan if scan_in_camera is not None else None,
+                                    on_floor=on_floor, scan_in_camera=scan_in_camera)
                 if place is None:
                     continue
                 mx, my = to_map(pose, place.x, place.y)
