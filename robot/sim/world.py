@@ -14,6 +14,7 @@ import random
 import re
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -899,25 +900,31 @@ class SimRobot:
                     self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
                     return found
         for _ in range(SEARCH_STOPS):
-            stop = self._next_stop(description, region, tried)
-            if stop is None:
+            prior = len(tried)
+            for stop in self._next_stops(description, region, tried):
+                tried.append(xy(stop))
+                reached = False
+                try:
+                    self._go(stop, 0.0)
+                    reached = True
+                except PathBlocked:
+                    pass
+                found = self._found(description, started)
+                if found:
+                    self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
+                    return found
+                if reached:
+                    break
+            if len(tried) == prior:
                 break
-            tried.append(xy(stop))
-            try:
-                self._go(stop, 0.0)
-            except PathBlocked:
-                pass
-            found = self._found(description, started)
-            if found:
-                self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
-                return found
         self._result("not found")
         return None
 
-    def _next_stop(self, description: str, region: str | None, tried: list[Point]) -> Any:
+    def _next_stops(self, description: str, region: str | None, tried: list[Point]) -> Iterator[Point | Pose]:
         """Where a search looks next: the nearest viewpoint the cameras have not covered yet."""
         views = [v for v in self._unseen(region or "all") if all(math.dist((v.x, v.y), s) > 0.5 for s in tried)]
-        return views[0] if views else None
+        if views:
+            yield views[0]
 
     def _area(self, area: str) -> str | None:
         """A room id, or None for everywhere. People say "the living room", "this room", "anywhere"."""

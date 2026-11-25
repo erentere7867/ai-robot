@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from concurrent.futures import Future
-from threading import Lock
+from threading import Lock, RLock
 from types import SimpleNamespace
 from typing import Any
 
@@ -168,11 +168,25 @@ class MockRosRobot(RosRobot):
         return True
 
 
-def test_frontier_tries_next_candidate_when_nav2_success_ends_short():
+def _frontier_search_robot(frontiers, max_leg=3.2):
     robot = object.__new__(RealRobot)
     SimRobot.__init__(robot, _make_scene())
     robot._plan = lambda end, _: [end]
     robot._pose_msg = lambda x, y, yaw: (x, y)
+    robot._motion = SimpleNamespace(lock=RLock())
+    robot._note_place = lambda: None
+    robot.detect = lambda *_: []
+    robot._remembered = lambda *_: []
+    robot._next_stops = lambda _desc, _region, _tried: iter(robot._frontier_steps(frontiers, max_leg))
+    target = Object(1, "bag", (3.0, 0.0), 3.0, 0.0, "ahead", 0.15, "", 0.0)
+    moves = []
+    robot._act = lambda name, *, pose, **_: moves.append((name, pose))
+    robot._found = lambda *_: target if moves else None
+    return robot, target, moves
+
+
+def test_frontier_tries_next_candidate_when_nav2_success_ends_short():
+    robot, target, moves = _frontier_search_robot([Pose(1.0, 0.0, 0.0), Pose(0.0, 1.5, 0.0)])
     requested = []
 
     def completed(value):
@@ -191,33 +205,32 @@ def test_frontier_tries_next_candidate_when_nav2_success_ends_short():
     name = "compute_path_to_pose"
     robot.actions = {name: SimpleNamespace(wait_for_server=lambda **_: True, send_goal_async=send)}
     robot.kinds = {name: SimpleNamespace(Goal=SimpleNamespace)}
-    assert robot._frontier_step([Pose(1.0, 0.0, 0.0), Pose(0.0, 1.5, 0.0)]) == (0.0, 1.5)
+    assert SimRobot.search(robot, target.label) is target
     assert requested == [(1.0, 0.0), (0.0, 1.5)]
+    assert moves == [("navigate_to_pose", (0.0, 1.5))]
 
 
 def test_frontier_tries_a_reachable_candidate_after_six_blocked_ones():
-    robot = object.__new__(RealRobot)
-    SimRobot.__init__(robot, _make_scene())
-    robot._plan = lambda end, _: [end]
-    robot._nav_reaches = lambda end: end == (4.0, 1.0)
     frontiers = [Pose(0.5 * i, 0.0, 0.0) for i in range(1, 7)] + [Pose(4.0, 1.0, 0.0)]
-    assert robot._frontier_step(frontiers, max_leg=5.0) == (4.0, 1.0)
+    robot, target, moves = _frontier_search_robot(frontiers, max_leg=5.0)
+    robot._nav_reaches = lambda end, _: end == (4.0, 1.0)
+    assert SimRobot.search(robot, target.label) is target
+    assert moves == [("navigate_to_pose", (4.0, 1.0))]
 
 
 def test_frontiers_that_share_a_blocked_capped_endpoint_check_it_once():
-    robot = object.__new__(RealRobot)
-    SimRobot.__init__(robot, _make_scene())
-    robot._plan = lambda end, _: [end]
+    frontiers = [Pose(2.0, 0.0, 0.0), Pose(3.0, 0.0, 0.0), Pose(0.0, 4.0, 0.0)]
+    robot, target, moves = _frontier_search_robot(frontiers, max_leg=1.5)
     checked = []
 
-    def reaches(end):
+    def reaches(end, _):
         checked.append(end)
         return end == (0.0, 1.5)
 
     robot._nav_reaches = reaches
-    frontiers = [Pose(2.0, 0.0, 0.0), Pose(3.0, 0.0, 0.0), Pose(0.0, 4.0, 0.0)]
-    assert robot._frontier_step(frontiers, max_leg=1.5) == (0.0, 1.5)
+    assert SimRobot.search(robot, target.label) is target
     assert checked == [(1.5, 0.0), (0.0, 1.5)]
+    assert moves == [("navigate_to_pose", (0.0, 1.5))]
 
 
 def test_object_approach_tries_farther_spot_after_rejecting_same_side_goals():
@@ -235,18 +248,12 @@ def test_object_approach_tries_farther_spot_after_rejecting_same_side_goals():
 
 
 def test_frontier_plans_only_once_before_dispatch():
-    robot = object.__new__(RealRobot)
-    SimRobot.__init__(robot, _make_scene())
-    checks, moves = [], []
+    robot, target, moves = _frontier_search_robot([Pose(2.0, 0.0, 0.0)])
+    checks = []
     robot._nav_reaches = lambda end, yaw=0.0: not checks.append(end)
-    robot._act = lambda name, **kwargs: moves.append(name)
-    robot._pose_msg = lambda *pose: pose
-    robot._note_place = lambda: None
-    stop = robot._frontier_step([Pose(2.0, 0.0, 0.0)])
-    assert stop is not None
-    robot._go(stop, 0.0)
-    assert checks == [stop]
-    assert moves == ["navigate_to_pose"]
+    assert SimRobot.search(robot, target.label) is target
+    assert checks == [(2.0, 0.0)]
+    assert moves == [("navigate_to_pose", (2.0, 0.0))]
 
 
 @pytest.mark.parametrize("ready", [False, True])
@@ -256,8 +263,10 @@ def test_nav_planner_outage_is_not_a_blocked_goal(monkeypatch, ready):
     robot = object.__new__(RealRobot)
     SimRobot.__init__(robot, _make_scene())
     robot._sync = lambda: None
+    robot._motion = SimpleNamespace(lock=RLock())
     name = "compute_path_to_pose"
-    robot.actions = {name: SimpleNamespace(wait_for_server=lambda **_: ready, send_goal_async=lambda _: Future())}
+    sent = Future()
+    robot.actions = {name: SimpleNamespace(wait_for_server=lambda **_: ready, send_goal_async=lambda _: sent)}
     robot.kinds = {name: SimpleNamespace(Goal=SimpleNamespace)}
     robot._pose_msg = lambda *pose: pose
     monkeypatch.setattr("robot.ros.robot.PLAN_TIMEOUT_S", 0.0)
@@ -266,6 +275,11 @@ def test_nav_planner_outage_is_not_a_blocked_goal(monkeypatch, ready):
     result, ok = tools.run("go_to", {"target": "lounge"})
     assert not ok
     assert result.startswith("Timed out: navigation planner unavailable")
+    if ready:
+        cancels = []
+        sent.set_result(SimpleNamespace(accepted=True, get_result_async=Future,
+                                        cancel_goal_async=lambda: cancels.append(True)))
+        assert cancels == [True]
 
 
 def test_ros_robot_goal_point_heading_faces_object():
@@ -884,20 +898,21 @@ def test_a_search_steps_back_from_a_likely_way_with_no_floor_to_see_the_thing_wh
     real.floor_spots = spots
     odds = {"front_camera": 0.95}
     real.brain = SimpleNamespace(yes_probability=lambda _: odds.get(asked[-1], 0.07))
-    stop = real._next_stop("blue bicycle", None, [])  # right in front: the bicycle itself leaves no floor that way
+    stop = next(real._next_stops("blue bicycle", None, []))  # right in front: the bicycle itself leaves no floor that way
     assert isinstance(stop, Pose) and (round(stop.x, 2), round(stop.y, 2), stop.yaw) == (-1.0, 0.0, 0.0)
     assert real.search_log[-1].endswith("stepped back to see front whole")
-    assert real._next_stop("blue bicycle", None, []) == (-2.0, 2.0)  # once a search: no second step back
+    assert list(real._next_stops("blue bicycle", None, [])) == [(-2.0, 2.0)]  # once a search: no second step back
     real._stepped_back = False
     odds["front_camera"] = 0.3  # likeliest, but unlikely: nothing worth backing off to see
-    assert real._next_stop("blue bicycle", None, []) == (-2.0, 2.0) and real.search_log[-1].endswith("went rear-left")
+    assert list(real._next_stops("blue bicycle", None, [])) == [(-2.0, 2.0)]
+    assert real.search_log[-1].endswith("went rear-left")
     odds["front_camera"] = 0.95
-    assert real._next_stop("blue bicycle", None, [(-1.0, 0.0)]) == (-2.0, 2.0)  # stepped back already: floor elsewhere
+    assert list(real._next_stops("blue bicycle", None, [(-1.0, 0.0)])) == [(-2.0, 2.0)]  # stepped back already
     assert real.search_log[-1].endswith("went rear-left")
     floor.update({"rear_left_camera": [], "rear_right_camera": []})
-    assert real._next_stop("blue bicycle", None, [(-1.0, 0.0)]) is None  # nowhere new to go: the search ends
+    assert not list(real._next_stops("blue bicycle", None, [(-1.0, 0.0)]))  # nowhere new to go: the search ends
     floor["front_camera"] = [(1.5, 0.0), (3.0, 0.5)]
-    assert real._next_stop("blue bicycle", None, []) == (3.0, 0.5)  # floor that way: the farthest, as before
+    assert list(real._next_stops("blue bicycle", None, [])) == [(3.0, 0.5)]  # floor that way: the farthest, as before
 
 
 @pytest.mark.parametrize(("seen_ago", "answer", "confirmed"), [(0.4, None, True), (6.6, 0.9, True), (6.6, 0.1, False)])
@@ -1026,7 +1041,7 @@ def test_search_uses_unseen_map_frontiers_instead_of_zigzagging_when_no_camera_h
     real._cover()
     real.floor_spots = lambda camera, **_: (np.zeros((4, 4, 3), np.uint8), [(-1.5, 0.0)])  # already-covered spot
     real.brain = SimpleNamespace(yes_probability=lambda _: 0.15)  # no visual lead in any camera
-    stop = real._next_stop("umbrella", None, [])
+    stop = next(real._next_stops("umbrella", None, []), None)
     assert stop is not None and stop[0] > -3.0 and stop != (-1.5, 0.0)
     assert math.dist(stop, (-3.0, 0.0)) <= 3.3  # capped to a <=3.2 m path hop along the way around the wall
     assert real.search_log[-1].endswith("explored unseen area")
@@ -1131,7 +1146,7 @@ def test_floor_sees_now_and_spotted_standpoint_pull_in():
     moved: list[float] = []
     real._rotate = lambda a: setattr(real, "yaw", real.yaw + a)
     real._move = lambda d: (moved.append(d), setattr(real, "x", real.x + d * math.cos(real.yaw)))[0]
-    real._nav_reaches = lambda *_: True
+    real._nav_reaches = lambda *_: pytest.fail("short heading drive should not ask the planner")
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(RosRobot, "_go", lambda self, *a, **kw: None)
         real._go(umb, 0.0)

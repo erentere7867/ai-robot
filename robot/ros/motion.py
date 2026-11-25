@@ -141,9 +141,11 @@ class NavGoal:
                 self.cancelled = True
                 self.sent.add_done_callback(self._cancel_when_accepted)
 
-    def wait_terminal(self, seconds: float) -> bool:
+    def wait_terminal(self, seconds: float, check: Callable[[], None] | None = None) -> bool:
         deadline = time.monotonic() + seconds
         while not self.terminal():
+            if check is not None:
+                check()
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.02)

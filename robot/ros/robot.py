@@ -6,7 +6,7 @@ import math
 import threading
 import time
 from collections.abc import Iterator
-from typing import Any, NamedTuple
+from typing import Any
 
 from robot.agent.api import (
     NotFound,
@@ -34,11 +34,6 @@ PROGRESS_S, PROGRESS_M = 30.0, 0.25
 CANCEL_WAIT_S = 2.0
 DIRECT = "direct"
 PLAN_TIMEOUT_S, PLAN_ENDPOINT_M = 2.0, 0.10
-
-
-class CheckedFrontier(NamedTuple):
-    x: float
-    y: float
 
 
 class RosRobot(SimRobot):
@@ -257,22 +252,29 @@ class RosRobot(SimRobot):
         self._wait(DT)
         self._sync()
 
+    def _client(self, name: str, timeout: float, retry: float = 0.0) -> Any:
+        client = self.actions[name]
+        if client.wait_for_server(timeout_sec=timeout):
+            return client
+        if retry:
+            from rclpy.action import ActionClient
+
+            if hasattr(client, "destroy"):
+                client.destroy()
+            self.actions[name] = client = ActionClient(self._action_node, self.kinds[name], name)
+            if client.wait_for_server(timeout_sec=retry):
+                return client
+        return None
+
     def _act(self, name: str, *, watch: Object | None = None, **fields: Any) -> None:
         """Send one action goal and wait for it, keeping the trace and the stop checks running meanwhile."""
         self._interrupts()
         with self._motion.lock:
             self._motion_available()
             self._halt()
-        client = self.actions[name]
-        if not client.wait_for_server(timeout_sec=10.0):
-            from rclpy.action import ActionClient
-
-            if hasattr(client, "destroy"):
-                client.destroy()
-            self.actions[name] = ActionClient(self._action_node, self.kinds[name], name)
-            client = self.actions[name]
-            if not client.wait_for_server(timeout_sec=20.0):
-                raise RuntimeError(f"the {name} action server is not up")
+        client = self._client(name, 10.0, retry=20.0)
+        if client is None:
+            raise RuntimeError(f"the {name} action server is not up")
         goal = self.kinds[name].Goal()
         for key, value in fields.items():
             setattr(goal, key, value)
@@ -362,49 +364,37 @@ class RosRobot(SimRobot):
     def _nav_reaches(self, end: Point, yaw: float = 0.0) -> bool:
         """Check the live costmap without arming motion. Nav2 can report success for a path 0.20 m short."""
         name = "compute_path_to_pose"
-        client = self.actions[name]
         self._interrupts()
-        if not client.wait_for_server(timeout_sec=PLAN_TIMEOUT_S):
+        client = self._client(name, PLAN_TIMEOUT_S)
+        if client is None:
             raise Timeout("navigation planner unavailable: Nav2's planner did not become ready")
         goal = self.kinds[name].Goal()
         goal.goal = self._pose_msg(*end, yaw)
-        deadline = time.monotonic() + PLAN_TIMEOUT_S
-
-        def wait(future: Any) -> Any:
-            while not future.done():
-                self._interrupts()
-                if time.monotonic() >= deadline:
-                    raise Timeout("navigation planner unavailable: Nav2's planner did not answer in time")
-                time.sleep(0.02)
-            return future.result()
-
-        def cancel(future: Any) -> None:
-            handle = future.result()
-            if handle and handle.accepted:
-                handle.cancel_goal_async()
-
-        sent = client.send_goal_async(goal)
+        pending = NavGoal(client.send_goal_async(goal), self._motion.lock)
         try:
-            handle = wait(sent)
-            if not handle.accepted:
-                return False
-            outcome = wait(handle.get_result_async())
+            if not pending.wait_terminal(PLAN_TIMEOUT_S, self._interrupts):
+                raise Timeout("navigation planner unavailable: Nav2's planner did not answer in time")
         except BaseException:
-            sent.add_done_callback(cancel)
+            pending.cancel()
             raise
+        result = pending.result_future()
+        if result is None:
+            return False
+        outcome = result.result()
+        if outcome.status != DONE:
+            return False
         path = outcome.result.path.poses
-        if outcome.status != DONE or not path:
+        if not path:
             return False
         last = path[-1].pose.position
         return math.dist(end, (last.x, last.y)) <= PLAN_ENDPOINT_M
 
     def _goal_point(self, target: Point | Pose | Object, distance: float) -> tuple[Point, float] | None:
-        checked_frontier = target if isinstance(target, CheckedFrontier) else None
         checked: set[Point] = set()
         for end, yaw in self._goal_candidates(target, distance):
             if end not in checked:
                 checked.add(end)
-                if end == checked_frontier or self._nav_reaches(end, yaw):
+                if self._nav_reaches(end, yaw):
                     return end, yaw
         if checked:
             raise PathBlocked("Nav2 found no path to a usable goal on its live costmap")

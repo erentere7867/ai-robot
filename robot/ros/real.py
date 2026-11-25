@@ -39,7 +39,7 @@ from robot.ros.perceive import (
     see_probability,
     taken_with,
 )
-from robot.ros.robot import CheckedFrontier, RosRobot
+from robot.ros.robot import RosRobot
 from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing, visual_name
 
 SEEN_NOW = 1.5  # seconds: a track seen this recently is "in view now"
@@ -658,9 +658,8 @@ class RealRobot(RosRobot):
             # Nav2's xy_goal_tolerance (0.25 m) can stop just off a narrow corner sightline (E2 umbrella: ~18 cm off
             # hid it behind the wall corner); step straight onto the spotting standpoint via drive_on_heading.
             try:
-                if self._nav_reaches(cand):
-                    self._rotate(wrap(math.atan2(cand[1] - self.y, cand[0] - self.x) - self.yaw))
-                    self._move(d)
+                self._rotate(wrap(math.atan2(cand[1] - self.y, cand[0] - self.x) - self.yaw))
+                self._move(d)
             except PathBlocked:
                 pass
 
@@ -857,7 +856,7 @@ class RealRobot(RosRobot):
                 trail.append((x, y))
         return trail
 
-    def _frontier_step(self, frontiers: list[Pose], max_leg: float = 3.2) -> CheckedFrontier | None:
+    def _frontier_steps(self, frontiers: list[Pose], max_leg: float = 3.2) -> list[Point]:
         """Nearest frontier by A* path length (not Euclidean through walls), capped to `max_leg` m so cameras and
         mid-leg trail snapshots (4 m window) inspect every corridor along the way instead of driving 12 m blind."""
         candidates: list[tuple[float, Point]] = []
@@ -876,12 +875,9 @@ class RealRobot(RosRobot):
                         end = cand
                 dist += seg
             candidates.append((dist, end))
-        for end in dict.fromkeys(end for _, end in sorted(candidates, key=lambda item: item[0])):
-            if self._nav_reaches(end):
-                return CheckedFrontier(*end)
-        return None
+        return list(dict.fromkeys(end for _, end in sorted(candidates, key=lambda item: item[0])))
 
-    def _next_stop(self, description: str, region: str | None, tried: list[Point]) -> Point | None:
+    def _next_stops(self, description: str, region: str | None, tried: list[Point]) -> Iterator[Point | Pose]:
         """Where a search looks next, judged by the vision model from what each camera shows: for each direction with
         floor it can reach away from where it already looked, how likely going that way leads to the thing (a yes/no
         answer's probability); it drives to the farthest such floor in the likeliest direction. Asked to pick one of
@@ -903,11 +899,12 @@ class RealRobot(RosRobot):
                 f"the way this picture shows likely lead to {description}? Answer yes or no.")))
             options.append((p, cam, spots))
         if not options:
-            return None
+            return
         named = ", ".join(f"{c.replace('_camera', '').replace('_', '-')} {q:.0%}" for q, c, _ in options)
         p, cam, spots = max(options, key=lambda o: o[0])
         facing = self.yaw + RIG[cam].yaw
         back = self._floor_toward(facing + math.pi, STEP_BACK)
+        stop: Point | Pose | None
         if not spots and p >= 0.5 and not self._stepped_back and all(
                 math.dist(back, a) >= STEP_BACK / 2 for a in (*tried, (self.x, self.y))):
             stop, went, self._stepped_back = Pose(*back, math.degrees(facing)), "stepped back to see {} whole", True
@@ -925,19 +922,21 @@ class RealRobot(RosRobot):
                 away = (*tried, *self._search_trail(), (self.x, self.y))
                 frontiers = [v for v in self._unseen(region or "all")
                              if all(math.dist((v.x, v.y), a) >= 1.2 for a in away)]
-                step = self._frontier_step(frontiers) if frontiers else None
-                if step is not None:
-                    stop, went = step, "explored unseen area"
-                else:
-                    stop, went = max(fresh, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
+                steps = [end for end in self._frontier_steps(frontiers) if end not in tried]
+                if steps:
+                    self._log_search_stop(description, f"{named}: explored unseen area")
+                    yield from steps
+                stop, went = max(fresh, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
             else:
                 stop, went = max(spots, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
-        if stop is None:
-            return None
-        self.search_log.append(f"{named}: {went.format(cam.replace('_camera', '').replace('_', '-'))}")
-        self.trace.asked.append((round(self.t, 2), f"search {description}: which way", self.search_log[-1]))
-        print(f"search {description!r}: {self.search_log[-1]}", flush=True)
-        return stop
+        if stop is not None and stop not in tried:
+            self._log_search_stop(description, f"{named}: {went.format(cam.replace('_camera', '').replace('_', '-'))}")
+            yield stop
+
+    def _log_search_stop(self, description: str, message: str) -> None:
+        self.search_log.append(message)
+        self.trace.asked.append((round(self.t, 2), f"search {description}: which way", message))
+        print(f"search {description!r}: {message}", flush=True)
 
     def _clear_line(self, a: Point, b: Point, step: float = 0.1, *, grid: np.ndarray | None = None) -> bool:
         n = max(1, int(math.dist(a, b) / step))
