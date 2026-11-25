@@ -374,6 +374,19 @@ def test_plan_block_waits_for_the_model_to_see_revised_step_numbers():
     assert "Open to-do steps: Inspect the door; Enter the room (blocked: door shut)." in brain.seen[5][-1]["content"]
 
 
+def test_plan_revision_defers_block_when_same_title_steps_change_numbers():
+    batch = Reply("", tool_calls=[
+        ToolCall("revise", "todo", {"steps": ["Inspect the door"] * 2}),
+        ToolCall("block", "todo_blocked", {"step": 2, "reason": "door shut"}),
+    ])
+    brain = Scripted(call("todo", steps=["Inspect the door"] * 3),
+                     call("todo_done", step=3), batch, call("todo", steps=[]), say("Done."))
+    record = Agent(brain, cameras="none").do("Inspect the doors.", SimRobot(living_room()))
+    revised, blocked = record.steps[2].calls
+    assert revised[3] and "1. [x] Inspect the door" in revised[2]
+    assert not blocked[3] and "updated step numbers" in blocked[2]
+
+
 def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
     sim = SimRobot(living_room())
     cut = call("move", metres=1)

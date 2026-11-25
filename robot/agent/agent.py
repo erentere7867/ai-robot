@@ -392,15 +392,19 @@ class Agent:
                     else:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
                         self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
-                        prior_titles = [step.title for step in tools.todo.steps] if call.name == "todo" else []
+                        prior_steps = tools.todo.steps if call.name == "todo" else []
                         try:
                             res = self._run(robot, tools, call.name, call.args, record)
                         except Preempted:
                             step.calls.append((call.name, call.args, "Interrupted before returning a result.", False))
                             raise
                         result, ok = res.text, res.ok
-                        if prior_titles and [step.title for step in tools.todo.steps[:len(prior_titles)]] != prior_titles:
-                            plan_renumbered = True
+                        if prior_steps:
+                            revised = tools.todo.steps
+                            plan_renumbered |= len(revised) < len(prior_steps) or any(
+                                old is not new and (old.done or new.done or old.title != new.title)
+                                for old, new in zip(prior_steps, revised, strict=False)
+                            )
                         if res.status == "partial":
                             barrier = ("Not run: an earlier call in this turn ended short; inspect the result before "
                                        "deciding the next action.")
