@@ -251,16 +251,20 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
     claim = r"(?:there (?:is|are)|there's|i (?:(?:can )?see|found|spotted))"
     noun = rf"(?:(?:a|an|the|one)\s+)?(?:(?!(?:a|an|the|of|for|with)\b)[\w-]+\s+){{0,2}}{target}"
     location = r"(?:here|(?:parked |standing |sitting )?(?:in|inside|by|near|at|on|under|beside|behind|next to)\s+.+)"
-    offsite = rf"\b(?:outside|outdoors|elsewhere|(?:another|a different|the other)\s+{re.escape(place)})\b"
+    scope = re.escape(place)
+    offsite = rf"\b(?:outside|outdoors|elsewhere|(?:another|a different|the other)\s+{scope})\b"
     presence = rf"(?:{claim}\s+{noun}(?:\s+{location})?|{noun}\s+(?:is|are)\s+(?:present|{location}))"
+    scope_denial = rf"not\s+(?:here|(?:in|inside)\s+(?:(?:this|the)\s+)?{scope})"
+    belief = r"i (?:don't|do not) think (?:that )?"
+    assertion = (rf"(?:(?:{belief})?there\b|{noun}\s+(?:is|are)"
+                 r"|i\s+(?:(?:can|do|did)(?:n't| not)?)?\s*(?:see|find|spot))")
 
     def clauses(text: str) -> list[str]:
         return [part.rstrip(" .!;") for part in re.split(r"(?<=[.!?;])\s+|,?\s+(?:but|however)\s+", text)]
 
     def denies(clause: str) -> bool:
-        if re.match(rf"^no(?:[,!:.]|$|\s+{noun})", clause):
+        if re.match(rf"^no(?:[,!:.]|$|\s+{noun})", clause) or re.fullmatch(scope_denial, clause):
             return True
-        assertion = rf"(?:there\b|{noun}\s+(?:is|are)|i\s+(?:(?:can|do|did)(?:n't| not)?)?\s*(?:see|find|spot))"
         return bool(
             mentions(clause, label) and re.search(rf"(?:^|,\s*){assertion}", clause)
             and (negation.search(clause) or re.search(offsite, clause))

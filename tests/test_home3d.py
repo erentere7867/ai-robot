@@ -64,6 +64,8 @@ def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):
     (["There is a bike in another apartment."], False),
     (["There is a bike. There is no bicycle."], False),
     (["There is a bike. The bicycle is outside."], False),
+    (["There is a bike, but not in this apartment."], False),
+    (["I don't think there's a bike in the apartment.", "Yes."], False),
     (["Yes."], True),
     (["Yes, there is one."], True),
     (["I can see a blue bicycle by the desk."], True),
@@ -73,6 +75,7 @@ def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):
     (["Yes, a bike is here."], True),
     (["Yes, there is a bike. I don't know whose it is."], True),
     (["There is a bike, but I don't know whose bike it is."], True),
+    (["There is a bike, but not by the desk."], True),
     (["No, there is no bike.", "There’s a bicycle by the desk."], True),
 ])
 def test_bike_answer_scores_the_claim_not_a_yes_token(answers, passed):
