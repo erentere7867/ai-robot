@@ -20,6 +20,7 @@ Habitat is y-up with -z forward; the mapping is X = -z, Y = -x (then centred). K
 from __future__ import annotations
 
 import argparse
+import itertools
 import math
 import os
 import queue
@@ -76,6 +77,22 @@ def _urdf_visual_matrix(vis: ET.Element, mesh: ET.Element) -> np.ndarray:
     mat[:3, :3] = (rz @ ry @ rx) * np.array(sc, float)
     mat[:3, 3] = xyz
     return mat
+
+
+def convex_hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    def chain(ordered):
+        edge = []
+        for x, y in ordered:
+            while len(edge) >= 2:
+                (ax, ay), (bx, by) = edge[-2:]
+                if (bx - ax) * (y - ay) > (by - ay) * (x - ax):
+                    break
+                edge.pop()
+            edge.append((x, y))
+        return edge
+
+    ordered = sorted(set(points))
+    return chain(ordered)[:-1] + chain(reversed(ordered))[:-1] if len(ordered) > 1 else ordered
 
 
 class Home:
@@ -139,8 +156,11 @@ class Home:
                 box = obj.root_scene_node.cumulative_bb
             centre = obj.transformation.transform_point((box.min + box.max) / 2)  # boxes are in the object's frame
             half = (box.max - box.min) / 2
+            corners = [obj.transformation.transform_point(mn.Vector3(*p))
+                       for p in itertools.product(*zip(box.min, box.max))]
             objects.append({"id": k, "label": label(handle), "hab": (float(centre.x), float(centre.y),
                                                                      float(centre.z)),
+                            "corners": corners,
                             "radius": float(max(0.05, min(1.5, max(half.x, half.z)))),
                             "top": float(centre.y + half.y)})
         return objects
@@ -210,6 +230,7 @@ class Home:
         for o in self.objects:
             x, y = self.from_hab(mn.Vector3(*o["hab"]))
             objects.append({"id": o["id"], "label": o["label"], "x": x, "y": y, "radius": o["radius"],
+                            "footprint": convex_hull([self.from_hab(p) for p in o["corners"]]),
                             "height": round(o["top"] - self.ground_y, 2)})
         return {"width": self.width, "height": self.height, "res": RES, "shape": self.free.shape,
                 "navmesh_above_floor": round(self.floor_y - self.ground_y, 3),

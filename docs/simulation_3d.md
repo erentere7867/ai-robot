@@ -28,7 +28,7 @@ the agent waits for one.
 
 The robot has no depth camera and no lidar. Its obstacle scan comes from the colour cameras:
 
-1. **Depth Anything V2 small** (ONNX, `models/depth-anything-v2-small-onnx/model.onnx`) estimates relative
+1. **Depth Anything V2 Base FP32** (ONNX, `models/vision/depth_base.onnx`, shared by CPU and server) estimates relative
    inverse depth for each frame (`robot/perception/depth.py`, `MonoDepth`).
 2. **Metres from the floor's geometry** (`fit_to_floor`): the camera's height and the IMU's tilt give the floor's
    true distance at every pixel; a robust line fit of the network's output to it in the lower picture gives the scale
@@ -61,6 +61,38 @@ is: a wall the network puts 30% too far is "floor" 30% further up its face, the 
 and the map builder cleared floor through it. The larger network input (518 px) and the metric-indoor model were
 worse on this set, not better. Cut into narrower virtual views the network did better at mid range but either
 missed the floor at the robot's feet (level views) or added fake returns (tipped views).
+
+On the fixed table and staircase views in `apt_0`, Base FP32 at the same 364-pixel input recovered 62/63
+east-table beams within 15% of truth (Small: 0/63). Across all table views it recovered 274/562 (Small: 226/562),
+with 51/878 false returns on truth-clear beams (Small: 67/878). On staircase views it recovered 1,480/1,569
+(Small: 1,442/1,569), with 92/2,031 false returns (Small: 115/2,031).
+These fixed views measure range accuracy, not collision avoidance.
+
+CPU depth + scan cost on the same three frames (table, dock and stairs; two pinned cores, one warm-up and
+six timed frames per model):
+
+| Model, 364 px | Depth + scan p50 / p95 | Scan alone p50 / p95 |
+| :--- | :--- | :--- |
+| Small | 0.759 s / 0.922 s | 22.0 ms / 26.4 ms |
+| Base FP32 | 2.117 s / 2.170 s | 22.1 ms / 22.8 ms |
+
+Live nearest-table trial (`home3d --scenes apt_0 --only T1 --rtf 0.1 --think off`, CPU depth):
+
+| Run | Closest truth table edge | Bumps | Task | /scan wall Hz |
+| :--- | ---: | ---: | :--- | ---: |
+| Small 1 | 0.897 m | 0 | Fail | 0.332 |
+| Small 2 | 0.928 m | 0 | Fail | 0.372 |
+| Base FP32 1 | 0.895 m | 0 | Fail | 0.334 |
+| Base FP32 2 | 0.911 m | 0 | Fail | 0.340 |
+
+Edge distance is from the simulated robot centre to the projected, oriented table bounding box, using
+simulator truth only after the run. Scan rate counts received `/scan` messages per elapsed wall second during
+the task. The robot moved toward the table from a 1.20 m gap but reported arrival early in all four trials.
+These runs did not exercise near-contact avoidance and do not show a live improvement.
+
+Base is [CC BY-NC 4.0](https://huggingface.co/onnx-community/depth-anything-v2-base).
+On an existing installation, rerun `bash tools/linux/setup_models.sh` and restart the vision server to pick up Base.
+Base latency on the Windows DirectML GPU and the physical board is still unmeasured.
 
 ## What YOLOE finds
 

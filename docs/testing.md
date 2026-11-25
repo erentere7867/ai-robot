@@ -103,7 +103,7 @@ How fast the pieces are, so runs can be planned:
 | Piece | Windows PC, RX 6600 (DirectML, Vulkan) | 6 CPU cores |
 | :--- | :--- | :--- |
 | YOLOE-26l, one frame | 75 ms | 1.4 s |
-| Depth, one frame | 82 ms | 0.5 s |
+| Depth (previous Small model), one frame | 82 ms | 0.5 s |
 | The language model reading one picture | 0.15 s | several seconds |
 
 On a CPU-only machine, run the 3D apartment slower (`--rtf 0.1`): the simulated world waits for the robot's software,

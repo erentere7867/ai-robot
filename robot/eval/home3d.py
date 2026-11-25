@@ -29,6 +29,7 @@ from robot.agent.api import wrap
 from robot.eval.suite import end, rocks, turned
 from robot.perception.rig import to_robot
 from robot.sim.stack import Home
+from robot.sim.world import Thing, Trace
 
 TUNE = ("apt_0", "v3_sc0_staging_00")  # the layouts tasks and harness are tuned on; hold others out
 WORDS = {"sofa": ("sofa", "couch"), "bike": ("bike", "bicycle"), "tv": ("tv", "television", "monitor", "screen")}
@@ -53,13 +54,17 @@ class Task:
         return result if isinstance(result, str) else "" if result else "task criterion not met"
 
 
+@dataclass
+class TruthThing(Thing):
+    footprint: tuple[tuple[float, float], ...] = ()
+
+
 class Referee:
     """The run as the truth saw it: the home's objects, where the body really went, and what the robot said."""
 
     def __init__(self, home: Home, robot: Any = None, since: int = 0) -> None:
-        from robot.sim.world import Thing, Trace
-
-        self.things = {o["id"]: Thing(o["label"], o["x"], o["y"], o["radius"], solid=False, id=o["id"])
+        self.things = {o["id"]: TruthThing(o["label"], o["x"], o["y"], o["radius"], solid=False, id=o["id"],
+                                           footprint=tuple(o.get("footprint", ())))
                        for o in home.truth["objects"]}
         t0 = home.path[since][0] if since < len(home.path) else 0.0
         self.trace = Trace(poses=[(t - t0, x, y, yaw) for t, x, y, yaw in home.path[since:]])
@@ -131,12 +136,40 @@ def mentions(text: str, label: str) -> bool:
     return any(re.search(rf"\b{re.escape(w)}", text) for w in WORDS.get(label, (label,)))
 
 
-def things(sim: Referee, label: str) -> list[Any]:
+def things(sim: Referee, label: str) -> list[TruthThing]:
     return [t for t in sim.things.values() if t.label == label or label == "tv" and t.label in ("tv", "tv stand")]
 
 
-def gap(xy: tuple[float, float], t: Any) -> float:
-    return math.dist(xy, (t.x, t.y)) - t.radius
+def gap(source: tuple[float, float] | TruthThing, t: TruthThing) -> float:
+    """Gap to a convex simulator hull; segments need a lengthwise axis to detect collinear separation."""
+    if isinstance(source, TruthThing):
+        a, b = source.footprint, t.footprint
+        if len(a) < 2:
+            return max(0.0, gap((source.x, source.y), t) - source.radius)
+        if len(b) < 2:
+            return gap(t, source)
+        for polygon in (a, b):
+            for (ax, ay), (bx, by) in zip(polygon, (*polygon[1:], polygon[0]), strict=True):
+                dx, dy = bx - ax, by - ay
+                axes = ((-dy, dx), (dx, dy)) if len(polygon) == 2 else ((-dy, dx),)
+                for nx, ny in axes:
+                    a_proj = [nx * x + ny * y for x, y in a]
+                    b_proj = [nx * x + ny * y for x, y in b]
+                    if max(a_proj) < min(b_proj) or max(b_proj) < min(a_proj):
+                        return min(*(gap(p, t) for p in a), *(gap(p, source) for p in b))
+        return 0.0
+    points = t.footprint
+    if len(points) < 2:
+        return max(0.0, math.dist(source, (t.x, t.y)) - t.radius)
+    x, y = source
+    inside, closest = len(points) >= 3, math.inf
+    for (ax, ay), (bx, by) in zip(points, (*points[1:], points[0]), strict=True):
+        dx, dy = bx - ax, by - ay
+        px, py = x - ax, y - ay
+        inside &= dx * py >= dy * px
+        u = max(0.0, min(1.0, (px * dx + py * dy) / (dx * dx + dy * dy)))
+        closest = min(closest, math.hypot(px - u * dx, py - u * dy))
+    return 0.0 if inside else closest
 
 
 def ends_near(sim: Referee, ts: list[Any] | Any, margin: float = 0.75) -> bool:
@@ -144,8 +177,8 @@ def ends_near(sim: Referee, ts: list[Any] | Any, margin: float = 0.75) -> bool:
     return any(gap((x, y), t) <= margin for t in (ts if isinstance(ts, list) else [ts]))
 
 
-def nearest(ts: list[Any], xy: tuple[float, float]) -> Any:
-    return min(ts, key=lambda t: math.dist((t.x, t.y), xy))
+def nearest(ts: list[TruthThing], source: tuple[float, float] | TruthThing) -> TruthThing:
+    return min(ts, key=lambda t: gap(source, t))
 
 
 def visited_in_order(sim: Referee, targets: list[Any], margin: float = 0.75) -> bool:
@@ -250,15 +283,17 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
         return failure
     affirmative = re.match(r"^(?:yes|yeah|yep)\b[\s,.!:-]*", answers[-1])
     answer = answers[-1][affirmative.end():] if affirmative else answers[-1]
-    claim = r"(?:there (?:is|are)|there's|i (?:(?:can )?see|found|spotted))"
+    exists = r"(?:there (?:is|are)|there's)"
+    claim = rf"(?:{exists}|i (?:(?:can )?see|found|spotted))"
     target = rf"(?:{'|'.join(map(re.escape, WORDS.get(label, (label,))))})s?\b"
     noun = rf"(?:(?:a|an|the|one)\s+)?(?:(?!(?:a|an|the|of|for|with)\b)[\w-]+\s+){{0,2}}{target}"
     subject = rf"{noun}\s+(?:is|are)"
     location = r"(?:here|(?:parked |standing |sitting )?(?:in|inside|by|near|at|on|under|beside|behind|next to)\s+.+)"
+    at_location = rf"(?:,?\s+{location})?"
     scope = re.escape(place)
     offsite = rf"\b(?:outside|outdoors|elsewhere|(?:another|a different|the other)\s+{scope})\b"
-    absence = rf"\b(?:no|not|never|cannot|unable|none)\b|n't\b|{offsite}"
-    presence = rf"(?:{claim}\s+{noun}(?:,?\s+{location})?|{subject}\s+(?:present|{location}))"
+    absence = rf"\b(?:no|not|never|cannot|unable|none)\b|n't\b|\b(?:zero|0)\s+{noun}|{offsite}"
+    presence = rf"(?:{claim}\s+{noun}{at_location}|{subject}\s+(?:present|{location}))"
     scope_denial = rf"not\s+(?:here|(?:in|inside)\s+(?:(?:this|the)\s+)?{scope})"
     belief = r"i (?:don't|do not) think (?:that )?"
     assertion = (rf"(?:(?:{belief})?there\b|{subject}"
@@ -281,8 +316,9 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
     if any(re.fullmatch(presence, clause) and not re.search(offsite, clause) and "?" not in clause for clause in final):
         return True
     # An elliptical answer has no subject to disambiguate it after a denial.
-    elliptical = (affirmative and not answer) or re.fullmatch(r"(?:there (?:is|are) one|there's one)[.! ]*", answer)
-    if elliptical and not any(denies(clause) for text in answers[:-1] for clause in clauses(text)):
+    elliptical = (affirmative and not answer) or re.fullmatch(rf"{exists}\s+one{at_location}", answer.rstrip(" .!;"))
+    if (elliptical and "?" not in answer and not re.search(offsite, answer)
+            and not any(denies(clause) for text in answers[:-1] for clause in clauses(text))):
         return True
     return failure
 
@@ -292,7 +328,7 @@ def between(sim: Referee, a: str, b: str, margin: float = 1.0) -> bool:
     one to the other rather than off beyond either."""
     x, y, _ = end(sim)
     for ta in things(sim, a):
-        tb = nearest(things(sim, b), (ta.x, ta.y))
+        tb = nearest(things(sim, b), ta)
         dx, dy = tb.x - ta.x, tb.y - ta.y
         along = ((x - ta.x) * dx + (y - ta.y) * dy) / max(1e-6, dx * dx + dy * dy)
         if gap((x, y), ta) <= margin and gap((x, y), tb) <= margin and 0.0 < along < 1.0:
@@ -300,10 +336,9 @@ def between(sim: Referee, a: str, b: str, margin: float = 1.0) -> bool:
     return False
 
 
-def _closer(sim: Referee, start: dict, a: str, b: str) -> str:
-    da = min(math.dist((t.x, t.y), start["xy"]) for t in things(sim, a))
-    db = min(math.dist((t.x, t.y), start["xy"]) for t in things(sim, b))
-    return a if da <= db else b
+def sofa_tv_order(sim: Referee, xy: tuple[float, float]) -> tuple[str, str]:
+    closest = nearest(things(sim, "sofa") + things(sim, "tv"), xy)
+    return ("sofa", "tv") if closest.label == "sofa" else ("tv", "sofa")
 
 
 TASKS = [
@@ -321,12 +356,14 @@ TASKS = [
     Task("N3", ("Go to the nearest chair.",),
          lambda s, st: ends_near(s, nearest(things(s, "chair"), st["xy"])), ("chair",)),
     Task("N4", ("Go to the table that is closest to the sofa.",),
-         lambda s, st: ends_near(s, nearest(things(s, "table"), (things(s, "sofa")[0].x, things(s, "sofa")[0].y))),
+         lambda s, st: ends_near(s, nearest(things(s, "table"), things(s, "sofa")[0])),
          ("table", "sofa")),
-    Task("N5", ("Go to the TV.",), lambda s, st: ends_near(s, things(s, "tv") + things(s, "monitor"), 0.9), ("tv",)),
+    Task("N5", ("Go to the TV.",), lambda s, st: ends_near(s, things(s, "tv"), 0.9), ("tv",)),
     Task("N6", ("Go to the sofa, then to the TV, then come back here.",),
          lambda s, st: visited_in_order(s, [things(s, "sofa")[0], things(s, "tv")[0]]) and moved(s, st) < 0.8,
          ("sofa", "tv")),
+    Task("T1", ("Go to the nearest table.",),
+         lambda s, st: ends_near(s, nearest(things(s, "table"), st["xy"])), ("table",)),
     # seeing and answering
     Task("P1", ("Go between the sofa and the table.",), lambda s, st: between(s, "sofa", "table"), ("sofa", "table")),
     Task("Q1", ("What do you see in front of you?",),
@@ -338,8 +375,7 @@ TASKS = [
              sum(st["pixels"].get(k, 0) >= CLEAR for k in st["ids"]["chair"]),  # counts either way
              st["seen"].count("chair") + 1)), ("chair",)),
     Task("Q4", ("Which is closer to you, the sofa or the TV?",),
-         lambda s, st: first_named(said(s, last_only=True), *(lambda c: (c, "tv" if c == "sofa" else "sofa"))(
-             _closer(s, st, "sofa", "tv"))), ("sofa", "tv")),
+         lambda s, st: first_named(said(s, last_only=True), *sofa_tv_order(s, st["xy"])), ("sofa", "tv")),
     Task("Q5", ("Is there a bike in the apartment?",), lambda s, st: confirms_presence(s, "bike", "apartment"),
          ("bike",)),
     # finding things
@@ -351,7 +387,7 @@ TASKS = [
          lambda s, st: ends_near(s, things(s, "sofa")) if "sofa" in st["seen"] else abs(abs(turned(s)) - math.pi)
          < 0.35, ("sofa",)),
     Task("C2", ("If the TV is closer to you than the sofa, go to the TV. Otherwise go to the sofa.",),
-         lambda s, st: ends_near(s, things(s, _closer(s, st, "tv", "sofa"))), ("sofa", "tv")),
+         lambda s, st: ends_near(s, things(s, sofa_tv_order(s, st["xy"])[0])), ("sofa", "tv")),
     # two requests in a row: context and memory
     Task("R1", ("Remember that my keys are on the sofa.", "Where are my keys?"),
          lambda s, st: mentions(said(s, last_only=True), "sofa")),
