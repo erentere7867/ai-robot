@@ -350,9 +350,9 @@ class CirculatingMemory:
                     place_rows.append((name, float(px), float(py), float(pyaw)))
                 self.db.executemany("INSERT INTO places VALUES (?,?,?,?)", place_rows)
 
-        # Record facts avoiding exact duplicates
+        # Record facts avoiding exact duplicates without overwriting existing timestamps
         for n in (notes or ()):
-            self.remember_fact(n, now_wall=wall)
+            self.remember_fact(n, now_wall=wall, refresh=False)
 
         # Run routine circulation
         self.circulate(now_wall=wall)
@@ -594,7 +594,8 @@ class CirculatingMemory:
                 )
             return None
 
-    def remember_fact(self, text: str, room: str = "", now_wall: float | None = None) -> None:
+    def remember_fact(self, text: str, room: str = "", now_wall: float | None = None,
+                      *, refresh: bool = True) -> None:
         """Store a semantic fact with text embedding, avoiding exact duplicate entries."""
         text = text.strip()
         if not text:
@@ -609,7 +610,7 @@ class CirculatingMemory:
                     "INSERT INTO facts (text, room, vec, created_at) VALUES (?, ?, ?, ?)",
                     (text, room, _vec_to_blob(vec), now_wall),
                 )
-            else:
+            elif refresh:
                 self.db.execute(
                     "UPDATE facts SET created_at = ?, room = CASE WHEN ? != '' THEN ? ELSE room END WHERE text = ?",
                     (now_wall, room, room, text),
