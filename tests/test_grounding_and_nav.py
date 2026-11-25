@@ -233,6 +233,19 @@ def test_frontier_plans_only_once_before_dispatch():
     assert moves == ["navigate_to_pose"]
 
 
+@pytest.mark.parametrize("ready", [False, True])
+def test_nav_planner_outage_is_not_a_blocked_goal(monkeypatch, ready):
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    name = "compute_path_to_pose"
+    robot.actions = {name: SimpleNamespace(wait_for_server=lambda **_: ready, send_goal_async=lambda _: Future())}
+    robot.kinds = {name: SimpleNamespace(Goal=SimpleNamespace)}
+    robot._pose_msg = lambda *pose: pose
+    monkeypatch.setattr("robot.ros.robot.PLAN_TIMEOUT_S", 0.0)
+    with pytest.raises(RuntimeError, match="Nav2's planner"):
+        robot._goal_point((2.0, 0.0), 0.0)
+
+
 def test_ros_robot_goal_point_heading_faces_object():
     scene = _make_scene()
     robot = MockRosRobot(scene)

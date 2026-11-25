@@ -364,7 +364,7 @@ class RosRobot(SimRobot):
         client = self.actions[name]
         self._interrupts()
         if not client.wait_for_server(timeout_sec=PLAN_TIMEOUT_S):
-            raise PathBlocked("Nav2's planner is unavailable")
+            raise RuntimeError("Nav2's planner is unavailable")
         goal = self.kinds[name].Goal()
         goal.goal = self._pose_msg(*end, yaw)
         deadline = time.monotonic() + PLAN_TIMEOUT_S
@@ -373,7 +373,7 @@ class RosRobot(SimRobot):
             while not future.done():
                 self._interrupts()
                 if time.monotonic() >= deadline:
-                    raise PathBlocked("Nav2's planner did not answer in time")
+                    raise RuntimeError("Nav2's planner did not answer in time")
                 time.sleep(0.02)
             return future.result()
 
