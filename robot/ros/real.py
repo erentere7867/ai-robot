@@ -649,8 +649,9 @@ class RealRobot(RosRobot):
         super()._go(target, distance, side=side)
         self._note_place()
 
-    def _finish_approach(self, target: Object, distance: float, end: Point) -> None:
-        if end != self._spotted_standpoint(target, distance):
+    def _finish_approach(self, target: Object, distance: float, rejected: set[Point]) -> None:
+        end = self._spotted_standpoint(target, distance)
+        if end is None or end in rejected:
             return
         d = math.dist((self.x, self.y), end)
         if 0.10 < d <= 0.40 and self._clear_line((self.x, self.y), end, grid=self.inflated):

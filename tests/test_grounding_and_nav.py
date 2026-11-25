@@ -278,6 +278,27 @@ def test_object_approach_does_not_drive_toward_a_rejected_spot():
     robot._move.assert_not_called()
 
 
+def test_object_approach_corrects_view_when_already_in_reach_without_a_nav_goal():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    robot.x, robot.y = 1.47, 0.18
+    target = Object(1, "bag", (2.0, 0.0), 0.56, 0.0, "ahead", 0.15, "", 0.0)
+    tracker = Tracker()
+    tracker.tracks[1] = Track(1, "bag", 2.0, 0.0, 0.15, 0.0, 0.0, present=True, visual=True,
+                              spotted_from=(1.2, 0.0))
+    robot.perception = SimpleNamespace(tracker=tracker, lock=Lock())
+    robot._nav_reaches = Mock()
+    robot._act = Mock()
+    robot._rotate = Mock()
+    robot._move = Mock()
+
+    robot._go(target, 0.0)
+
+    robot._nav_reaches.assert_not_called()
+    robot._act.assert_not_called()
+    robot._move.assert_called_once_with(pytest.approx(math.dist((1.47, 0.18), (1.4, 0.0))))
+
+
 def test_frontier_plans_only_once_before_dispatch():
     robot, target, moves = _frontier_search_robot([Pose(2.0, 0.0, 0.0)])
     checks = []

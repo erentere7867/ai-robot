@@ -389,14 +389,16 @@ class RosRobot(SimRobot):
         last = path[-1].pose.position
         return math.dist(end, (last.x, last.y)) <= PLAN_ENDPOINT_M
 
-    def _goal_point(self, target: Point | Pose | Object, distance: float) -> tuple[Point, float] | None:
-        checked: set[Point] = set()
+    def _goal_point(self, target: Point | Pose | Object, distance: float, *,
+                    rejected: set[Point] | None = None) -> tuple[Point, float] | None:
+        if rejected is None:
+            rejected = set()
         for end, yaw in self._goal_candidates(target, distance):
-            if end not in checked:
-                checked.add(end)
+            if end not in rejected:
                 if self._nav_reaches(end, yaw):
                     return end, yaw
-        if checked:
+                rejected.add(end)
+        if rejected:
             raise PathBlocked("Nav2 found no path to a usable goal on its live costmap")
         return None
 
@@ -430,8 +432,8 @@ class RosRobot(SimRobot):
             except PathBlocked:
                 pass
 
-    def _finish_approach(self, target: Object, distance: float, end: Point) -> None:
-        """Refine arrival at an object after Nav2 reaches its approved endpoint."""
+    def _finish_approach(self, target: Object, distance: float, rejected: set[Point]) -> None:
+        """Refine the view without retrying a point Nav2 rejected."""
 
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
         """Nav2 drives there; when it gives up short of the target, so does the robot, and the caller hears why."""
@@ -439,19 +441,20 @@ class RosRobot(SimRobot):
         target, distance = self._destination(target, distance, side)
         goal = xy(target)
         reach = (target.radius if isinstance(target, Object) else 0.0) + max(distance, 0.35)
-        where = self._goal_point(target, distance)
+        rejected: set[Point] = set()
+        where = self._goal_point(target, distance, rejected=rejected)
         if where is not None:
             (gx, gy), yaw = where
             try:
                 self._act("navigate_to_pose", watch=watch, pose=self._pose_msg(gx, gy, yaw))
             except PathBlocked:
+                rejected.add((gx, gy))
                 self._sync()
                 if math.dist(goal, (self.x, self.y)) > reach + 0.35 and math.dist((gx, gy), (self.x, self.y)) > 0.35:
                     raise
                 self._face_goal(goal)  # stopped just short (or at nearest free cell beside furniture): face it
-            else:
-                if isinstance(target, Object):
-                    self._finish_approach(target, distance, (gx, gy))
+        if isinstance(target, Object):
+            self._finish_approach(target, distance, rejected)
         if isinstance(target, Pose):
             self._rotate(wrap(math.radians(target.yaw) - self.yaw))
 
