@@ -302,6 +302,48 @@ def test_empty_model_reply_gets_one_repair_turn():
     assert len(silent.seen) == 2
 
 
+def test_search_miss_is_read_before_motion_and_same_search_can_retry_after_repositioning(monkeypatch):
+    sim = SimRobot(living_room())
+    viewpoints = []
+
+    def miss(*args, **kwargs):
+        viewpoints.append(sim.pose().x)
+        if len(viewpoints) == 1:
+            sim.x -= 0.5
+        return None
+
+    monkeypatch.setattr(sim, "search", miss)
+    search = call("search", what="towel")
+    move = call("move", metres=0.75, direction="backward")
+    batch = Reply("", tool_calls=search.tool_calls + move.tool_calls)
+    brain = Scripted(batch, search, move, search, say("I didn't find a towel."))
+    record = Agent(brain, cameras="none").do("Find a towel.", sim)
+    miss_result, skipped_move = tool_results(brain.seen[1])
+    assert "No towel found in the views checked. Search scope: living." in miss_result
+    assert skipped_move.startswith("Not run: read the search result before deciding the next action.")
+    assert "you made this exact call from here already" in tool_results(brain.seen[2])[-1]
+    assert len(viewpoints) == 2 and viewpoints[1] < -1.0
+    assert sum(e.name == "move" for e in sim.trace.events) == 1
+    assert record.steps[0].calls[0][-1]  # a search miss is evidence, not a failed call
+
+
+def test_review_shows_completed_and_blocked_steps_after_revising_a_plan():
+    sim = SimRobot(living_room())
+    brain = Scripted(call("todo", steps=["Turn left", "Enter the room"]),
+                     call("turn", degrees=90, direction="left"),
+                     call("todo_done", step=1),
+                     call("todo", steps=["Ask for the door to be opened", "Enter the room"]),
+                     call("todo_blocked", step=3, reason="door shut"),
+                     say("All done."), say("I turned left but couldn't enter."))
+    Agent(brain, cameras="none").do("Turn left and enter the room.", sim)
+    assert "[x] Turn left" in tool_results(brain.seen[4])[-1]
+    assert "Step 3 blocked: door shut. It is not finished." in tool_results(brain.seen[5])[-1]
+    review = brain.seen[6][-1]["content"]
+    assert "Completed to-do steps: Turn left." in review
+    assert "Open to-do steps: Ask for the door to be opened; Enter the room (blocked: door shut)." in review
+    assert [text for _, text in sim.trace.said] == ["I turned left but couldn't enter."]
+
+
 def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
     sim = SimRobot(living_room())
     cut = call("move", metres=1)

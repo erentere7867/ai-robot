@@ -53,7 +53,8 @@ How you work:
   change what you do, ask a specific question and do not act on a guess. Follow any later correction from the user.
 - If something is not in view, reason about where it likely belongs and give search a room, a visible landmark/area in
   near (e.g. near="kitchen" or near="stairs"), or a promising camera direction in toward before saying it is not there.
-- For a request with several parts, first write a to-do list with todo, then tick each step off with todo_done.
+- For a request with several parts, write a plan with todo. Tick steps off with todo_done when the results show
+  they are complete. Use todo_blocked for a step you cannot finish and tell the user what remains.
 - When the request is done, reply with one or two short, warm spoken sentences and no tool call. That ends the task.
 - If a request is impossible or unsafe for you, say so kindly instead."""
 
@@ -352,12 +353,11 @@ class Agent:
                     open_steps = tools.todo.open_steps()
                     if open_steps:
                         record.problems.append(f"open to-do steps left unfinished: {'; '.join(open_steps)}")
-                        return self._finish(robot, record, "failed", last_said)
                     if reply.text and speak and not spoke_since_action:
                         robot.say(speakable(reply.text))
                     step.said = reply.text if not spoke_since_action else ""  # avoid duplicate speech after say()
                     last_said = (reply.text if not spoke_since_action else "") or last_said
-                    return self._finish(robot, record, "done", last_said)
+                    return self._finish(robot, record, "failed" if open_steps else "done", last_said)
 
                 barrier = ""
                 plan_renumbered = False
@@ -369,8 +369,8 @@ class Agent:
                     if self._stopped.is_set():
                         return self._finish(robot, record, "preempted", last_said)
                     skipped = "Not run: the user spoke (their words follow)." if not self._heard.empty() else barrier
-                    if not skipped and plan_renumbered and call.name == "todo_done":
-                        skipped = "Not run: read the updated step numbers before ticking a step."
+                    if not skipped and plan_renumbered and call.name in ("todo_done", "todo_blocked"):
+                        skipped = "Not run: read the updated step numbers before updating a step."
                     if skipped:
                         step.calls.append((call.name, call.args, skipped, False))
                         messages.append({"role": "tool", "tool_call_id": call.id, "content": skipped})
@@ -435,6 +435,8 @@ class Agent:
                         barrier = barrier or "Skipped: an earlier call in this turn failed."
                     elif call.name == "ask":
                         barrier = "Not run: read the result of asking the user before deciding the next action."
+                    elif call.name == "search":
+                        barrier = "Not run: read the search result before deciding the next action."
                     cameras = list(dict.fromkeys([*move_cams, *tools.looked]))
                     if cameras or tools.pictures:
                         recorded = len(tools.pictures)
@@ -518,11 +520,14 @@ class Agent:
                 "- no tool call at all: you have not moved, turned, looked or done anything for this request; only "
                 "tools do things, so saying you did something does not do it")
         open_steps = tools.todo.open_steps()
-        todo = f"\nOpen to-do steps: {'; '.join(open_steps)}." if open_steps else ""
+        done_steps = tools.todo.done_steps()
+        todo = f"\nCompleted to-do steps: {'; '.join(done_steps)}." if done_steps else ""
+        if open_steps:
+            todo += f"\nOpen to-do steps: {'; '.join(open_steps)}."
         return (f'Before you finish, check every part of the request: "{instruction}"\nWhat you did:\n{done}{todo}\n'
                 "Use the user's later corrections if they changed the request. "
-                "If something is still missing, do it now with tools. If everything is done, give your final short "
-                "reply to the user, with no tool call.")
+                "If you can finish a remaining step, use tools now. Otherwise reply briefly with what you finished "
+                "and what remains, with no tool call.")
 
     def _run(self, robot: Any, tools: Tools, name: str, args: dict[str, Any],
              record: TaskRecord) -> ActionResult:

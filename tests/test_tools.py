@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from robot.agent.api import Pose
 from robot.agent.tools import Tools, _num
-from robot.eval.suite import living_room
+from robot.eval.suite import living_room, two_rooms
 from robot.sim.world import SimRobot
 
 
@@ -179,3 +180,49 @@ def test_go_to_side_accounts_for_default_02m_gap() -> None:
     assert abs((1.25 - 0.4 - ROBOT_RADIUS) - 0.7) < 1e-6
     res = Tools(SideStopRobot()).execute("go_to_side", {"target": "1", "side": "left"})
     assert res.ok and res.status == "reached"
+
+
+@pytest.mark.parametrize(("door_open", "landmark", "scope", "approach"), [
+    (True, "kitchen", "kitchen", "Approached the kitchen"),
+    (False, "kitchen", "living", "Could not reach the kitchen"),
+    (True, "unmapped shelf", "living", "Could not locate 'unmapped shelf'"),
+])
+def test_search_reports_landmark_outcome_and_scope(door_open, landmark, scope, approach, monkeypatch):
+    robot = SimRobot(two_rooms(door_open=door_open))
+    called = []
+
+    def search(what, area, *, toward):
+        called.append((what, area, robot.room()))
+        return None
+
+    monkeypatch.setattr(robot, "search", search)
+    result, ok = Tools(robot).run("search", {"what": "towel", "near": landmark})
+    assert ok and called == [("towel", "here", scope)]
+    assert f"No towel found in the views checked. Search scope: {scope}." in result
+    assert approach in result
+
+
+def test_search_does_not_count_travel_before_the_search_as_coverage(monkeypatch):
+    robot = SimRobot(two_rooms())
+    tools = Tools(robot)
+    robot.places["far counter"] = Pose(4.0, 0.0, 0.0)
+    robot.go_to("far counter")
+    robot.go_to("start")
+    monkeypatch.setattr(robot, "search", lambda *args, **kwargs: None)
+    result, ok = tools.run("search", {"what": "towel", "area": "everywhere"})
+    assert ok and "Areas not visited closely yet: far counter." in result
+
+
+def test_plan_revision_keeps_completed_steps_and_blocking_is_not_completion():
+    tools = Tools(SimRobot(two_rooms()))
+    assert tools.run("todo", {"steps": ["Reach the doorway", "Enter the room"]})[1]
+    assert tools.run("todo_done", {"step": 1})[1]
+    assert tools.run("todo_blocked", {"step": 2, "reason": "door shut"})[1]
+    assert tools.todo.open_steps() == ["Enter the room (blocked: door shut)"]
+    assert not tools.run("todo_blocked", {"step": 1, "reason": "door shut"})[1]
+    assert not tools.run("todo", {"steps": [""]})[1]
+    result, ok = tools.run("todo", {"steps": ["Ask the user to open the door", "Enter the room"]})
+    assert ok and result.splitlines()[1:] == [
+        "1. [x] Reach the doorway", "2. [ ] Ask the user to open the door", "3. [ ] Enter the room",
+    ]
+    assert tools.todo.done_steps() == ["Reach the doorway"]

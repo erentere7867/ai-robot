@@ -114,34 +114,56 @@ class Tool:
 
 
 @dataclass
+class TodoStep:
+    title: str
+    done: bool = False
+    blocker: str = ""
+
+    def status(self) -> str:
+        return f"{self.title} (blocked: {self.blocker})" if self.blocker else self.title
+
+
+@dataclass
 class Todo:
     """The model's own to-do list for a request with several parts, shown back to it every turn."""
 
-    steps: list[str] = field(default_factory=list)
-    done: list[bool] = field(default_factory=list)
+    steps: list[TodoStep] = field(default_factory=list)
 
     def write(self, steps: list[str]) -> None:
         if any(not isinstance(step, str) or not step.strip() for step in steps):
             raise ToolError("the to-do list needs non-empty step descriptions")
-        completed = [step for step, done in zip(self.steps, self.done, strict=True) if done]
+        completed = [step for step, done in self.steps if step.done]
         if len(completed) + len(steps) > MAX_TODO_STEPS:
             raise ToolError(f"the to-do list can hold at most {MAX_TODO_STEPS} steps including completed steps")
-        self.steps = completed + [step.strip() for step in steps]
-        self.done = [True] * len(completed) + [False] * len(steps)
+        self.steps = completed + [TodoStep(step.strip()) for step in steps]
 
-    def tick(self, number: int) -> None:
+    def _step(self, number: int) -> TodoStep:
         if not 1 <= number <= len(self.steps):
             raise ToolError(f"there is no step {number}; the to-do list has {len(self.steps)} steps")
-        self.done[number - 1] = True
+        return self.steps[number - 1]
+
+    def tick(self, number: int) -> None:
+        step = self._step(number)
+        step.done, step.blocker = True, ""
+
+    def block(self, number: int, reason: str) -> None:
+        step = self._step(number)
+        if step.done:
+            raise ToolError(f"step {number} is already done")
+        if not reason:
+            raise ToolError("say what blocked the step")
+        step.blocker = reason
 
     def open_steps(self) -> list[str]:
-        return [s for s, d in zip(self.steps, self.done, strict=True) if not d]
+        return [step.status() for step in self.steps if not step.done]
+
+    def done_steps(self) -> list[str]:
+        return [step.title for step in self.steps if step.done]
 
     def text(self) -> str:
         if not self.steps:
             return "(no to-do list)"
-        return "\n".join(f"{i}. [{'x' if d else ' '}] {s}" for i, (s, d) in enumerate(zip(self.steps, self.done,
-                                                                                          strict=True), 1))
+        return "\n".join(f"{i}. [{'x' if step.done else ' '}] {step.status()}" for i, step in enumerate(self.steps, 1))
 
 
 def _num(value: Any) -> float:
@@ -272,6 +294,7 @@ class Tools:
         self.pictures: list[tuple[str, Any]] = []  # sensor evidence with its provenance, not a new live view
         self._tools = {t.name: t for t in self._define()}
         self.began = robot.pose()  # where this request began
+        self._search_views: dict[tuple[str, ...], list[Pose]] = {}
         self.done: list[str] = []  # each motion of this request, as it went
         self.turned = 0.0  # degrees of turning in all, either way
 
@@ -560,12 +583,15 @@ class Tools:
                  {"fact": {"type": "string"}}, ("fact",), self.remember),
             Tool("recall", "What you know about something: remembered facts and where it was last seen.",
                  {"query": {"type": "string"}}, ("query",), self.recall),
-            Tool("todo", "Write a to-do list for a request with several parts, in order. It is shown back to you "
-                         "after every step. A revision keeps completed steps; pass [] to clear unfinished steps.",
-                 {"steps": {"type": "array", "items": {"type": "string"},
-                            "maxItems": MAX_TODO_STEPS}}, ("steps",), self.write_todo),
-            Tool("todo_done", "Tick off a finished step of the to-do list by its number.",
+            Tool("todo", "List the steps still needed, in order. To revise the plan, list only unfinished work; "
+                         "completed steps are kept. Use [] to clear remaining work and use the returned step numbers.",
+                 {"steps": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_TODO_STEPS}},
+                 ("steps",), self.write_todo),
+            Tool("todo_done", "Tick off a step by number only when the results show it is finished.",
                  {"step": {"type": "integer", "minimum": 1, "maximum": MAX_TODO_STEPS}}, ("step",), self.todo_done),
+            Tool("todo_blocked", "Mark an unfinished step as blocked and record why; this does not finish it.",
+                 {"step": {"type": "integer", "minimum": 1, "maximum": MAX_TODO_STEPS}, "reason": {"type": "string"}},
+                 ("step", "reason"), self.todo_blocked),
             Tool("say", "Speak mid-task ONLY when you still have more tool calls to make after speaking. Never call "
                         "this for your final reply: end with plain text and no tool call instead.",
                  {"text": {"type": "string"}}, ("text",), self.say),
@@ -727,34 +753,58 @@ class Tools:
 
     def search(self, what: str, area: str = "here", near: str = "", toward: str = "") -> str:
         _check_visual_name(what)
+        area = area or "here"
         near_key = near.strip().lower().replace("_", "-")
         if near_key in BEARINGS and not toward:
             toward, near = near_key, ""
+        attempts = self._search_views.setdefault((what.casefold(), area.casefold(), near.casefold(), toward), [])
+        before = self.robot.pose()
+        if any(geom.dist(before, pose) < 0.25
+               and (not toward or abs((before.yaw - pose.yaw + 180) % 360 - 180) < 30) for pose in attempts):
+            raise ToolError("you made this exact call from here already. Try a new viewpoint or change the search area")
+        approach = ""
         if near and near_key not in {"here", "everywhere", "room"}:  # start beside a visible/known landmark if found
             try:
                 start = self._resolve(near, find=False, fuzzy_place=True)
-                self.robot.go_to(start, distance=(start.radius + 0.5) if isinstance(start, Object) else 0.0)
-            except (ToolError, NotFound, PathBlocked):
-                pass
+            except (ToolError, NotFound) as exc:
+                approach = f"Could not locate {near!r} as a starting point: {str(exc).rstrip('.')}."
+            else:
+                try:
+                    self.robot.go_to(start, distance=(start.radius + 0.5) if isinstance(start, Object) else 0.0)
+                except PathBlocked as exc:
+                    approach = f"Could not reach {self._name(start)} before searching: {str(exc).rstrip('.')}."
+                else:
+                    approach = f"Approached {self._name(start)} before searching."
+        scope = self.robot.room() if area.casefold() == "here" else area
+        context = f"Search scope: {scope}." + (f" {approach}" if approach else "")
+        origin = self.robot.pose() if approach else before
+        poses = getattr(getattr(self.robot, "trace", None), "poses", ())
+        trail_start = len(poses)
         try:
-            self.found = found = self.robot.search(what, area=area or "here", toward=toward)
+            self.found = found = self.robot.search(what, area=area, toward=toward)
         except TypeError:  # a test fake whose search() takes only (what, area)
-            self.found = found = self.robot.search(what, area=area or "here")
+            self.found = found = self.robot.search(what, area=area)
+        after = self.robot.pose()
+        attempts.extend((before, after))
         if found is None:
-            log = getattr(self.robot, "search_log", [])
-            where = "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
-            stops = f" ({len(log)} stops)" if log else ""
-            return f"Searched {where}{stops}: no {what} found."
+            trail = [(origin.x, origin.y), *((x, y) for _, x, y, _ in poses[trail_start:]), (after.x, after.y)]
+            unvisited = [
+                str(name) for name, place in getattr(self.robot, "places", {}).items()
+                if name not in ("start", "where you were before") and isinstance(place, Pose)
+                and all(math.dist((place.x, place.y), point) > 2.2 for point in trail)
+            ]
+            hint = f" Areas not visited closely yet: {'; '.join(unvisited[:4])}." if unvisited else ""
+            return f"No {what} found in the views checked. {context}{hint}"
         crop = getattr(self.robot, "target_crop", lambda _: None)(found.id)
         if crop is not None:
             self.pictures.append((f"Recorded detection crop for {found.label} ID {found.id} (not a live view):", crop))
-        others = [o for o in self.robot.where(what, area=area or "here") if o.id != found.id]
+        others = [o for o in self.robot.where(what, area=scope) if o.id != found.id]
         if others:
-            return f"Found candidate {found.label} {found.id}. Known matches: {self._choices([found, *others])}"
+            return f"Found candidate {found.label} {found.id}. {context} Known matches: {self._choices([found, *others])}"
         marked = getattr(self.robot, "marked_cameras", None)
         self.looked.extend(marked({found.id}) if marked else CAMERAS["around"])
         evidence = "" if self.looked or self.pictures else " No matching image is available to verify this ID."
-        return f"Found candidate {found.label} {found.id}, {_where_words(found)}.{evidence}"
+        return f"Found candidate {found.label} {found.id}, {_where_words(found)}. {context}{evidence}"
 
     def go_toward(self, direction: str, metres: float) -> ActionResult:
         before = self.robot.pose()
@@ -827,3 +877,7 @@ class Tools:
         self.todo.tick(step)
         left = self.todo.open_steps()
         return f"Ticked step {step}. " + (f"Still to do: {'; '.join(left)}." if left else "All steps are done.")
+
+    def todo_blocked(self, step: int, reason: str) -> str:
+        self.todo.block(step, reason)
+        return f"Step {step} blocked: {reason}. It is not finished."
