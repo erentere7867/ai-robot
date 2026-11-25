@@ -7,6 +7,7 @@ from concurrent.futures import Future
 from threading import Lock, RLock
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -188,6 +189,7 @@ def _frontier_search_robot(frontiers, max_leg=3.2):
 def test_frontier_tries_next_candidate_when_nav2_success_ends_short():
     robot, target, moves = _frontier_search_robot([Pose(1.0, 0.0, 0.0), Pose(0.0, 1.5, 0.0)])
     requested = []
+    robot._found = Mock(wraps=robot._found)
 
     def completed(value):
         future = Future()
@@ -208,6 +210,7 @@ def test_frontier_tries_next_candidate_when_nav2_success_ends_short():
     assert SimRobot.search(robot, target.label) is target
     assert requested == [(1.0, 0.0), (0.0, 1.5)]
     assert moves == [("navigate_to_pose", (0.0, 1.5))]
+    robot._found.assert_called_once()
 
 
 def test_frontier_tries_a_reachable_candidate_after_six_blocked_ones():

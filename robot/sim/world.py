@@ -903,12 +903,14 @@ class SimRobot:
             prior = len(tried)
             for stop in self._next_stops(description, region, tried):
                 tried.append(xy(stop))
+                before = self.x, self.y, self.yaw
                 reached = False
                 try:
                     self._go(stop, 0.0)
                     reached = True
                 except PathBlocked:
-                    pass
+                    if (self.x, self.y, self.yaw) == before:
+                        continue
                 found = self._found(description, started)
                 if found:
                     self._result(f"found {found.color} {found.label} {found.id}".replace("  ", " "))
