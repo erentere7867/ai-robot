@@ -61,7 +61,8 @@ physical stop timing has not been measured. This software stop is not a hardware
 ### 3.1 Driverless-Car Trajectory Rollout & Scoring
 At every control tick while navigating toward a goal or moving track:
 1. Roll out **7 smooth constant-curvature / spline candidate arcs** (`"A"`..`"G"`) over a $1.5\text{ s}$ horizon.
-2. Penalize occupied arcs, and hold forward motion if every arc is blocked within 0.15 m.
+2. Penalize occupied arcs. If every arc is blocked within 0.15 m, check tighter arcs at half speed before holding
+   forward motion. In the 2D doorway regression, both off-center approaches crossed without contact.
 3. Score remaining trajectories by:
    - Obstacle clearance margin
    - Progress toward target (or predicted future position `track.predict(dt)`)

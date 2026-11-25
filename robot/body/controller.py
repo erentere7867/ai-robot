@@ -203,14 +203,14 @@ class BodyController:
             return 0.0, max(-1.5, min(1.5, 2.5 * err)), idx, False
         self._turning_to = None
 
-        candidates = self.rollout_trajectories(
-            pose, waypoints[idx], occupied_fn, people, v_max=speed, horizon_s=1.2, dt=0.1
-        )
-        # The checked arc is only valid at its evaluated speed. The old 0.15 m/s floor could
-        # drive into an obstacle even when every rollout's first point was occupied.
-        for candidate in candidates:
-            if not candidate.blocked or candidate.clearance > 0.15:
-                return candidate.v, candidate.w, idx, False
+        # At the same turn rate a slower arc is tighter, so check it separately before driving.
+        for limit in (speed, speed / 2):
+            candidates = self.rollout_trajectories(
+                pose, waypoints[idx], occupied_fn, people, v_max=limit, horizon_s=1.2, dt=0.1
+            )
+            for candidate in candidates:
+                if not candidate.blocked or candidate.clearance > 0.15:
+                    return candidate.v, candidate.w, idx, False
         return 0.0, max(-1.5, min(1.5, 2.5 * err)), idx, False
 
     def aliveness_velocity(

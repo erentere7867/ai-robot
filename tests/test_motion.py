@@ -6,9 +6,12 @@ from unittest.mock import Mock
 
 import pytest
 
+from robot.agent.api import Pose
 from robot.body import BodyController
+from robot.eval.suite import two_rooms
 from robot.ros.motion import COMMAND_AGE_NS, NAV, MotionGate, NavGoal
 from robot.sim.habitat_ros import Hardware
+from robot.sim.world import SimRobot
 
 
 def test_body_does_not_creep_forward_when_every_checked_arc_is_blocked():
@@ -22,6 +25,13 @@ def test_body_does_not_speed_up_an_already_checked_arc():
     v, _, idx, arrived = body.step_pursuit((0, 0, 0), [(1, 0), (2, 0)], 0, v_cruise=0.0506)
     assert 0 < v <= 0.0506
     assert idx == 0 and not arrived
+
+
+@pytest.mark.parametrize("side", [-1, 1])
+def test_body_drives_through_doorway_from_off_center_without_contact(side):
+    robot = SimRobot(two_rooms(start=Pose(-0.22, side * 0.36, 0)))
+    robot.go_to((0.75, side * 0.2))
+    assert robot.x > 0 and robot.trace.bumps == 0
 
 
 @pytest.fixture
