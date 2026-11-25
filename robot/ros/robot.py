@@ -223,11 +223,13 @@ class RosRobot(SimRobot):
             self._check_goal(watch)
         pose = fields.get("pose") if name == "navigate_to_pose" else None
         to = (pose.pose.position.x, pose.pose.position.y) if pose is not None else None
-        remaining = 0.0
+        route_sample: tuple[float, Point] | None = None
 
         def feedback(msg: Any) -> None:
-            nonlocal remaining
-            remaining = msg.feedback.distance_remaining
+            nonlocal route_sample
+            sample = msg.feedback
+            pos = sample.current_pose.pose.position
+            route_sample = sample.distance_remaining, (pos.x, pos.y)
 
         sent = client.send_goal_async(goal, feedback_callback=feedback) if to is not None else client.send_goal_async(goal)
         try:
@@ -246,6 +248,7 @@ class RosRobot(SimRobot):
         self._goal, result = handle, handle.get_result_async()
         next_check = 0.0
         best_gap, best_route, since = math.inf, math.inf, self.t
+        previous: tuple[float, Point] | None = None
         route_at = (self.x, self.y)
         try:
             while not result.done():
@@ -260,12 +263,15 @@ class RosRobot(SimRobot):
                         best_gap, since = gap, self.t
                     # An apartment route measured 13.12 m for a 7.23 m straight line. Count progress along detours,
                     # but not a shorter replan while stationary or Nav2's zero feedback when no path is available.
-                    left = remaining
-                    if math.isfinite(left) and left > 0:
-                        if best_route == math.inf:
-                            best_route, route_at = left, here
-                        elif left < best_route - PROGRESS_M and math.dist(here, route_at) >= PROGRESS_M:
-                            best_route, route_at, since = left, here, self.t
+                    sample = route_sample
+                    if sample is not None and sample != previous:
+                        left, at = sample
+                        if math.isfinite(left) and left > 0:
+                            if previous is None or left - previous[0] > math.dist(at, previous[1]) + PROGRESS_M:
+                                best_route, route_at = left, at
+                            elif left < best_route - PROGRESS_M and math.dist(at, route_at) >= PROGRESS_M:
+                                best_route, route_at, since = left, at, self.t
+                            previous = sample
                     if self.t - since > PROGRESS_S:
                         raise PathBlocked(f"no nearer to ({to[0]:.1f}, {to[1]:.1f}) in {PROGRESS_S:g} s")
         except BaseException as exc:

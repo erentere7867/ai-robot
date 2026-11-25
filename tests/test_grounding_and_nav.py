@@ -218,6 +218,11 @@ def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
     assert cancelled == [True]
 
 
+def _nav_feedback(robot, distance_remaining):
+    pose = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=robot.x, y=robot.y)))
+    return SimpleNamespace(feedback=SimpleNamespace(distance_remaining=distance_remaining, current_pose=pose))
+
+
 @pytest.mark.parametrize("feedback_mode", ["missing", "oscillating", "stationary replans", "empty path"])
 def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled(feedback_mode):
     from robot.ros.robot import PROGRESS_S
@@ -246,11 +251,11 @@ def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled(feedback_mode
         if feedback_mode != "stationary replans":
             robot.x = 0.3 * math.sin(robot.t)
         if feedback_mode == "oscillating":
-            report(SimpleNamespace(feedback=SimpleNamespace(distance_remaining=4.0 - robot.x)))
+            report(_nav_feedback(robot, 4.0 - robot.x))
         elif feedback_mode == "stationary replans":
-            report(SimpleNamespace(feedback=SimpleNamespace(distance_remaining=8.0 - 0.1 * robot.t)))
+            report(_nav_feedback(robot, 8.0 - 0.1 * robot.t))
         elif feedback_mode == "empty path":
-            report(SimpleNamespace(feedback=SimpleNamespace(distance_remaining=0.0)))
+            report(_nav_feedback(robot, 0.0))
 
     robot._step = step
     goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
@@ -259,7 +264,8 @@ def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled(feedback_mode
     assert len(cancelled) == 1 and PROGRESS_S < cancelled[0] <= PROGRESS_S + 2
 
 
-def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_goal():
+@pytest.mark.parametrize("replanned", [False, True], ids=["initial route", "longer replan"])
+def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_goal(replanned):
     from robot.ros.robot import PROGRESS_S
 
     robot = MockRosRobot(_make_scene())
@@ -287,7 +293,11 @@ def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_g
 
     def step(v, w):
         robot.t += 1.0
-        travelled = robot.t * 0.2
+        if replanned and robot.t <= 2.0:
+            if report is not None:
+                report(_nav_feedback(robot, 3.0 if robot.t == 1 else total))
+            return
+        travelled = (robot.t - (2.0 if replanned else 0.0)) * 0.2
         if travelled >= total:
             robot.x, robot.y = route[-1]
             result.set_result(SimpleNamespace(status=4))
@@ -301,7 +311,7 @@ def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_g
         if robot.t == PROGRESS_S + 2:
             assert math.dist((robot.x, robot.y), route[-1]) > math.dist(route[0], route[-1])
         if report is not None:
-            report(SimpleNamespace(feedback=SimpleNamespace(distance_remaining=total - travelled)))
+            report(_nav_feedback(robot, total - travelled))
 
     robot._step = step
     goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
@@ -1301,4 +1311,3 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     perc.tracker.tracks[25].present = True
     out_present = perc.render_annotated_view("front_camera", 640, 360, 5.0)
     assert out_present is not None and int(out_present.sum()) > 0
-
