@@ -94,8 +94,8 @@ def see_probability(brain: Any, picture: np.ndarray, label: str, max_dim: int = 
 
 def locate_in_picture(brain: Any, rgb: np.ndarray, label: str) -> tuple[tuple[int, int, int, int], bool] | None:
     """Find where `label` appears in a full camera frame via yes/no crops (no numbered dots: the 2B model picks the
-    last number). Overlapping thirds -> either probability-weighted centre of contiguous positive thirds (for wide
-    surfaces/areas spanning >=2 thirds; cut close-up rug centre error from 0.78 m to 0.36 m) or overlapping halves
+    last number). Overlapping thirds -> probability-weighted centre of two adjacent positives (cut close-up rug
+    centre error from 0.78 m to 0.36 m), or refine the strongest third via overlapping halves
     (0.65 span: non-overlapping halves sliced a centred umbrella at u=0.50 from 96% to 4%/4%, while 0.65 overlap
     gave 100%/99%) -> upper/lower split on a 0.30-span context strip. Measured on 30 random apt_0 views (210 pairs)
     behind a 768px whole-image gate: 0/145 (0.0%) FP; blank-wall hallucinations (71% whole) dropped to 1%/0%."""
@@ -107,12 +107,11 @@ def locate_in_picture(brain: Any, rgb: np.ndarray, label: str) -> tuple[tuple[in
     if not pos:
         return None
     best_i = max(pos, key=t_scores.__getitem__)
-    # Contiguous positive block containing the strongest third (wide surface/area or an object straddling a seam).
-    block = [best_i] if (len(pos) == 2 and abs(pos[0] - pos[1]) == 2) else pos
-    if len(block) >= 2:
+    # Merging three positives put no target pixels in the replay crop, 47° from the refined crop.
+    if len(pos) == 2 and pos[1] == pos[0] + 1:
         span = 0.40
-        u_center = sum(t_scores[i] * 0.5 * (thirds[i][0] + thirds[i][1]) for i in block) / sum(
-            t_scores[i] for i in block
+        u_center = sum(t_scores[i] * 0.5 * (thirds[i][0] + thirds[i][1]) for i in pos) / sum(
+            t_scores[i] for i in pos
         )
     else:
         a, b = thirds[best_i]

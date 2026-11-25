@@ -60,13 +60,22 @@ class Place:
 
 def lidar_range(scan: tuple[np.ndarray, float, float] | None, bearing: float, spread: float = 0.04) -> float | None:
     """Nearest lidar return within `spread` radians of `bearing` (robot frame); scan is (ranges, angle_min, step)."""
+    hit = _lidar_return(scan, bearing, spread)
+    return hit[0] if hit is not None else None
+
+
+def _lidar_return(scan: tuple[np.ndarray, float, float] | None, bearing: float,
+                  spread: float) -> tuple[float, float] | None:
     if scan is None:
         return None
     ranges, angle_min, step = scan
-    k = np.arange(len(ranges))
-    angles = np.arctan2(np.sin(angle_min + k * step - bearing), np.cos(angle_min + k * step - bearing))
-    near = ranges[(np.abs(angles) <= spread) & np.isfinite(ranges) & (ranges > 0.05)]
-    return float(near.min()) if near.size else None
+    angles = angle_min + np.arange(len(ranges)) * step
+    delta = np.arctan2(np.sin(angles - bearing), np.cos(angles - bearing))
+    valid = np.flatnonzero((np.abs(delta) <= spread) & np.isfinite(ranges) & (ranges > 0.05))
+    if not valid.size:
+        return None
+    k = valid[ranges[valid].argmin()]
+    return float(ranges[k]), float(angles[k])
 
 
 def near_face(depths: np.ndarray, depth_band: float = 0.15) -> float | None:
@@ -226,7 +235,7 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
 
 def locate_crop(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarray | None = None,
                 scan: tuple[np.ndarray, float, float] | None = None, on_floor: bool = False) -> Place | None:
-    """Range a coarse visual crop (x1, y1, x2, y2) into a robot-frame Place on its front surface or floor spot.
+    """Range a coarse visual crop (x1, y1, x2, y2) into a robot-frame Place.
 
     Unlike `locate()` for tight detector boxes, a coarse crop can include foreground furniture near its side edges
     (sampling the middle half of columns and the 25th depth percentile cut `dock -> kitchen` edge error from 1.50 m
@@ -276,9 +285,13 @@ def locate_crop(cam: Camera, box: tuple[float, float, float, float], depth: np.n
                 vals = r_patch[floor_px]
                 seen, how, floor_flat = float(np.average(vals, weights=vals ** 2)), "floor", True
     if seen is None and scan is not None:
-        sr = lidar_range(scan, bearing, spread=max(0.06, span / 3.0))
-        if sr is not None:
-            return _place(sr * math.cos(bearing), sr * math.sin(bearing), 0.2, "lidar", sr)
+        hit = _lidar_return(scan, bearing, spread=max(0.06, span / 3.0))
+        if hit is not None:
+            sr, beam = hit
+            radius = 0.2
+            # The scan hit is the near face, not the centre that navigation uses for its standoff.
+            reach = sr + radius
+            return _place(reach * math.cos(beam), reach * math.sin(beam), radius, "lidar", sr)
     if seen is None:
         fp = cam.floor(u_mid, max(cam.height / 2.0 + 12.0, (y1 + y2) / 2.0))
         if fp is None:
