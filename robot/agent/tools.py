@@ -602,7 +602,7 @@ class Tools:
             if moved < 0.1:
                 return ActionResult(f"Already at {self._name(t)}: you did not move.", True, "already_there", moved)
             return ActionResult(f"Arrived at {self._name(t)}.", True, "reached", moved)
-        expected_gap = distance if distance is not None else (0.8 if person else 0.0)
+        expected_gap = distance if distance is not None else (0.8 if person else 0.2 if side else 0.0)
         return self._arrived(t, expected_gap=expected_gap, moved_m=moved)
 
     def go_to_side(self, target: str, side: str, distance: float | None = None) -> str | ActionResult:

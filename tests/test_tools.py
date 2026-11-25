@@ -141,3 +141,41 @@ def test_tools_remember_single_write_path_and_recall_dedupes_raw_facts(tmp_path)
         "spare keys are on the dining table (most recent)",
     ]
     store.close()
+
+
+def test_go_to_side_accounts_for_default_02m_gap() -> None:
+    from robot.agent.api import Object, Pose
+    from robot.agent.tools import ROBOT_RADIUS, Tools
+
+    class SideStopRobot:
+        def __init__(self) -> None:
+            self._pose = Pose(0.0, 0.0, 0.0)
+            # gap = distance - radius - ROBOT_RADIUS = 1.25 - 0.4 - 0.15 = 0.70 m (within 0.2 + 0.6)
+            self._obj = Object(1, "table", (1.25, 0.0), 1.25, 0.0, "ahead", 0.4, "", 0.0)
+            self.places: dict[str, Pose] = {}
+
+        def pose(self) -> Pose:
+            return self._pose
+
+        def obj(self, oid: int) -> Object:
+            assert oid == 1
+            return self._obj
+
+        def where(self, *_a, **_kw):  # noqa: ANN002, ANN003, ANN201
+            return [self._obj]
+
+        def go_to(self, _t, **_kw) -> None:  # noqa: ANN001, ANN003
+            self._pose = Pose(0.5, 0.0, 0.0)
+
+        def face(self, _t) -> None:  # noqa: ANN001
+            pass
+
+        def sees_now(self, _o: Object) -> bool:
+            return True
+
+        def user(self) -> None:
+            return None
+
+    assert abs((1.25 - 0.4 - ROBOT_RADIUS) - 0.7) < 1e-6
+    res = Tools(SideStopRobot()).execute("go_to_side", {"target": "1", "side": "left"})
+    assert res.ok and res.status == "reached"
