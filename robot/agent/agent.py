@@ -305,7 +305,9 @@ class Agent:
                 self._trim_images(messages)
                 self._push(thought="(thinking...)")
                 t0, began = time.perf_counter(), round(float(getattr(robot, "t", 0.0)), 1)
-                available = [s for s in schemas if s["function"]["name"] not in blocked_tools] if blocked_tools else schemas
+                available = (
+                    [s for s in schemas if s["function"]["name"] not in blocked_tools] if blocked_tools else schemas
+                )
                 reply = self.brain.chat(messages, available, think=think)
                 step = Step("", model_s=round(time.perf_counter() - t0, 3), tokens=reply.write_tokens,
                             thought=reply.thought.strip(), t=began)
@@ -435,10 +437,14 @@ class Agent:
                                                  include_scene=self.see_after_moves is True and tools.moved)
                         if any(part["type"] == "image_url" for part in seen["content"]):
                             visual_parts = seen["content"]
-                            barrier = barrier or "Not run: inspect the returned pictures before deciding the next action."
+                            barrier = barrier or (
+                                "Not run: inspect the returned pictures before deciding the next action."
+                            )
                         else:
                             news = True
-                            barrier = barrier or "Not run: no recent camera pictures were available after the previous action."
+                            barrier = barrier or (
+                                "Not run: no recent camera pictures were available after the previous action."
+                            )
                             result += " No recent camera pictures are available."
                     step.calls.append((call.name, call.args, result, ok))
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
