@@ -27,8 +27,8 @@ rates. Board throughput is unmeasured.
 
 The robot has no depth camera and no lidar. Its obstacle scan comes from the colour cameras:
 
-1. **Depth Anything V2 Base FP32** (ONNX, `models/vision/depth_base.onnx`, shared by CPU and server) estimates relative
-   inverse depth for each frame (`robot/perception/depth.py`, `MonoDepth`).
+1. **Depth Anything V2 Base FP32** (ONNX, `models/vision/depth_base.onnx`) runs on the vision server, on CPU or GPU.
+   The ROS node requests relative inverse depth for each frame through `MonoDepth` (`robot/perception/depth.py`).
 2. **Metres from the floor's geometry** (`fit_to_floor`): the camera's height and the IMU's tilt give the floor's
    true distance at every pixel; a robust line fit of the network's output to it in the lower picture gives the scale
    and shift. Against true depth, floor pixels come out within 15% for 96% of them.

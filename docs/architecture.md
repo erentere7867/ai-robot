@@ -82,8 +82,9 @@ guard, also crediting waypoint advances. The 2D rollout is not the ROS path foll
   detections from the same camera and exposure. Stable IDs are drawn on the matching pictures; the model can
   answer about the pictures directly, even when YOLOE has no label. Room segmentation uses the robot's map;
   vision can propose room names, while named tour places take precedence.
-- **Depth and scan.** Depth Anything V2 Base FP32 estimates relative inverse depth. `fit_to_floor` uses camera
-  geometry and tilt to fit a metric scale. Each camera scan ranges floor edges and uses depth for overhangs;
+- **Depth and scan.** Depth Anything V2 Base FP32 runs on the vision server, including on CPU-only hosts.
+  The ROS depth node uses `fit_to_floor` to turn its relative inverse depth into metres using camera geometry
+  and tilt. Each camera scan ranges floor edges and uses depth for overhangs;
   odometry compensates for different exposure times when joining the sectors. Nav2 receives the fused `/scan`
   with ToF and contact-based obstacles. The agent's four range sectors come from the contact-free
   `/scan_measured` and label stale or missing readings rather than calling them clear.
