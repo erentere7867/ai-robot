@@ -53,6 +53,7 @@ Nav2 docking and following publish on `/cmd_vel`, which the base does not consum
 Nav2's velocity smoother, now limits acceleration. Stop closes the gate and sends zero before waiting on Nav2.
 A late goal response is canceled, and no new motion starts until that goal is terminal. The gate checks for
 missing replies at 40 Hz and sends zero once a checked command is more than 250 ms old at its source in ROS time.
+Habitat independently enforces the same source-age limit.
 A ROS clock rewind requires restarting the motion process; an unconfirmed goal at shutdown requires restarting Nav2.
 
 The checked-in ROS wheel consumer is Habitat. There is no physical ROS-to-Ventuno bridge in this checkout, and

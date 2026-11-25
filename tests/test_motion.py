@@ -172,6 +172,11 @@ def test_habitat_wheel_watchdog_uses_sender_time_not_delivery_time():
     assert hardware._want() == (0.0, 0.0)
     hardware._command(command(1, 900_000_000, 0.25))
     assert hardware._want() == (0.25, 0.0)
+    hardware.t = 1.9 + COMMAND_AGE_NS / 1e9
+    assert hardware._want() == (0.25, 0.0)
+    hardware.t += 1e-9
+    assert hardware._want() == (0.0, 0.0)
+    hardware.t = 2.0
     hardware._command(command(2, 0, 0.0))
     hardware._command(command(1, 990_000_000, 0.25))
     hardware._command(command(2, 20_000_000, 0.25))

@@ -24,11 +24,10 @@ from typing import Any
 import numpy as np
 
 from robot.ros.model import CAMERAS, MAX_DV, MAX_DW, MAX_V, MAX_W, TOF, TRACK, WHEEL_R
-from robot.ros.motion import WHEELS
+from robot.ros.motion import COMMAND_AGE_NS, WHEELS, command
 from robot.sim.habitat import Habitat
 
 DT = 0.02  # the motor controller's period, simulated seconds
-WATCHDOG = 0.3  # the MCU stops the wheels when no command came for this long
 TOF_EVERY = 5  # ticks: 10 Hz
 TRUTH_EVERY = 5
 # what the real parts get wrong (one draw per run for the biases; noise per reading)
@@ -115,16 +114,14 @@ class Hardware:
         self.rendered: list[float] = []  # wall seconds per picture, for the report
 
     def _command(self, msg: Any) -> None:
-        header = msg.header.stamp
-        stamp = header.sec * 1_000_000_000 + header.nanosec
+        v, w, stamp = command(msg)
         if self.cmd[0] <= stamp <= round(self.t * 1e9):
-            v, w = msg.twist.linear.x, msg.twist.angular.z
             self.cmd = (stamp, v, w) if math.isfinite(v) and math.isfinite(w) else (stamp, 0.0, 0.0)
 
     def _want(self) -> tuple[float, float]:
         # DDS delivery must not restart the watchdog for a command already old at its source.
         stamp, v, w = self.cmd
-        return (v, w) if 0 < stamp and 0 <= round(self.t * 1e9) - stamp <= WATCHDOG * 1e9 else (0.0, 0.0)
+        return (v, w) if 0 < stamp and 0 <= round(self.t * 1e9) - stamp <= COMMAND_AGE_NS else (0.0, 0.0)
 
     def _stamp(self) -> Any:
         """The time as a ROS stamp, from whole nanoseconds (splitting the float seconds instead once turned 4.99999

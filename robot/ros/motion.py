@@ -18,6 +18,12 @@ DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
 # Measured in ROS time, like the Nav2 controller and the simulated base.
 CONTROL_PERIOD = 0.025
 COMMAND_AGE_NS = 250_000_000
+MAX_REVERSE_MPS = 0.25
+
+
+def command(msg: Any) -> tuple[float, float, int]:
+    stamp = msg.header.stamp
+    return msg.twist.linear.x, msg.twist.angular.z, stamp.sec * 1_000_000_000 + stamp.nanosec
 
 
 class MotionGate:
@@ -73,7 +79,7 @@ class MotionGate:
                 return
             self._selected = stamp
             self._in_flight.append(stamp)
-            self._select(max(-0.25, min(self._max_v, v)), max(-self._max_w, min(self._max_w, w)), stamp)
+            self._select(max(-MAX_REVERSE_MPS, min(self._max_v, v)), max(-self._max_w, min(self._max_w, w)), stamp)
 
     def checked(self, v: float, w: float, stamp: int) -> None:
         with self.lock:

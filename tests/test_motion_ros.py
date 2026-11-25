@@ -11,7 +11,7 @@ import pytest
 
 from robot.agent.api import Pose, Preempted
 from robot.ros import bringup
-from robot.ros.motion import CHECKED, COMMAND_AGE_NS, NAV, WHEELS
+from robot.ros.motion import CHECKED, COMMAND_AGE_NS, NAV, WHEELS, command
 from robot.ros.robot import RosRobot
 from robot.sim.habitat_ros import Hardware
 from robot.sim.world import Scene
@@ -64,12 +64,12 @@ def test_live_nav2_motion_handoff(tmp_path, monkeypatch):
     fake_base = Hardware.__new__(Hardware)
     fake_base.cmd, fake_base.t = (0, 0.0, 0.0), 10.0
     nav, checked, wheels = [], [], []
-    node.create_subscription(TwistStamped, NAV, lambda m: nav.append(RosRobot._command(m)), 10)
-    node.create_subscription(TwistStamped, CHECKED, lambda m: checked.append(RosRobot._command(m)), 10)
+    node.create_subscription(TwistStamped, NAV, lambda m: nav.append(command(m)), 10)
+    node.create_subscription(TwistStamped, CHECKED, lambda m: checked.append(command(m)), 10)
 
     def receive(msg):
         fake_base._command(msg)
-        wheels.append((RosRobot._command(msg), fake_base._want()))
+        wheels.append((command(msg), fake_base._want()))
 
     node.create_subscription(TwistStamped, WHEELS, receive, 10)
 
