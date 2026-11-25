@@ -319,3 +319,128 @@ def test_a_number_written_with_an_exponent_or_a_leading_dot_still_moves_the_robo
     Agent(brain).do("Turn left a quarter turn, then go forward half a metre.", sim)
     results = tool_results(brain.seen[2])
     assert _text(results[0]).startswith("Turned 90 degrees left.") and "0.5" in _text(results[1])
+
+
+def test_partial_action_stops_remaining_batched_calls() -> None:
+    robot = SimRobot(living_room())
+    robot.move = lambda metres, direction="forward": None  # type: ignore[method-assign]
+    turns = []
+    robot.turn = lambda degrees, direction="left": turns.append((degrees, direction))  # type: ignore[method-assign]
+    brain = Scripted(
+        Reply("", tool_calls=[
+            ToolCall("c1", "move", {"metres": 1.0, "direction": "forward"}),
+            ToolCall("c2", "turn", {"degrees": 90, "direction": "left"}),
+        ]),
+        say("Stopped short."),
+    )
+    record = Agent(brain).do("Move forward 1 m then turn left.", robot)
+    assert record.outcome == "done"
+    assert turns == []
+    results = tool_results(brain.seen[1])
+    assert "ended short" in _text(results[0])
+    assert "Not run:" in _text(results[1])
+
+
+def test_correction_during_thinking_cancels_stale_tool_calls() -> None:
+    robot = SimRobot(living_room())
+    ran = []
+    robot.turn = lambda degrees, direction="left": ran.append((degrees, direction))  # type: ignore[method-assign]
+    agent: Agent
+
+    class InterjectingBrain(Scripted):
+        def chat(self, messages, tools, think=0, **_):  # noqa: ANN001, ANN003, ANN201
+            if not self.seen:
+                agent.interject("Wait, turn right instead.")
+            return super().chat(messages, tools, think=think)
+
+    brain = InterjectingBrain(
+        call("turn", degrees=90, direction="left"),
+        call("turn", degrees=90, direction="right"),
+        say("Turned right instead."),
+    )
+    agent = Agent(brain)
+    record = agent.do("Turn left 90 degrees.", robot)
+    assert record.outcome == "done"
+    assert ran == [(90.0, "right")]
+    assert "Not run: the user spoke" in _text(tool_results(brain.seen[1])[0])
+    assert any("Wait, turn right instead." in _text(m["content"]) for m in brain.seen[1] if m["role"] == "user")
+
+
+def test_correction_between_batched_calls_cancels_remaining_calls() -> None:
+    robot = SimRobot(living_room())
+    ran = []
+    agent: Agent
+
+    def first_turn(degrees: float, direction: str = "left") -> None:
+        ran.append((degrees, direction))
+        if len(ran) == 1:
+            agent.interject("Actually don't move forward.")
+
+    robot.turn = first_turn  # type: ignore[method-assign]
+    robot.move = lambda metres, direction="forward": ran.append(("move", metres))  # type: ignore[method-assign]
+    brain = Scripted(
+        Reply("", tool_calls=[
+            ToolCall("c1", "turn", {"degrees": 90, "direction": "left"}),
+            ToolCall("c2", "move", {"metres": 1.0, "direction": "forward"}),
+        ]),
+        say("Okay, staying put."),
+    )
+    agent = Agent(brain)
+    record = agent.do("Turn left and move forward.", robot)
+    assert record.outcome == "done"
+    assert ran == [(90.0, "left")]
+    assert "Not run: the user spoke" in _text(tool_results(brain.seen[1])[1])
+
+
+def test_open_todo_steps_mark_task_failed() -> None:
+    robot = SimRobot(living_room())
+    brain = Scripted(
+        call("todo", steps=["go to sofa", "turn around"]),
+        call("todo_done", step=1),
+        say("Done!"),
+        say("Really done!"),  # still ignores the open step after the review prompt
+    )
+    record = Agent(brain).do("Go to the sofa and turn around.", robot)
+    assert record.outcome == "failed"
+    assert any("turn around" in p for p in record.problems)
+
+
+def test_restart_recalls_corrected_fact_on_first_prompt_and_fails_without_memory(tmp_path) -> None:
+    from robot.mind.memory import CirculatingMemory
+
+    db = tmp_path / "restart.db"
+    mem1 = CirculatingMemory(db)
+    robot1 = SimRobot(living_room())
+    brain1 = Scripted(
+        call("remember", fact="spare keys are on the couch"),
+        say("Got it."),
+        call("remember", fact="spare keys are on the dining table"),
+        say("Updated."),
+    )
+    agent1 = Agent(brain1, memory=mem1)
+    assert agent1.do("Remember that my spare keys are on the couch.", robot1).outcome == "done"
+    assert agent1.do("Actually, I moved my spare keys to the dining table.", robot1).outcome == "done"
+    mem1.close()
+
+    # Restart: fresh SQLite handle, fresh robot, fresh Agent (no transcript)
+    mem2 = CirculatingMemory(db)
+    robot2 = SimRobot(living_room())
+    brain2 = Scripted(say("Turned."), say("Your backup key is on the dining table."))
+    agent2 = Agent(brain2, memory=mem2)
+    agent2.do("Turn left 90 degrees.", robot2)
+    irrelevant_prompt = _text(brain2.seen[0][1]["content"])
+    assert "Remembered facts" not in irrelevant_prompt
+
+    agent2.do("Where did I leave my backup key?", robot2)
+    recall_prompt = _text(brain2.seen[1][1]["content"])
+    assert "Remembered facts" in recall_prompt
+    assert "dining table (most recent)" in recall_prompt
+    assert recall_prompt.index("couch") < recall_prompt.index("dining table")
+    mem2.close()
+
+    # Ablation: without durable memory after restart, no stored facts reach the fresh agent
+    robot3 = SimRobot(living_room())
+    brain3 = Scripted(say("I don't know."))
+    Agent(brain3, memory=None).do("Where did I leave my backup key?", robot3)
+    assert "dining table" not in _text(brain3.seen[0][1]["content"])
+

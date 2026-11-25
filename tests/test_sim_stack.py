@@ -57,3 +57,30 @@ def test_hardware_log_is_closed(monkeypatch, tmp_path, failure):
     finally:
         for log in logs:
             log.close()
+
+
+def test_home_robot_opens_per_map_sqlite_store_by_default(monkeypatch, tmp_path):
+    from robot.mind.memory import CirculatingMemory
+    from robot.ros import real
+
+    home = object.__new__(stack.Home)
+    home.map = tmp_path / "apt_0.yaml"
+    captured = []
+
+    def fake_real_robot(scene, **kwargs):
+        captured.append(kwargs)
+        return Mock(**kwargs)
+
+    monkeypatch.setattr(stack, "own_home", lambda path: (Mock(), Mock()))
+    monkeypatch.setattr(real, "RealRobot", fake_real_robot)
+
+    home.robot(Mock())
+    assert isinstance(captured[0]["store"], CirculatingMemory)
+    assert captured[0]["owns_store"] is True
+    assert captured[0]["store"].path == tmp_path / "apt_0.memory.db"
+    captured[0]["store"].close()
+
+    home.robot(Mock(), store=None)
+    assert captured[1]["store"] is None
+    assert captured[1]["owns_store"] is False
+

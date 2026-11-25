@@ -18,7 +18,7 @@ from typing import Any
 
 from robot.agent.api import Preempted, SafetyStop, side, wrap
 from robot.agent.instant import instant
-from robot.agent.tools import CAMERA_NAMES, Tools, speakable
+from robot.agent.tools import CAMERA_NAMES, Tools, recalled_facts, speakable
 from robot.perception.camera import data_url
 
 MAX_TURNS = 16  # model replies per task
@@ -271,6 +271,11 @@ class Agent:
             context.append("Earlier requests (oldest first):\n" + "\n".join(f"- {e}" for e in older))
         if self.last:
             context.append(f"The last request, step by step:\n{self.last}")
+        recalled = recalled_facts(tools.memory, instruction)
+        if recalled:
+            heading = ("Remembered facts (oldest to newest; later facts supersede earlier ones):"
+                       if len(recalled) > 1 else "Remembered facts:")
+            context.append(heading + "\n" + "\n".join(f"- {f}" for f in recalled))
         first = self._observation(robot, tools, list(self.cameras), "What you sense now:")
         if context:
             first["content"].insert(0, {"type": "text", "text": "\n".join(context) + "\n"})
@@ -329,17 +334,33 @@ class Agent:
                         robot.say(speakable(reply.text))
                     step.said = reply.text if not spoke_since_action else ""  # avoid duplicate speech after say()
                     last_said = (reply.text if not spoke_since_action else "") or last_said
+                    open_steps = tools.todo.open_steps()
+                    if open_steps:
+                        record.problems.append(f"open to-do steps left unfinished: {'; '.join(open_steps)}")
+                        return self._finish(robot, record, "failed", last_said)
                     return self._finish(robot, record, "done", last_said)
 
                 failed = False
+                partial = False
                 visual_result = None
                 for call in reply.tool_calls:
+                    if self._stopped.is_set():
+                        return self._finish(robot, record, "preempted", last_said)
+                    if not self._heard.empty():
+                        result, ok = "Not run: the user spoke (their words follow).", False
+                        failed = True
+                        step.calls.append((call.name, call.args, result, ok))
+                        messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                        continue
                     key = ("say",) if call.name == "say" else (call.name, json.dumps(call.args, sort_keys=True))
                     repeats = repeats + 1 if key == last_call else 1
                     last_call = key
                     seen_calls[key] = seen_calls.get(key, 0) + 1
                     if failed:
-                        result, ok = "Skipped: an earlier call in this turn failed.", False
+                        result, ok = (
+                            "Not run: an earlier call in this turn ended short; inspect the result before deciding "
+                            "the next action." if partial else "Skipped: an earlier call in this turn failed."
+                        ), False
                     elif visual_result is not None:
                         result, ok = "Not run: inspect the returned pictures before deciding the next action.", False
                     elif call.name == "say" and repeats > 1:
@@ -370,6 +391,8 @@ class Agent:
                             step.calls.append((call.name, call.args, "Interrupted before returning a result.", False))
                             raise
                         failed = not ok
+                        if tools.last_result is not None and tools.last_result.status == "partial":
+                            partial = True
                         if call.name == "say" and ok:
                             last_said = str(call.args.get("text", ""))
                             spoke_since_action = True
@@ -403,7 +426,8 @@ class Agent:
                 heard = self._drain()
                 think = self._budget(news=failed or bool(heard))
                 full_move = self.see_after_moves is True and tools.moved
-                open_loop = any(ok and name in ("go_toward", "drive", "move", "turn") for name, _, _, ok in step.calls)
+                open_loop = any((ok or tools.moved) and name in ("go_toward", "drive", "move", "turn")
+                                for name, _, _, ok in step.calls)
                 front_move = (self.see_after_moves == "front" and open_loop and bool(self.cameras)
                               and not tools.looked and not tools.pictures)
                 move_cams = self.cameras if full_move else ("front_camera",) if front_move else ()

@@ -24,3 +24,49 @@ def test_anything_else_is_refused(text: str) -> None:
 def test_true_and_false_are_not_numbers() -> None:
     with pytest.raises(ValueError):
         _num(True)
+
+
+def test_honest_move_turn_and_go_toward_partial_outcomes() -> None:
+    from robot.agent.tools import Tools
+    from robot.eval.suite import living_room
+    from robot.sim.world import SimRobot
+
+    robot = SimRobot(living_room())
+    tools = Tools(robot)
+
+    # Short move reports partial (ok=False) with measured distance
+    robot.move = lambda metres, direction="forward": None  # type: ignore[method-assign]
+    res = tools.execute("move", {"metres": 1.0, "direction": "forward"})
+    assert not res.ok and res.status == "partial" and "0.00 m of 1 m" in res.text
+
+    # Short turn reports partial (ok=False) with measured degrees
+    robot.turn = lambda degrees, direction="left": None  # type: ignore[method-assign]
+    res = tools.execute("turn", {"degrees": 90, "direction": "left"})
+    assert not res.ok and res.status == "partial" and "0 of 90 degrees" in res.text
+
+    # Short go_toward reports partial (ok=False)
+    robot.go_to = lambda *a, **kw: None  # type: ignore[method-assign]
+    res = tools.execute("go_toward", {"direction": "front", "metres": 2.0})
+    assert not res.ok and res.status == "partial" and "ended short" in res.text
+
+
+def test_tools_uses_robot_store_when_memory_not_passed(tmp_path) -> None:
+    from robot.agent.tools import Tools
+    from robot.eval.suite import living_room
+    from robot.mind.memory import CirculatingMemory
+    from robot.sim.world import SimRobot
+
+    db = tmp_path / "store.db"
+    store = CirculatingMemory(db)
+    robot = SimRobot(living_room())
+    robot.store = store  # type: ignore[attr-defined]
+    tools = Tools(robot)
+    assert tools.memory is store
+    _, ok = tools.run("remember", {"fact": "umbrella is in the closet"})
+    assert ok
+    store.close()
+
+    reopened = CirculatingMemory(db)
+    assert any("umbrella" in f for f in reopened.query_facts("where is my umbrella"))
+    reopened.close()
+

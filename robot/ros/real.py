@@ -61,7 +61,7 @@ ELEVATED_Z = 0.45  # metres above floor: above the 22 cm camera, occluded by tab
 class RealRobot(RosRobot):
     def __init__(self, scene: Scene, *, detector: Any, brain: Any = None, max_time: float = 600.0,
                  nudge: Any = None, store: Any = None, grid: Any = None,
-                 places_file: Path | None = None) -> None:
+                 places_file: Path | None = None, owns_store: bool = False) -> None:
         """`store` (CirculatingMemory) persists seen objects, habits, speakers, facts and places across restarts;
         `grid` is the occupancy of the map the robot built itself (robot/ros/explore.py), for planning;
         `places_file` is the optional semantic area map built by the robot's cameras alongside `maps/<scene>.yaml`."""
@@ -97,7 +97,7 @@ class RealRobot(RosRobot):
         self.answers: queue.Queue[str] = queue.Queue()  # what the user types or says while listening
         self.waiting = False
         self._user: int | None = None
-        self.store, self._closed = store, False
+        self.store, self._owns_store, self._closed = store, owns_store, False
         if store is not None:
             known = store.restore(self.perception.tracker)
             self.notes = [*self.notes, *store.notes()]
@@ -120,9 +120,16 @@ class RealRobot(RosRobot):
             with self.perception.lock:
                 self.store.save(self.perception.tracker, self.notes, self.places)
 
+    def remember(self, fact: str) -> None:
+        super().remember(fact)
+        if self.store is not None and hasattr(self.store, "remember_fact"):
+            self.store.remember_fact(fact, room=self._room_at(self.x, self.y))
+
     def shutdown(self) -> None:
         self._save()
         self._closed = True
+        if self.store is not None and self._owns_store and hasattr(self.store, "close"):
+            self.store.close()
         super().shutdown()
 
     # ---- perception from the cameras ------------------------------------------------------------------------------

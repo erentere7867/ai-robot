@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from robot.agent.api import NotFound, Object, PathBlocked, Pose, TargetLost, Timeout, geom
+from robot.agent.api import NotFound, Object, PathBlocked, Pose, TargetLost, Timeout, geom, wrap
 from robot.sim.world import BEARINGS, visual_name
 
 CAMERAS = {  # every direction go_toward takes too: the model used each tool's words for the other ("front-right")
@@ -56,13 +56,50 @@ class ToolError(Exception):
     """A call that cannot run as asked; the message tells the model what to do instead."""
 
 
+@dataclass(frozen=True)
+class ActionResult:
+    """Measured outcome of one tool call."""
+
+    text: str
+    ok: bool
+    status: str = "ok"  # ok, already_there, reached, partial, blocked, target_lost, timeout, not_found, error
+    moved_m: float = 0.0
+    turned_deg: float = 0.0
+
+
+def recalled_facts(memory: Any, query: str) -> list[str]:
+    """Retrieve matching stored facts; when multiple match, return them oldest-to-newest so corrections stand out."""
+    if memory is None:
+        return []
+    if hasattr(memory, "query_facts_dated"):
+        dated = list(memory.query_facts_dated(query))
+        if len(dated) <= 1:
+            return [text for text, _ in dated]
+        dated.sort(key=lambda item: item[1])
+        return [f"{text} ({'most recent' if i == len(dated) - 1 else 'earlier'})" for i, (text, _) in enumerate(dated)]
+    if hasattr(memory, "query_facts"):
+        return list(memory.query_facts(query))
+    return []
+
+
+def _turn_span(robot: Any, pose_idx: int, before: Pose, after: Pose, commanded: float) -> float | None:
+    """Measured degrees turned since `pose_idx` (handles multi-turn spins via trace poses)."""
+    poses = getattr(getattr(robot, "trace", None), "poses", ())
+    if len(poses) > pose_idx + 1:
+        yaws = [p[3] for p in poses[pose_idx:]]
+        return math.degrees(sum(abs(wrap(b - a)) for a, b in zip(yaws, yaws[1:], strict=False)))
+    if commanded < 180:
+        return abs((after.yaw - before.yaw + 180) % 360 - 180)
+    return None
+
+
 @dataclass
 class Tool:
     name: str
     description: str
     params: dict[str, dict[str, Any]]
     required: tuple[str, ...]
-    run: Callable[..., str]
+    run: Callable[..., str | ActionResult]
     moves: bool = False  # what the cameras see afterwards is new
 
     def schema(self) -> dict[str, Any]:
@@ -208,11 +245,13 @@ class Tools:
     """The tools bound to one robot for one task."""
 
     def __init__(self, robot: Any, memory: Any = None) -> None:
-        self.robot, self.memory = robot, memory
+        self.robot = robot
+        self.memory = memory if memory is not None else getattr(robot, "store", None)
         self.todo = Todo()
         self.looked: list[str] = []  # cameras the model asked to see since the last observation
         self.moved = False  # the robot moved since the last observation
         self.found: Object | None = None
+        self.last_result: ActionResult | None = None
         self.pictures: list[tuple[str, Any]] = []  # sensor evidence with its provenance, not a new live view
         self._tools = {t.name: t for t in self._define()}
         self.began = robot.pose()  # where this request began
@@ -223,33 +262,67 @@ class Tools:
     def schemas(self) -> list[dict[str, Any]]:
         return [t.schema() for t in self._tools.values()]
 
-    def run(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
-        """Run one call: (what to tell the model, whether it worked). Stops and preemptions propagate."""
+    def execute(self, name: str, args: dict[str, Any]) -> ActionResult:
+        """Run one call and return its structured outcome. Stops and preemptions propagate."""
         tool = self._tools.get(name)
         if tool is None:
-            return f"There is no tool {name!r}. Tools: {', '.join(self._tools)}.", False
+            res = ActionResult(f"There is no tool {name!r}. Tools: {', '.join(self._tools)}.", False, "error")
+            self.last_result = res
+            return res
         self.found = None  # what this call found by searching
         before = self.robot.pose() if tool.moves else None
+        moved_m = 0.0
+
+        def motion_note() -> str:
+            nonlocal moved_m
+            if not tool.moves or before is None:
+                return ""
+            now = self.robot.pose()
+            moved_m = math.dist((now.x, now.y), (before.x, before.y))
+            return f" (moved {moved_m:.1f} m before stopping)" if moved_m > 0.05 else ""
+
         try:
             checked = _check(tool, args)
-            result = tool.run(**checked)
+            raw = tool.run(**checked)
+            res = raw if isinstance(raw, ActionResult) else ActionResult(raw, True, "reached" if tool.moves else "ok")
             if self.found is not None and name != "search":
-                result = f"Searched for it: found {self.found.label} {self.found.id}. {result}"
+                res = ActionResult(
+                    f"Searched for it: found {self.found.label} {self.found.id}. {res.text}",
+                    res.ok, res.status, res.moved_m, res.turned_deg,
+                )
             if tool.moves:
                 self.moved = True
         except ToolError as exc:
-            return f"Error: {exc}.", False
+            res = ActionResult(f"Error: {exc}.{motion_note()}", False, "error", moved_m)
+            self.last_result = res
+            return res
         except NotFound as exc:
-            return f"Not found: {exc}. Use search() to look for it, or ask the user.", False
+            res = ActionResult(f"Not found: {exc}. Use search() to look for it, or ask the user.", False, "not_found")
+            self.last_result = res
+            return res
         except PathBlocked as exc:
-            return f"Blocked: {exc}. Try another way, a different target, or ask the user for help.", False
+            res = ActionResult(
+                f"Blocked: {exc}{motion_note()}. Try another way, a different target, or ask the user for help.",
+                False, "blocked", moved_m,
+            )
+            self.last_result = res
+            return res
         except TargetLost as exc:
             self.looked.extend(CAMERAS["around"])
-            return f"Target lost: {exc}. Inspect the current views before choosing another ID.", False
+            res = ActionResult(
+                f"Target lost: {exc}{motion_note()}. Inspect the current views before choosing another ID.",
+                False, "target_lost", moved_m,
+            )
+            self.last_result = res
+            return res
         except Timeout as exc:
-            return f"Timed out: {exc}.", False
+            res = ActionResult(f"Timed out: {exc}{motion_note()}.", False, "timeout", moved_m)
+            self.last_result = res
+            return res
         except (ValueError, TypeError) as exc:
-            return f"Error: {exc}.", False
+            res = ActionResult(f"Error: {exc}.", False, "error")
+            self.last_result = res
+            return res
         finally:
             if tool.moves and not self.moved and before is not None:
                 now = self.robot.pose()
@@ -257,22 +330,29 @@ class Tools:
                         or abs((now.yaw - before.yaw + 180) % 360 - 180) > 2.0):
                     self.moved = True
         if tool.moves:
-            progress = self._progress(name, checked, result)
+            progress = self._progress(name, checked, res)
             if progress:
-                result += "\n" + progress
-        return result, True
+                res = ActionResult(res.text + "\n" + progress, res.ok, res.status, res.moved_m, res.turned_deg)
+        self.last_result = res
+        return res
 
-    def _progress(self, name: str, args: dict[str, Any], result: str) -> str:
+    def run(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
+        """Run one call: (what to tell the model, whether it worked). Stops and preemptions propagate."""
+        res = self.execute(name, args)
+        return res.text, res.ok
+
+    def _progress(self, name: str, args: dict[str, Any], res: ActionResult) -> str:
         """Keep motion progress compact: always report for repetition-prone steps (turn/move/drive/orbit) or after
         multiple motions, while omitting boilerplate on a single-step go_to/search to keep context lean."""
         if name == "turn":
-            degrees = args["degrees"]
+            degrees = round(res.turned_deg) if res.status == "partial" else args["degrees"]
             self.turned += abs(degrees)
             self.done.append(f"turned {degrees:g} degrees {args['direction']}")
         elif name == "move":
-            self.done.append(f"moved {args['metres']:g} m {args['direction']}")
+            metres = f"{res.moved_m:.2f}" if res.status == "partial" else f"{args['metres']:g}"
+            self.done.append(f"moved {metres} m {args['direction']}")
         else:
-            self.done.append(result.split(":")[0].split(",")[0].rstrip(".").lower())  # "arrived", "drove for 2 s"
+            self.done.append(res.text.split(":")[0].split(",")[0].rstrip(".").lower())  # "arrived", "drove for 2 s"
         if name not in ("turn", "move", "drive", "orbit") and len(self.done) <= 1:
             return ""
         now = self.robot.pose()
@@ -500,7 +580,7 @@ class Tools:
         self.robot.say(speakable(text))
         return "Said it. If the request is finished, reply with no tool call."
 
-    def go_to(self, target: str, distance: float | None = None, side: str = "") -> str:
+    def go_to(self, target: str, distance: float | None = None, side: str = "") -> str | ActionResult:
         if side == "under":
             raise ToolError(NO_CLEARANCE)
         before = self.robot.pose()
@@ -512,17 +592,30 @@ class Tools:
             edge = t.radius + ROBOT_RADIUS if isinstance(t, Object) else 0.0
             self.robot.go_to(t, distance=distance + edge if distance is not None else (0.8 if person else 0.0))
         after = self.robot.pose()
-        if not isinstance(t, Object) and math.dist((before.x, before.y), (after.x, after.y)) < 0.1:
-            return f"Already at {self._name(t)}: you did not move."  # "start" is where this request began
-        return self._arrived(t)
+        moved = math.dist((before.x, before.y), (after.x, after.y))
+        if not isinstance(t, Object):
+            places = {str(k).lower(): v for k, v in getattr(self.robot, "places", {}).items()}
+            dest = places.get(str(t).lower())
+            if dest is not None and hasattr(dest, "x"):
+                left = math.dist((after.x, after.y), (dest.x, dest.y))
+                if left > 0.5:
+                    return ActionResult(
+                        f"Ended {left:.1f} m short of {self._name(t)} (moved {moved:.1f} m).",
+                        False, "partial", moved,
+                    )
+            if moved < 0.1:
+                return ActionResult(f"Already at {self._name(t)}: you did not move.", True, "already_there", moved)
+            return ActionResult(f"Arrived at {self._name(t)}.", True, "reached", moved)
+        expected_gap = distance if distance is not None else (0.8 if person else 0.0)
+        return self._arrived(t, expected_gap=expected_gap, moved_m=moved)
 
-    def go_to_side(self, target: str, side: str, distance: float | None = None) -> str:
+    def go_to_side(self, target: str, side: str, distance: float | None = None) -> str | ActionResult:
         return self.go_to(target, side=side, distance=distance)
 
-    def stop_near(self, target: str, metres: float) -> str:
+    def stop_near(self, target: str, metres: float) -> str | ActionResult:
         return self.go_to(target, distance=metres)
 
-    def _arrived(self, t: Any) -> str:
+    def _arrived(self, t: Any, *, expected_gap: float = 0.0, moved_m: float = 0.0) -> ActionResult:
         if isinstance(t, Object):
             try:
                 self.robot.face(t)
@@ -534,38 +627,96 @@ class Tools:
                 raise ToolError(f"drive finished {geom.dist(self.robot.pose(), t):.1f} m from the last mapped centre "
                                 f"of {t.label} {t.id}. Target not confirmed: {exc}. Check the front view") from exc
             if fresh.radius == 0.0:
-                return f"Drive finished. Reached {self._name(fresh)} (on the nearest open floor to its centre)."
+                return ActionResult(
+                    f"Drive finished. Reached {self._name(fresh)} (on the nearest open floor to its centre).",
+                    True, "reached", moved_m,
+                )
             gap = max(0.0, fresh.distance - fresh.radius - ROBOT_RADIUS)
             if gap <= 0.6:
-                return (f"Drive finished. Reached {self._name(fresh)}, facing it "
-                        f"(gap {gap:.1f} m, {fresh.distance:.1f} m to centre).")
-            return (f"Drive finished. Facing {self._name(fresh)}, estimated gap {gap:.1f} m "
-                    f"({fresh.distance:.1f} m to centre).")
-        return f"Arrived at {self._name(t)}."
+                return ActionResult(
+                    f"Drive finished. Reached {self._name(fresh)}, facing it "
+                    f"(gap {gap:.1f} m, {fresh.distance:.1f} m to centre).",
+                    True, "reached", moved_m,
+                )
+            if gap <= expected_gap + 0.6:
+                return ActionResult(
+                    f"Drive finished. Facing {self._name(fresh)}, estimated gap {gap:.1f} m "
+                    f"({fresh.distance:.1f} m to centre).",
+                    True, "reached", moved_m,
+                )
+            return ActionResult(
+                f"Ended short of {self._name(fresh)}: facing it with estimated gap {gap:.1f} m "
+                f"({fresh.distance:.1f} m to centre).",
+                False, "partial", moved_m,
+            )
+        return ActionResult(f"Arrived at {self._name(t)}.", True, "reached", moved_m)
 
-    def move(self, metres: float, direction: str) -> str:
+    def move(self, metres: float, direction: str) -> ActionResult:
+        before = self.robot.pose()
         self.robot.move(metres, direction=direction)
-        return f"Moved {metres:g} m {direction}."
+        after = self.robot.pose()
+        went = math.dist((before.x, before.y), (after.x, after.y))
+        if went < 0.8 * metres - 0.1:
+            return ActionResult(
+                f"Moved only {went:.2f} m of {metres:g} m {direction} (ended short).",
+                False, "partial", went,
+            )
+        shown = f"{metres:g}" if abs(went - metres) <= 0.05 else f"{went:.2f}"
+        return ActionResult(f"Moved {shown} m {direction}.", True, "reached", went)
 
-    def turn(self, degrees: float, direction: str) -> str:
+    def turn(self, degrees: float, direction: str) -> ActionResult:
+        pose_idx = len(getattr(getattr(self.robot, "trace", None), "poses", ()))
+        before = self.robot.pose()
         self.robot.turn(degrees, direction=direction)
-        return f"Turned {degrees:g} degrees {direction}."
+        after = self.robot.pose()
+        turned = _turn_span(self.robot, pose_idx, before, after, degrees)
+        if turned is not None and turned < 0.8 * degrees - 10.0:
+            return ActionResult(
+                f"Turned only {turned:.0f} of {degrees:g} degrees {direction} (ended short).",
+                False, "partial", turned_deg=turned,
+            )
+        shown = degrees if turned is None or abs(turned - degrees) <= max(5.0, 0.08 * degrees) else round(turned)
+        return ActionResult(
+            f"Turned {shown:g} degrees {direction}.",
+            True, "reached", turned_deg=turned if turned is not None else degrees,
+        )
 
-    def drive(self, speed: float, turn_rate: float, seconds: float) -> str:
+    def drive(self, speed: float, turn_rate: float, seconds: float) -> ActionResult:
+        t0 = getattr(self.robot, "t", None)
+        before = self.robot.pose()
         self.robot.drive(metres_per_second=speed, degrees_per_second=turn_rate, seconds=seconds)
-        return f"Drove for {seconds:g} s."
+        t1 = getattr(self.robot, "t", None)
+        after = self.robot.pose()
+        went = math.dist((before.x, before.y), (after.x, after.y))
+        dt = (t1 - t0) if (t0 is not None and t1 is not None) else None
+        if dt is not None and dt < 0.8 * seconds - 0.2:
+            return ActionResult(f"Drove for {dt:.1f} s of {seconds:g} s (ended short).", False, "partial", went)
+        return ActionResult(f"Drove for {seconds:g} s.", True, "reached", went)
 
     def orbit(self, target: str, laps: float, direction: str, gap: float = 0.5) -> str:
         t = self._resolve(target)
         self.robot.orbit(t, laps=laps, direction="right" if direction == "clockwise" else "left", distance=gap)
         return f"Circled {self._name(t)} {laps:g} times {direction}."
 
-    def follow(self, target: str, seconds: float | None = None) -> str:
+    def follow(self, target: str, seconds: float | None = None) -> ActionResult:
         thing = self._resolve(target, people_only=True)
         if not isinstance(thing, Object):
             raise ToolError(f"follow needs something you can see, and {target!r} is a place")
+        t0 = getattr(self.robot, "t", None)
         self.robot.follow(thing, distance=1.0, seconds=seconds)
-        return f"Followed for {seconds:g} s." if seconds else "Stopped following."
+        t1 = getattr(self.robot, "t", None)
+        dt = (t1 - t0) if (t0 is not None and t1 is not None) else None
+        if seconds is not None and dt is not None and dt < 0.8 * seconds - 0.5:
+            return ActionResult(
+                f"Followed {self._name(thing)} for {dt:.1f} s of {seconds:g} s (ended early).",
+                False, "partial",
+            )
+        if seconds is not None:
+            return ActionResult(f"Followed for {seconds:g} s.", True, "reached")
+        return ActionResult(
+            f"Stopped following after {dt:.1f} s." if dt is not None and dt > 0 else "Stopped following.",
+            True, "reached",
+        )
 
     def face(self, target: str) -> str:
         t = self._resolve(target, find=False)
@@ -621,14 +772,17 @@ class Tools:
         evidence = "" if self.looked or self.pictures else " No matching image is available to verify this ID."
         return f"Found candidate {found.label} {found.id}, {_where_words(found)}.{evidence}"
 
-    def go_toward(self, direction: str, metres: float) -> str:
+    def go_toward(self, direction: str, metres: float) -> ActionResult:
         before = self.robot.pose()
         self.robot.go_to(self.robot.toward(direction, metres))
         after = self.robot.pose()
         went = math.dist((before.x, before.y), (after.x, after.y))
-        short = "" if went >= 0.8 * metres - 0.2 else \
-            f" (the floor {metres:g} m that way could not be reached: this is the nearest that could)"
-        return f"Drove {went:.1f} m {direction}{short}."
+        if went < 0.8 * metres - 0.2:
+            return ActionResult(
+                f"Drove {went:.1f} m {direction} (ended short: the floor {metres:g} m that way could not be reached).",
+                False, "partial", went,
+            )
+        return ActionResult(f"Drove {went:.1f} m {direction}.", True, "reached", went)
 
     def look_back(self, seconds: float) -> str:
         if not hasattr(self.robot, "past_views"):
@@ -671,9 +825,10 @@ class Tools:
         return "Remembered."
 
     def recall(self, query: str) -> str:
-        lines = list(self.robot.recall(query))
-        if self.memory is not None and hasattr(self.memory, "query_facts"):
-            lines += [f for f in self.memory.query_facts(query) if f not in lines]
+        stored = recalled_facts(self.memory, query)
+        lines = list(stored)
+        raw_stored = {f.removesuffix(" (most recent)").removesuffix(" (earlier)") for f in stored}
+        lines += [f for f in self.robot.recall(query) if f not in raw_stored and f not in lines]
         room_at = getattr(self.robot, "_room_at", None)
         for o in self.robot.where(query, area="everywhere"):
             ago = "now" if o.last_seen < 2 else f"{o.last_seen / 60:.0f} min ago" if o.last_seen >= 60 else \
