@@ -70,9 +70,9 @@ commands zero if there is no route and retries at most twice per simulated secon
 waits for refreshed maps before declaring completion, and moves on from unreachable goals. The saved map is
 used for AMCL localization on later runs. This initial mapping loop is separate from task-time search.
 
-**2D simulation.** `BodyController` scores motion arcs and blends clear waypoints. When normal-speed arcs are
-blocked it tries tighter half-speed arcs and holds forward motion if none is safe. 2D pursuit shares the progress
-guard, also crediting waypoint advances. The 2D rollout is not the ROS path follower.
+**2D simulation.** Nav2 is the only production path follower. The ROS-free `SimRobot._pursue` is a kinematic
+`FollowPath` test double: it turns toward each waypoint, drives straight, and stops before contact. It retains
+the hazard, snag and progress checks, including credit for advancing to the next waypoint.
 
 ---
 
