@@ -202,6 +202,20 @@ def test_search_reports_landmark_outcome_and_scope(door_open, landmark, scope, a
     assert approach in result
 
 
+def test_search_does_not_redispatch_a_body_error(monkeypatch):
+    robot = SimRobot(two_rooms())
+    directions = []
+
+    def search(what, area, *, toward=""):
+        directions.append(toward)
+        raise TypeError("bad camera sample")
+
+    monkeypatch.setattr(robot, "search", search)
+    result, ok = Tools(robot).run("search", {"what": "towel", "toward": "front"})
+    assert not ok and "bad camera sample" in result
+    assert directions == ["front"]
+
+
 def test_search_does_not_count_travel_before_the_search_as_coverage(monkeypatch):
     robot = SimRobot(two_rooms())
     tools = Tools(robot)

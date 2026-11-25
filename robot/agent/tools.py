@@ -775,10 +775,7 @@ class Tools:
         trace = getattr(self.robot, "trace", None)
         poses = getattr(trace, "poses", ())
         trail_start = len(poses)
-        try:
-            self.found = found = self.robot.search(what, area=area, toward=toward)
-        except TypeError:  # a test fake whose search() takes only (what, area)
-            self.found = found = self.robot.search(what, area=area)
+        self.found = found = self.robot.search(what, area=area, toward=toward)
         after = self.robot.pose()
         attempts.extend((before, after))
         if approached:
