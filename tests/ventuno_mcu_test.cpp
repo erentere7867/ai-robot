@@ -128,8 +128,8 @@ int main(int argc, char **argv) {
   std::string_view scenario = argv[1];
   setup();
   assertStopped();
-  onCmdVel(60, 15000);
   advance(WATCHDOG_MS + 5);
+  onCmdVel(60, 15000);
   loop();
   assertStopped();
   assert(readFlags() & 256);
