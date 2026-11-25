@@ -857,7 +857,7 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
     ((0.0, 0.0, 0.0), (0.0, 0.1, math.pi / 2), (2.2, 0.1)),
     ((10.0, 20.0, math.pi / 2), (-4.0, -7.0, 0.0), (9.9, 22.2)),
 ])
-def test_visual_lidar_fallback_uses_continuous_odometry_across_map_corrections(monkeypatch, photo_map, scan_map, expected):
+def test_visual_lidar_uses_odometry_across_map_corrections(monkeypatch, photo_map, scan_map, expected):
     from collections import deque
 
     from robot.ros import real as grounding
