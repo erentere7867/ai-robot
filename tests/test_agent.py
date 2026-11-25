@@ -181,6 +181,26 @@ def test_search_returns_its_crop_before_a_queued_drive(monkeypatch):
     assert not any(e.name == "go_to" for e in sim.trace.events)
 
 
+def test_correction_keeps_look_back_frames_under_the_tool_result(monkeypatch):
+    sim = SimRobot(living_room())
+    frames = [(ago, np.full((18, 15, 3), color, dtype=np.uint8)) for ago, color in [(3, 42), (1, 67)]]
+    brain = Scripted(call("look_back", seconds=5), say("It moved left."))
+    agent = Agent(brain)
+
+    def past_views(seconds):
+        agent.interject("Actually, tell me which way it moved.")
+        return frames
+
+    monkeypatch.setattr(sim, "past_views", past_views, raising=False)
+    agent.do("What happened in the last five seconds?", sim)
+    result, = tool_results(brain.seen[1])
+    actual = [(part["text"], image["image_url"]["url"]) for part, image in zip(result[1::2], result[2::2], strict=True)]
+    assert actual == [(f"front camera {ago} s ago:", data_url(rgb)) for ago, rgb in frames]
+    correction = brain.seen[1][-1]
+    assert correction["role"] == "user" and "Actually, tell me which way it moved." in _text(correction["content"])
+    assert sum(p["type"] == "image_url" for p in correction["content"]) == 1
+
+
 @pytest.mark.parametrize(("see_after_moves", "pictures"), [("front", 1), (True, 3)])
 def test_post_move_pictures_are_seen_before_another_batched_action(see_after_moves, pictures):
     sim = SimRobot(living_room())

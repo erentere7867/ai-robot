@@ -452,16 +452,17 @@ class Agent:
 
                 heard = self._drain()
                 think = self._budget(news=failed or asked or bool(heard))
-                if heard:  # the user spoke mid-task: a new user turn with their words and what the robot senses now
-                    messages.append(self._correction(robot, tools, heard))
-                    reviewed = spoke_since_action = False
-                elif visual_result is not None:  # pictures come back inside the requesting tool result, as trained: a
+                recorded = len(tools.pictures)
+                if visual_result is not None:  # pictures come back inside the requesting tool result, as trained: a
                     # new user message would end its tool-use turn and drop the reasoning so far. Skip re-sending the
                     # full scene list on stationary looks/crops and single-frame post-move snapshots.
                     cameras = list(dict.fromkeys([*move_cams, *tools.looked]))
                     seen = self._observation(robot, tools, cameras, "What you sense now:",
                                              include_scene=self.see_after_moves is True and tools.moved)
                     visual_result["content"] = [{"type": "text", "text": visual_result["content"]}, *seen["content"]]
+                if heard:  # the user spoke mid-task: a new user turn with their words and what the robot senses now
+                    messages.append(self._correction(robot, tools, heard, recorded=recorded))
+                    reviewed = spoke_since_action = False
                 tools.moved, tools.looked = False, []
             else:
                 record.problems.append(f"no answer after {self.max_turns} turns")
@@ -489,10 +490,10 @@ class Agent:
             heard.append(self._heard.get_nowait())
         return heard
 
-    def _correction(self, robot: Any, tools: Tools, heard: list[str]) -> dict[str, Any]:
-        tools.pictures.clear()
+    def _correction(self, robot: Any, tools: Tools, heard: list[str], *, recorded: int = 0) -> dict[str, Any]:
         words = "".join(f'The user says: "{h}"\n' for h in heard)
-        return self._observation(robot, tools, list(self.cameras), words + "What you sense now:")
+        cameras = list(self.cameras[:max(0, MAX_IMAGES - recorded)])
+        return self._observation(robot, tools, cameras, words + "What you sense now:")
 
     @staticmethod
     def _review(instruction: str, record: TaskRecord, tools: Tools) -> str:
