@@ -32,6 +32,7 @@ from robot.perception.pose import estimate_pose_from_keypoints
 from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import GONE_AFTER, Detection, Track, Tracker, canonical, look, pixels
 from robot.ros.model import BODY_R, TOF
+from robot.ros.motion import WHEELS
 
 TOPICS = {name: f"/{name}/image" for name in RIG}  # the camera drivers' colour pictures
 DEPTH_TOPICS = {name: f"/{name}/depth" for name in RIG}  # the depth node's estimates, at a smaller size
@@ -94,8 +95,8 @@ def see_probability(brain: Any, picture: np.ndarray, label: str, max_dim: int = 
 
 def locate_in_picture(brain: Any, rgb: np.ndarray, label: str) -> tuple[tuple[int, int, int, int], bool] | None:
     """Find where `label` appears in a full camera frame via yes/no crops (no numbered dots: the 2B model picks the
-    last number). Overlapping thirds -> either probability-weighted centre of contiguous positive thirds (for wide
-    surfaces/areas spanning >=2 thirds; cut close-up rug centre error from 0.78 m to 0.36 m) or overlapping halves
+    last number). Overlapping thirds -> probability-weighted centre of two adjacent positives (cut close-up rug
+    centre error from 0.78 m to 0.36 m), or refine the strongest third via overlapping halves
     (0.65 span: non-overlapping halves sliced a centred umbrella at u=0.50 from 96% to 4%/4%, while 0.65 overlap
     gave 100%/99%) -> upper/lower split on a 0.30-span context strip. Measured on 30 random apt_0 views (210 pairs)
     behind a 768px whole-image gate: 0/145 (0.0%) FP; blank-wall hallucinations (71% whole) dropped to 1%/0%."""
@@ -107,37 +108,40 @@ def locate_in_picture(brain: Any, rgb: np.ndarray, label: str) -> tuple[tuple[in
     if not pos:
         return None
     best_i = max(pos, key=t_scores.__getitem__)
-    # Contiguous positive block containing the strongest third (wide surface/area or an object straddling a seam).
-    block = [best_i] if (len(pos) == 2 and abs(pos[0] - pos[1]) == 2) else pos
-    if len(block) >= 2:
-        span = 0.40
-        u_center = sum(t_scores[i] * 0.5 * (thirds[i][0] + thirds[i][1]) for i in block) / sum(
-            t_scores[i] for i in block
-        )
-    else:
-        a, b = thirds[best_i]
-        span = b - a
-        halves = ((a, a + 0.65 * span), (b - 0.65 * span, b))
-        h_scores = [see_probability(brain, rgb[:, int(x0 * w):max(int(x0 * w) + 1, int(x1 * w))], label, max_dim=384)
-                    for x0, x1 in halves]
-        if max(h_scores) < 0.5:
-            return None
-        total = h_scores[0] + h_scores[1]
-        u_center = (h_scores[0] * (a + 0.25 * span) + h_scores[1] * (b - 0.25 * span)) / total
-    sx0 = max(0, int(round((u_center - 0.30 * span) * w)))
-    sx1 = min(w, max(sx0 + 1, int(round((u_center + 0.30 * span) * w))))
-    strip = rgb[:, sx0:sx1]
-    top_end, bot_start = max(1, int(0.55 * h)), min(h - 1, int(0.45 * h))
-    v_top = see_probability(brain, strip[:top_end, :], label, max_dim=384)
-    v_bot = see_probability(brain, strip[bot_start:, :], label, max_dim=384)
-    if max(v_top, v_bot) < 0.5:
-        return None
-    # Floor-flat only when absent from the upper half: standing objects visible in both halves (umbrella 89%/100%) stay 3D.
-    on_floor = v_bot >= 0.5 and v_top < 0.35
-    y0, y1 = (bot_start, h) if on_floor else (0, max(1, int(0.60 * h))) if v_top > v_bot + 0.10 else (0, h)
-    x0 = max(0, int(round((u_center - 0.25 * span) * w)))
-    x1 = min(w, max(x0 + 1, int(round((u_center + 0.25 * span) * w))))
-    return (x0, y0, x1, y1), on_floor
+    # Merging three positives put no target pixels in the replay crop, 47° from the refined crop.
+    # Keep the merged crop as a fallback when only the wider context is recognized.
+    adjacent = len(pos) == 2 and pos[1] == pos[0] + 1
+    for merge in (False, True) if len(pos) == 3 else (adjacent,):
+        if merge:
+            span = 0.40
+            u_center = sum(t_scores[i] * 0.5 * (thirds[i][0] + thirds[i][1]) for i in pos) / sum(
+                t_scores[i] for i in pos
+            )
+        else:
+            a, b = thirds[best_i]
+            span = b - a
+            halves = ((a, a + 0.65 * span), (b - 0.65 * span, b))
+            h_scores = [see_probability(brain, rgb[:, int(x0 * w):max(int(x0 * w) + 1, int(x1 * w))],
+                                        label, max_dim=384) for x0, x1 in halves]
+            if max(h_scores) < 0.5:
+                continue
+            total = h_scores[0] + h_scores[1]
+            u_center = (h_scores[0] * (a + 0.25 * span) + h_scores[1] * (b - 0.25 * span)) / total
+        sx0 = max(0, int(round((u_center - 0.30 * span) * w)))
+        sx1 = min(w, max(sx0 + 1, int(round((u_center + 0.30 * span) * w))))
+        strip = rgb[:, sx0:sx1]
+        top_end, bot_start = max(1, int(0.55 * h)), min(h - 1, int(0.45 * h))
+        v_top = see_probability(brain, strip[:top_end, :], label, max_dim=384)
+        v_bot = see_probability(brain, strip[bot_start:, :], label, max_dim=384)
+        if max(v_top, v_bot) < 0.5:
+            continue
+        # An umbrella can show in both halves (89%/100%) and must stay 3D.
+        on_floor = v_bot >= 0.5 and v_top < 0.35
+        y0, y1 = (bot_start, h) if on_floor else (0, max(1, int(0.60 * h))) if v_top > v_bot + 0.10 else (0, h)
+        x0 = max(0, int(round((u_center - 0.25 * span) * w)))
+        x1 = min(w, max(x0 + 1, int(round((u_center + 0.25 * span) * w))))
+        return (x0, y0, x1, y1), on_floor
+    return None
 
 
 def place_picture(rgb: np.ndarray, cam: Any, bx: float, by: float, radius: float) -> np.ndarray | None:
@@ -336,7 +340,7 @@ class SyntheticScanPublisher:
                 self.odom_at = _odometry_lookup(node)
                 self._clock = node.get_clock
                 now = lambda: _seconds(node.get_clock().now().to_msg())  # noqa: E731
-                node.create_subscription(TwistStamped, "/cmd_vel",  # what reaches the motors, after every check
+                node.create_subscription(TwistStamped, WHEELS,
                                          lambda m: self.drive(now(), m.twist.linear.x), 10)
                 node.create_subscription(Odometry, "/odom", lambda m: self.wheels(now(), m.twist.twist.linear.x),
                                          qos_profile_sensor_data)

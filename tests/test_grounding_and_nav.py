@@ -4,20 +4,22 @@ from __future__ import annotations
 
 import math
 from concurrent.futures import Future
-from threading import Lock
+from threading import Lock, RLock
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 
-from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted, TargetLost
+from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted, SafetyStop, TargetLost
 from robot.interfaces.live import PAGE
 from robot.perception.tracker import Track, Tracker
 from robot.ros.perceive import Perception
 from robot.ros.real import RealRobot
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
+from tests.perception_fakes import make_detector, make_image_brain
 
 
 def _make_scene(things: list[Thing] | None = None) -> Scene:
@@ -28,6 +30,64 @@ def _make_scene(things: list[Thing] | None = None) -> Scene:
         rooms={"lounge": (-4.0, -4.0, 4.0, 4.0)},
         start=Pose(0.0, 0.0, 0.0),
     )
+
+
+@pytest.mark.parametrize("detour", [False, True])
+def test_sim_pursuit_only_credits_new_ground(monkeypatch, detour):
+    sim = SimRobot(_make_scene())
+    start = sim.t
+
+    def step(*_):
+        elapsed = sim.t - start
+        sim.x = 3.0 if elapsed >= 12.0 else (-0.1 * elapsed if detour else 0.0)
+        sim.t += 1.0
+
+    monkeypatch.setattr(sim, "_step", step)
+    monkeypatch.setattr(sim.body, "step_pursuit", lambda *_, **kw: (0.1, 0.0, 0, False))
+    if detour:
+        sim._pursue([(3.0, 0.0)], 0.1, goal=(3.0, 0.0))
+        assert sim.x == 3.0
+    else:
+        with pytest.raises(PathBlocked, match="no progress .* for 10 s"):
+            sim._pursue([(3.0, 0.0)], 0.1, goal=(3.0, 0.0))
+
+
+
+
+def test_follow_waits_for_the_next_plan_when_a_visible_person_is_across_a_narrow_gap():
+    person = Thing("person", 2.5, 0.0)
+    scene = _make_scene([person])
+    scene.walls = [((1.0, -5.0), (1.0, -0.15)), ((1.0, 0.15), (1.0, 5.0))]
+    sim = SimRobot(scene)
+    assert person in sim._visible()
+    assert sim._plan((person.x, person.y), 1.0) is None
+    sim._plan = Mock(wraps=sim._plan)
+    control, _ = sim._follower(person, 1.0)
+
+    assert control() == (0.0, 0.0)
+    sim.t += 0.25
+    assert control() == (0.0, 0.0)
+    assert sim._plan.call_count == 1
+    sim.t += 0.25
+    assert control() == (0.0, 0.0)
+    assert sim._plan.call_count == 2
+
+
+@pytest.mark.parametrize("gap, blocked", [(0.30, True), (1.20, False)])
+def test_timed_follow_reports_when_no_route_was_found(gap, blocked):
+    from robot.agent.tools import Tools
+
+    person = Thing("person", 2.5, 0.0, user=True)
+    scene = _make_scene([person])
+    scene.walls = [((1.0, -5.0), (1.0, -gap / 2)), ((1.0, gap / 2), (1.0, 5.0))]
+    sim = SimRobot(scene)
+    result = Tools(sim).execute("follow", {"target": "user", "seconds": 1.0})
+    assert result.ok is not blocked
+    if blocked:
+        assert "no route to the target was found; stayed put" in result.text
+        assert sim.pose() == scene.start
+    else:
+        assert "Followed for 1 s." in result.text
 
 
 # ---------------------------------------------------------------------------
@@ -133,11 +193,17 @@ class MockRosRobot(RosRobot):
     """Subclass of RosRobot that mocks ROS2 action communication for testing."""
 
     def __init__(self, scene: Scene) -> None:
+        from robot.ros.motion import MotionGate
+
         super(RosRobot, self).__init__(scene)
         self.nav_calls: list[tuple[str, dict[str, Any]]] = []
         self.rotate_calls: list[float] = []
         self.fail_nav_counts: int = 0
         self.sync_calls: int = 0
+        self._goal = None
+        self._publish = lambda *_: None
+        self._motion = MotionGate(lambda: round(self.t * 1e9), lambda *_: None,
+                                  lambda v, w, _: self._publish(v, w), 0.35, 1.8)
 
     def _sync(self) -> None:
         self.sync_calls += 1
@@ -157,6 +223,192 @@ class MockRosRobot(RosRobot):
 
     def _pose_msg(self, x: float, y: float, yaw: float) -> Any:
         return {"x": x, "y": y, "yaw": yaw}
+
+    def _nav_reaches(self, end, yaw=0.0):
+        return True
+
+
+def _frontier_search_robot(frontiers, max_leg=3.2):
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    robot._plan = lambda end, _: [end]
+    robot._pose_msg = lambda x, y, yaw: (x, y)
+    robot._motion = SimpleNamespace(lock=RLock())
+    robot._note_place = lambda: None
+    robot.detect = lambda *_: []
+    robot._remembered = lambda *_: []
+    robot._next_stops = lambda _desc, _region, _tried: iter(robot._frontier_steps(frontiers, max_leg))
+    target = Object(1, "bag", (3.0, 0.0), 3.0, 0.0, "ahead", 0.15, "", 0.0)
+    moves = []
+    robot._act = lambda name, *, pose, **_: moves.append((name, pose))
+    robot._found = lambda *_: target if moves else None
+    return robot, target, moves
+
+
+def test_frontier_tries_next_candidate_when_nav2_success_ends_short():
+    robot, target, moves = _frontier_search_robot([Pose(1.0, 0.0, 0.0), Pose(0.0, 1.5, 0.0)])
+    requested = []
+    robot._found = Mock(wraps=robot._found)
+
+    def completed(value):
+        future = Future()
+        future.set_result(value)
+        return future
+
+    def send(goal):
+        x, y = goal.goal
+        requested.append((x, y))
+        position = SimpleNamespace(x=x - 0.20 if x else x, y=y)
+        path = SimpleNamespace(poses=[SimpleNamespace(pose=SimpleNamespace(position=position))])
+        response = SimpleNamespace(status=4, result=SimpleNamespace(path=path))
+        return completed(SimpleNamespace(accepted=True, get_result_async=lambda: completed(response)))
+
+    name = "compute_path_to_pose"
+    robot.actions = {name: SimpleNamespace(wait_for_server=lambda **_: True, send_goal_async=send)}
+    robot.kinds = {name: SimpleNamespace(Goal=SimpleNamespace)}
+    assert SimRobot.search(robot, target.label) is target
+    assert requested == [(1.0, 0.0), (0.0, 1.5)]
+    assert moves == [("navigate_to_pose", (0.0, 1.5))]
+    robot._found.assert_called_once()
+
+
+@pytest.mark.parametrize("has_frontiers", [False, True])
+def test_search_looks_once_at_the_end_only_if_the_last_look_was_skipped(has_frontiers):
+    # The object can come into view while Nav2 is rejecting the stops.
+    stops = [(1.0, 0.0), (2.0, 0.0)] if has_frontiers else []
+    robot, target, moves = _frontier_search_robot([])
+    robot._next_stops = lambda _desc, _region, tried: (stop for stop in stops if stop not in tried)
+    robot._nav_reaches = Mock(return_value=False)
+
+    def found(*_):
+        assert [call.args[0] for call in robot._nav_reaches.call_args_list] == stops
+        return target
+
+    robot._found = Mock(side_effect=found)
+    assert SimRobot.search(robot, target.label) is (target if has_frontiers else None)
+    assert robot._found.call_count == int(has_frontiers)
+    assert not moves
+
+
+def test_frontier_tries_a_reachable_candidate_after_six_blocked_ones():
+    frontiers = [Pose(0.5 * i, 0.0, 0.0) for i in range(1, 7)] + [Pose(4.0, 1.0, 0.0)]
+    robot, target, moves = _frontier_search_robot(frontiers, max_leg=5.0)
+    robot._nav_reaches = lambda end, _: end == (4.0, 1.0)
+    assert SimRobot.search(robot, target.label) is target
+    assert moves == [("navigate_to_pose", (4.0, 1.0))]
+
+
+def test_frontiers_that_share_a_blocked_capped_endpoint_check_it_once():
+    frontiers = [Pose(2.0, 0.0, 0.0), Pose(3.0, 0.0, 0.0), Pose(0.0, 4.0, 0.0)]
+    robot, target, moves = _frontier_search_robot(frontiers, max_leg=1.5)
+    checked = []
+
+    def reaches(end, _):
+        checked.append(end)
+        return end == (0.0, 1.5)
+
+    robot._nav_reaches = reaches
+    assert SimRobot.search(robot, target.label) is target
+    assert checked == [(1.5, 0.0), (0.0, 1.5)]
+    assert moves == [("navigate_to_pose", (0.0, 1.5))]
+
+
+def test_object_approach_tries_farther_spot_after_rejecting_same_side_goals():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    target = Object(1, "bag", (3.0, 0.0), 3.0, 0.0, "ahead", 0.15, "", 0.0)
+    tracker = Tracker()
+    tracker.tracks[1] = Track(1, "bag", 3.0, 0.0, 0.15, 0.0, 0.0, present=True, visual=True,
+                              spotted_from=(2.0, 0.0))
+    robot.perception = SimpleNamespace(tracker=tracker, lock=Lock())
+    robot._route = lambda *_: [(2.3, 0.0)]
+    robot._plan = lambda end, _: [end]
+    robot._nav_reaches = lambda end, _: end[0] <= 2.0
+    assert robot._goal_point(target, 0.0) == ((2.0, 0.0), 0.0)
+
+
+def test_object_approach_does_not_drive_toward_a_rejected_spot():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    target = Object(1, "bag", (3.0, 0.0), 3.0, 0.0, "ahead", 0.15, "", 0.0)
+    preferred, fallback = (2.3, 0.0), (2.0, 0.0)
+    robot._spotted_standpoint = lambda *_: preferred
+    robot._goal_candidates = lambda *_: iter([(preferred, 0.0), (fallback, 0.0)])
+    checked = []
+
+    def reaches(end, _):
+        checked.append(end)
+        return end == fallback
+
+    def act(name, *, pose, **_):
+        assert name == "navigate_to_pose" and pose == fallback
+        robot.x, robot.y = pose
+
+    robot._nav_reaches = reaches
+    robot._act = act
+    robot._pose_msg = lambda x, y, yaw: (x, y)
+    robot._note_place = Mock()
+    robot._rotate = Mock()
+    robot._move = Mock()
+    robot._go(target, 0.0)
+    assert checked == [preferred, fallback]
+    robot._move.assert_not_called()
+
+
+def test_object_approach_corrects_view_when_already_in_reach_without_a_nav_goal():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    robot.x, robot.y = 1.47, 0.18
+    target = Object(1, "bag", (2.0, 0.0), 0.56, 0.0, "ahead", 0.15, "", 0.0)
+    tracker = Tracker()
+    tracker.tracks[1] = Track(1, "bag", 2.0, 0.0, 0.15, 0.0, 0.0, present=True, visual=True,
+                              spotted_from=(1.2, 0.0))
+    robot.perception = SimpleNamespace(tracker=tracker, lock=Lock())
+    robot._nav_reaches = Mock()
+    robot._act = Mock()
+    robot._rotate = Mock()
+    robot._move = Mock()
+
+    robot._go(target, 0.0)
+
+    robot._nav_reaches.assert_not_called()
+    robot._act.assert_not_called()
+    robot._move.assert_called_once_with(pytest.approx(math.dist((1.47, 0.18), (1.4, 0.0))))
+
+
+def test_frontier_plans_only_once_before_dispatch():
+    robot, target, moves = _frontier_search_robot([Pose(2.0, 0.0, 0.0)])
+    checks = []
+    robot._nav_reaches = lambda end, yaw=0.0: not checks.append(end)
+    assert SimRobot.search(robot, target.label) is target
+    assert checks == [(2.0, 0.0)]
+    assert moves == [("navigate_to_pose", (2.0, 0.0))]
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_nav_planner_outage_is_not_a_blocked_goal(monkeypatch, ready):
+    from robot.agent.tools import Tools
+
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    robot._sync = lambda: None
+    robot._motion = SimpleNamespace(lock=RLock())
+    name = "compute_path_to_pose"
+    sent = Future()
+    robot.actions = {name: SimpleNamespace(wait_for_server=lambda **_: ready, send_goal_async=lambda _: sent)}
+    robot.kinds = {name: SimpleNamespace(Goal=SimpleNamespace)}
+    robot._pose_msg = lambda *pose: pose
+    monkeypatch.setattr("robot.ros.robot.PLAN_TIMEOUT_S", 0.0)
+    tools = Tools(robot)
+    monkeypatch.setattr(tools, "_resolve", lambda _: (2.0, 0.0))
+    result = tools.execute("go_to", {"target": "lounge"})
+    assert not result.ok
+    assert result.text.startswith("Timed out: navigation planner unavailable")
+    if ready:
+        cancels = []
+        sent.set_result(SimpleNamespace(accepted=True, get_result_async=Future,
+                                        cancel_goal_async=lambda: cancels.append(True)))
+        assert cancels == [True]
 
 
 def test_ros_robot_goal_point_heading_faces_object():
@@ -185,6 +437,8 @@ def test_ros_robot_goal_point_heading_faces_object():
 
 @pytest.mark.parametrize("when", ["before acceptance", "while driving"])
 def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
+    from robot.agent.api import SafetyStop
+
     robot = MockRosRobot(_make_scene([Thing("bag", 1.5, 0.0)]))
     target, = robot.detect("bag")
     sent, result = Future(), Future()
@@ -200,12 +454,12 @@ def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
     robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
     robot._publish = lambda v, w: velocities.append((v, w))
 
-    def step(v, w):
+    def step(goal):
         if when == "before acceptance":
             raise Preempted("stop")
         robot.things.pop(target.id)  # perception withdrew the ID after Nav2 accepted it
 
-    robot._step = step
+    robot._nav_tick = step
     if when == "while driving":
         sent.set_result(handle)
         with pytest.raises(TargetLost, match="stopped approaching"):
@@ -214,11 +468,16 @@ def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
     else:
         with pytest.raises(Preempted):
             RosRobot._act(robot, "navigate_to_pose", watch=target)
+        assert robot._motion.owner is None and velocities[-1] == (0.0, 0.0)
+        with pytest.raises(SafetyStop, match="previous motion goal"):
+            RosRobot._act(robot, "navigate_to_pose")
         sent.set_result(handle)
+        robot._motion_available()
     assert cancelled == [True]
 
 
-def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled():
+@pytest.mark.parametrize("motion, settle", [("stationary", 1), ("oscillating", 6), ("backup", 4), ("repeated retry", 8)])
+def test_a_nav2_goal_that_makes_no_progress_is_given_up_and_cancelled(motion, settle):
     from robot.ros.robot import PROGRESS_S
 
     robot = MockRosRobot(_make_scene())
@@ -234,15 +493,68 @@ def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled():
     robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
     robot._publish = lambda v, w: None
 
-    def step(v, w):  # Nav2 backs up, spins and replans: a second passes and the robot is no nearer
+    def step(goal):  # Nav2 backs up, spins and replans: a second passes and the robot is no nearer
         robot.t += 1.0
-        robot.x = 0.3 * math.sin(robot.t)
+        if robot.t > 2 * PROGRESS_S:
+            pytest.fail("the same recovery stretch kept the goal alive")
+        if motion == "repeated retry":
+            phase = (robot.t - 1) % 12
+            robot.x = -0.18 * min(phase, 12 - phase)
+        elif motion == "backup":
+            robot.x = -min(0.4, (robot.t - 1) * 0.2)
+        elif motion == "oscillating":
+            robot.x = 0.3 * math.sin(robot.t)
+        robot.y = 0.04 * math.sin(robot.t)  # small map-frame localization jitter
 
-    robot._step = step
+    robot._nav_tick = step
     goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
-    with pytest.raises(PathBlocked, match="no nearer"):
+    with pytest.raises(PathBlocked, match="no navigation progress"):
         RosRobot._act(robot, "navigate_to_pose", pose=goal)
-    assert len(cancelled) == 1 and PROGRESS_S < cancelled[0] <= PROGRESS_S + 2
+    # A first visit to the recovery stretch can count; returning to it over and over cannot.
+    assert len(cancelled) == 1 and PROGRESS_S < cancelled[0] <= PROGRESS_S + settle
+
+
+def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_goal():
+    from robot.ros.robot import PROGRESS_S
+
+    robot = MockRosRobot(_make_scene())
+    sent, result = Future(), Future()
+    cancelled = []
+
+    def cancel():
+        cancelled.append(robot.t)
+        result.set_result(SimpleNamespace(status=5))
+
+    sent.set_result(SimpleNamespace(accepted=True, cancel_goal_async=cancel, get_result_async=lambda: result))
+    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True,
+                                                        send_goal_async=lambda goal: sent)}
+    robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
+    robot._publish = lambda v, w: None
+    route = [(0.0, 0.0), (-4.0, 0.0), (-4.0, 3.0), (3.0, 3.0), (3.0, 0.0)]
+    legs = [(a, b, math.dist(a, b)) for a, b in zip(route, route[1:], strict=False)]
+    total = sum(length for _, _, length in legs)
+
+    def step(goal):
+        robot.t += 1.0
+        travelled = robot.t * 0.2
+        if travelled >= total:
+            robot.x, robot.y = route[-1]
+            result.set_result(SimpleNamespace(status=4))
+            return
+        offset = travelled
+        for a, b, length in legs:
+            if offset <= length:
+                robot.x, robot.y = (start + (end - start) * offset / length for start, end in zip(a, b, strict=True))
+                break
+            offset -= length
+        robot.y += 0.04 * math.sin(robot.t)
+        if robot.t == PROGRESS_S + 2:
+            assert math.dist((robot.x, robot.y), route[-1]) > math.dist(route[0], route[-1])
+
+    robot._nav_tick = step
+    goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
+    RosRobot._act(robot, "navigate_to_pose", pose=goal)
+    assert (robot.x, robot.y) == route[-1] and not cancelled
 
 
 def test_ros_robot_go_arrival_tolerance_absorbs_nav2_abort():
@@ -284,6 +596,9 @@ def test_nav2_and_slam_parameters_fit_this_robot(tmp_path):
     if not (bringup.NAV2 / "params" / "nav2_params.yaml").exists() or not Path(bringup.SLAM_DEFAULTS).exists():
         pytest.skip("Nav2 and slam_toolbox are not installed here")
     cfg = yaml.safe_load(bringup.params(tmp_path).read_text())
+    cm = cfg["collision_monitor"]["ros__parameters"]
+    assert (cm["cmd_vel_in_topic"], cm["cmd_vel_out_topic"]) == (bringup.SELECTED, bringup.CHECKED)
+    assert cm["enable_stamped_cmd_vel"] and cm["source_timeout"] == 1.0
     for name in ("local_costmap", "global_costmap"):
         assert cfg[name][name]["ros__parameters"]["robot_radius"] == BODY_R
     assert cfg["amcl"]["ros__parameters"]["max_beams"] == bringup.AMCL["max_beams"]
@@ -315,12 +630,45 @@ def test_ros_robot_shutdown_cleans_up_action_node_and_executor():
     robot.node = FakeNode()
     robot._executor = FakeExecutor()
 
+    stopped_at_destroy = []
+    robot.actions = {"navigate_to_pose": SimpleNamespace(
+        destroy=lambda: stopped_at_destroy.append(robot._action_executor.shutdown_called),
+    )}
     robot.shutdown()
 
     assert robot._action_node.destroyed
     assert robot._action_executor.shutdown_called
+    assert stopped_at_destroy == [True]
     assert robot.node.destroyed
     assert robot._executor.shutdown_called
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_ros_shutdown_waits_for_pending_goal_before_destroying_client(monkeypatch, confirmed):
+    from robot.ros.motion import NavGoal
+
+    robot = MockRosRobot(_make_scene())
+    sent, result = Future(), Future()
+    destroyed = []
+    robot._goal = NavGoal(sent, robot._motion.lock)
+    robot.actions = {"navigate_to_pose": SimpleNamespace(destroy=lambda: destroyed.append(True))}
+
+    def accept_during_shutdown(_):
+        assert not destroyed and robot._motion.owner is None and robot._goal.cancelled
+        sent.set_result(SimpleNamespace(
+            accepted=True, cancel_goal_async=lambda: result.set_result(SimpleNamespace(status=5)),
+            get_result_async=lambda: result,
+        ))
+
+    if confirmed:
+        monkeypatch.setattr("robot.ros.motion.time.sleep", accept_during_shutdown)
+        robot.shutdown()
+        assert result.done()
+    else:
+        monkeypatch.setattr("robot.ros.robot.CANCEL_WAIT_S", 0)
+        with pytest.raises(SafetyStop, match="restart Nav2"):
+            robot.shutdown()
+    assert destroyed == [True]
 
 
 def test_ros_robot_act_recreates_action_client_on_timeout():
@@ -403,7 +751,8 @@ def test_live_html_reply_banner_and_speech_toggle():
 # ---------------------------------------------------------------------------
 
 
-def test_orbit_around_furniture_no_false_cable_snag():
+@pytest.mark.parametrize("laps", [1.0, 2.0])
+def test_orbit_around_furniture_no_false_cable_snag(laps):
     desk = Thing("desk", 0.0, 0.0, radius=0.5)
     scene = Scene(
         width=10.0,
@@ -415,9 +764,11 @@ def test_orbit_around_furniture_no_false_cable_snag():
     )
     sim = SimRobot(scene)
     # Must orbit cleanly without raising PathBlocked: cable snag detected
-    sim.orbit("desk", laps=1.0, distance=0.5)
+    sim.orbit("desk", laps=laps, distance=0.5)
     assert sim.t > 1.0
     assert len(sim.trace.poses) > 20
+    bearings = np.unwrap([math.atan2(y, x) for _, x, y, _ in sim.trace.poses])
+    assert bearings[-1] - bearings[0] == pytest.approx(laps * math.tau, abs=0.1)
 
 
 def test_snag_detection_still_triggers_when_snag_at_present():
@@ -789,20 +1140,21 @@ def test_a_search_steps_back_from_a_likely_way_with_no_floor_to_see_the_thing_wh
     real.floor_spots = spots
     odds = {"front_camera": 0.95}
     real.brain = SimpleNamespace(yes_probability=lambda _: odds.get(asked[-1], 0.07))
-    stop = real._next_stop("blue bicycle", None, [])  # right in front: the bicycle itself leaves no floor that way
+    stop = next(real._next_stops("blue bicycle", None, []))  # right in front: the bicycle itself leaves no floor that way
     assert isinstance(stop, Pose) and (round(stop.x, 2), round(stop.y, 2), stop.yaw) == (-1.0, 0.0, 0.0)
     assert real.search_log[-1].endswith("stepped back to see front whole")
-    assert real._next_stop("blue bicycle", None, []) == (-2.0, 2.0)  # once a search: no second step back
+    assert list(real._next_stops("blue bicycle", None, [])) == [(-2.0, 2.0)]  # once a search: no second step back
     real._stepped_back = False
     odds["front_camera"] = 0.3  # likeliest, but unlikely: nothing worth backing off to see
-    assert real._next_stop("blue bicycle", None, []) == (-2.0, 2.0) and real.search_log[-1].endswith("went rear-left")
+    assert list(real._next_stops("blue bicycle", None, [])) == [(-2.0, 2.0)]
+    assert real.search_log[-1].endswith("went rear-left")
     odds["front_camera"] = 0.95
-    assert real._next_stop("blue bicycle", None, [(-1.0, 0.0)]) == (-2.0, 2.0)  # stepped back already: floor elsewhere
+    assert list(real._next_stops("blue bicycle", None, [(-1.0, 0.0)])) == [(-2.0, 2.0)]  # stepped back already
     assert real.search_log[-1].endswith("went rear-left")
     floor.update({"rear_left_camera": [], "rear_right_camera": []})
-    assert real._next_stop("blue bicycle", None, [(-1.0, 0.0)]) is None  # nowhere new to go: the search ends
+    assert not list(real._next_stops("blue bicycle", None, [(-1.0, 0.0)]))  # nowhere new to go: the search ends
     floor["front_camera"] = [(1.5, 0.0), (3.0, 0.5)]
-    assert real._next_stop("blue bicycle", None, []) == (3.0, 0.5)  # floor that way: the farthest, as before
+    assert list(real._next_stops("blue bicycle", None, [])) == [(3.0, 0.5)]  # floor that way: the farthest, as before
 
 
 @pytest.mark.parametrize(("seen_ago", "answer", "confirmed"), [(0.4, None, True), (6.6, 0.9, True), (6.6, 0.1, False)])
@@ -833,7 +1185,7 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
     real = object.__new__(RealRobot)
     SimRobot.__init__(real, _make_scene())
     real._ready = True
-    real.store, real._cleared_tracks, real._habit_recorded, real._rooms, real._named_at = None, set(), {}, [], 0.0
+    real.store, real._cleared_tracks, real._rooms, real._named_at = None, set(), [], 0.0
     real.speaker_profile, real._user = None, None
     tracker = Tracker()
     cam = RIG["front_camera"]
@@ -857,16 +1209,7 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
 
     real._step = step
     # Vision model says yes wherever the white patch is present
-    import base64
-
-    import cv2
-
-    def yes_prob(messages):
-        url = messages[0]["content"][0]["image_url"]["url"]
-        arr = cv2.imdecode(np.frombuffer(base64.b64decode(url.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
-        return min(0.98, 0.05 + 12.0 * float((arr > 200).mean()))
-
-    real.brain = SimpleNamespace(yes_probability=yes_prob)
+    real.brain = make_image_brain(lambda arr: min(0.98, 0.05 + 12.0 * float((arr > 200).mean())))
     found = real.detect("computer monitor")
     assert len(found) == 1 and found[0].label == "computer monitor" and 1.7 <= found[0].distance <= 2.3
     tid = found[0].id
@@ -902,11 +1245,48 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
     assert passed is not None and passed.label == "umbrella" and passed.x > 2.5
 
     # Visible-side approach: when spotted from (1.0, 0.0) and now around the side at (2.8, 1.0), return toward spotted
+    real._nav_reaches = lambda *_: True
     umb = Object(passed.id, "umbrella", (passed.x, passed.y), 1.0, 0.0, "ahead", 0.2, "", 0.0)
     tracker.tracks[passed.id].spotted_from = (passed.x - 0.8, passed.y)
     real.x, real.y, real.yaw = passed.x, passed.y - 1.0, 0.0
     gp = real._goal_point(umb, 0.0)
     assert gp is not None and math.dist(gp[0], (passed.x - 0.8, passed.y)) < 0.2
+
+
+@pytest.mark.parametrize(("photo_map", "scan_map", "expected"), [
+    ((0.0, 0.0, 0.0), (0.0, 0.1, math.pi / 2), (2.2, 0.1)),
+    ((10.0, 20.0, math.pi / 2), (-4.0, -7.0, 0.0), (9.9, 22.2)),
+])
+def test_visual_lidar_uses_odometry_across_map_corrections(monkeypatch, photo_map, scan_map, expected):
+    from collections import deque
+
+    from robot.ros import real as grounding
+
+    real = object.__new__(RealRobot)
+    SimRobot.__init__(real, _make_scene())
+    real.brain = None
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    stamp = SimpleNamespace(sec=1, nanosec=0)
+    ranges = np.full(360, np.inf)
+    ranges[90], ranges[180] = 2.0, 1.0
+    tracker = Tracker()
+    real.perception = SimpleNamespace(lock=Lock(), tracker=tracker, crops={},
+                                      frames={"front_camera": (stamp, rgb)},
+                                      scans=deque([(0.8, (ranges, -math.pi, math.tau / 360))]))
+    def pose_at(at, *, frame="map"):
+        assert at is stamp or at == pytest.approx(0.8)
+        if frame == "odom":
+            return (0.0, 0.0, 0.0) if at is stamp else (0.0, 0.1, math.pi / 2)
+        return photo_map if at is stamp else scan_map
+
+    real._pose_at = pose_at
+    monkeypatch.setattr(grounding, "see_probability", lambda *args, **kwargs: 1.0)
+    monkeypatch.setattr(grounding, "locate_in_picture", lambda *args: ((560, 100, 720, 400), False))
+
+    real._see_target("chair")
+
+    track, = tracker.objects()
+    assert (track.x, track.y) == pytest.approx(expected)
 
 
 def test_floor_flat_visual_object_drives_onto_free_floor():
@@ -924,12 +1304,13 @@ def test_search_uses_unseen_map_frontiers_instead_of_zigzagging_when_no_camera_h
     scene = Scene(12.0, 6.0, [], {}, walls=[((0.0, -3.0), (0.0, 1.0))], start=Pose(-3.0, 0.0, 0.0))
     real = object.__new__(RealRobot)
     SimRobot.__init__(real, scene)
+    real._nav_reaches = lambda *_: True
     real.search_log, real._stepped_back, real._searching = [], False, True
     real.coverage = np.zeros_like(real.occupied)
     real._cover()
     real.floor_spots = lambda camera, **_: (np.zeros((4, 4, 3), np.uint8), [(-1.5, 0.0)])  # already-covered spot
     real.brain = SimpleNamespace(yes_probability=lambda _: 0.15)  # no visual lead in any camera
-    stop = real._next_stop("umbrella", None, [])
+    stop = next(real._next_stops("umbrella", None, []), None)
     assert stop is not None and stop[0] > -3.0 and stop != (-1.5, 0.0)
     assert math.dist(stop, (-3.0, 0.0)) <= 3.3  # capped to a <=3.2 m path hop along the way around the wall
     assert real.search_log[-1].endswith("explored unseen area")
@@ -943,8 +1324,8 @@ def test_search_toward_and_lean_stationary_look():
     scene = Scene(10.0, 6.0, [Thing("mug", 3.5, 0.0, radius=0.1)], {}, start=Pose(-3.0, 0.0, 0.0))
     sim = SimRobot(scene)
     tools = Tools(sim)
-    out = tools.execute("search", {"what": "mug", "area": "everywhere", "toward": "front"})
-    assert out.ok and "Found candidate mug" in out.text and sim.x > -1.0
+    res = tools.execute("search", {"what": "mug", "area": "everywhere", "toward": "front"})
+    assert res.ok and "Found candidate mug" in res.text and sim.x > -1.0
 
     # Stationary look(what=...) returns only matching detections + pictures without re-dumping full scene text.
     seen_msgs = []
@@ -992,10 +1373,10 @@ def test_small_object_depth_refinement_and_arrived_reached_wording():
     # Tools._arrived says "Facing" when stopped farther away (>0.6 m gap), "Reached" within normal stopping gap
     sim = SimRobot(Scene(10.0, 6.0, [Thing("umbrella", 3.0, 0.0, radius=0.15)], {}, start=Pose(0.0, 0.0, 0.0)))
     tools = Tools(sim)
-    out_far = tools.execute("stop_near", {"target": "umbrella", "metres": 1.2})
-    assert out_far.ok and "Facing umbrella" in out_far.text and "Reached" not in out_far.text
-    out_near = tools.execute("go_to", {"target": "umbrella"})
-    assert out_near.ok and "Reached umbrella" in out_near.text
+    far = tools.execute("stop_near", {"target": "umbrella", "metres": 1.2})
+    assert far.ok and "Facing umbrella" in far.text and "Reached" not in far.text
+    near = tools.execute("go_to", {"target": "umbrella"})
+    assert near.ok and "Reached umbrella" in near.text
 
 
 def test_floor_sees_now_and_spotted_standpoint_pull_in():
@@ -1034,9 +1415,12 @@ def test_floor_sees_now_and_spotted_standpoint_pull_in():
     moved: list[float] = []
     real._rotate = lambda a: setattr(real, "yaw", real.yaw + a)
     real._move = lambda d: (moved.append(d), setattr(real, "x", real.x + d * math.cos(real.yaw)))[0]
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(RosRobot, "_go", lambda self, *a, **kw: None)
-        real._go(umb, 0.0)
+    real._goal_candidates = lambda *_: iter([(cand, 0.0)])
+    real._nav_reaches = Mock(return_value=True)
+    real._act = Mock()
+    real._pose_msg = lambda *pose: pose
+    real._go(umb, 0.0)
+    real._nav_reaches.assert_called_once_with(cand, 0.0)
     assert len(moved) == 1 and 0.20 <= moved[0] <= 0.30
 
     # RealRobot.obj refreshes self.things when perception merges track 15 -> 11 between _perceive_objects() syncs
@@ -1067,8 +1451,8 @@ def test_says_no_contractions_and_search_near_direction_or_here():
     orig_detect = sim.detect
     sim.detect = lambda desc: (seen_detects.append(desc), orig_detect(desc))[1]
     tools = Tools(sim)
-    out = tools.execute("search", {"what": "mug", "near": "front"})
-    assert out.ok and "Found candidate mug" in out.text and "front" not in seen_detects
+    res = tools.execute("search", {"what": "mug", "near": "front"})
+    assert res.ok and "Found candidate mug" in res.text and "front" not in seen_detects
     seen_detects.clear()
     tools.execute("search", {"what": "mug", "near": "here"})
     assert "here" not in seen_detects
@@ -1141,12 +1525,12 @@ def test_sync_vlm_vetting_cluster_pick_and_semantic_places(tmp_path):
     assert "kitchen: cabinets, counter" in txt and "hallway: doorway, wooden door" in txt
 
     tools = Tools(sim)
-    out = tools.execute("search", {"what": "mug", "near": "hallway"})
-    assert out.ok and "Found candidate mug" in out.text and sim.x < -1.0
+    res = tools.execute("search", {"what": "mug", "near": "hallway"})
+    assert res.ok and "Found candidate mug" in res.text and sim.x < -1.0
 
     # Out-of-view go_to("kitchen") resolves to mapped "kitchen: cabinets, counter" and drives there without blind search
-    out2 = tools.execute("go_to", {"target": "kitchen"})
-    assert out2.ok and "Arrived at kitchen: cabinets, counter" in out2.text and sim.x > 2.0
+    res2 = tools.execute("go_to", {"target": "kitchen"})
+    assert res2.ok and "Arrived at kitchen: cabinets, counter" in res2.text and sim.x > 2.0
 
 
 def test_color_qualified_sees_now_and_visual_target_color_check():
@@ -1205,7 +1589,6 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     from robot.agent.agent import Agent
     from robot.agent.tools import Tools
     from robot.mind.brain import Reply, ToolCall
-    from robot.perception.detector import Detector
 
     # 1. Location phrases ("chair in living room") and object IDs ("bike 7") never leak into YOLOE vocabulary
     sim = SimRobot(Scene(8.0, 6.0, [Thing("chair", 2.0, 0.0, 0.3)], {}, start=Pose(0.0, 0.0, 0.0)))
@@ -1218,8 +1601,8 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
         ("search", {"what": "bike 7"}),
         ("look", {"direction": "front", "what": "25 CHAIR"}),
     ):
-        result = tools.execute(name, args)
-        assert not result.ok and ("search(" in result.text or "object ID" in result.text)
+        res = tools.execute(name, args)
+        assert not res.ok and ("search(" in res.text or "object ID" in res.text)
     assert sim.vocabulary == vocab_before
 
     # 2. Default see_after_moves="front" attaches 1 fresh front_camera frame after open-loop moves without full scene dump
@@ -1237,7 +1620,7 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     assert not any("What you sense now:" in p.get("text", "") for p in tool_content)
 
     # 3. Detector.clear() drops previous request's asked words while preserving `always`
-    det = Detector(server=SimpleNamespace(slots=8), always=("person",))
+    det = make_detector(SimpleNamespace(slots=8), ("shoes", "umbrella"))
     det.watch("shoes", "umbrella")
     assert det.vocabulary == ["person", "shoes", "umbrella"]
     det.clear()

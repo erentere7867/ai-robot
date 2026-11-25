@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -68,26 +68,27 @@ class ActionResult:
     turned_deg: float = 0.0
 
 
-def recalled_facts(memory: Any, query: str) -> list[str]:
-    """Retrieve matching stored facts; when multiple match, return them oldest-to-newest so corrections stand out."""
-    if memory is None:
-        return []
-    if hasattr(memory, "query_facts_dated"):
-        dated = list(memory.query_facts_dated(query))
-        if len(dated) <= 1:
-            return [text for text, _ in dated]
+def recalled_facts(memory: Any, query: str, extra: Iterable[str] = ()) -> list[str]:
+    """Retrieve matching stored facts (oldest to newest when multiple match) plus any extra unstored notes."""
+    dated: list[tuple[str, float]] = list(memory.query_facts(query)) if memory is not None else []
+    if len(dated) > 1:
         dated.sort(key=lambda item: item[1])
-        return [f"{text} ({'most recent' if i == len(dated) - 1 else 'earlier'})" for i, (text, _) in enumerate(dated)]
-    if hasattr(memory, "query_facts"):
-        return list(memory.query_facts(query))
-    return []
+        lines = [f"{text} ({'most recent' if i == len(dated) - 1 else 'earlier'})" for i, (text, _) in enumerate(dated)]
+    else:
+        lines = [text for text, _ in dated]
+    seen = {text for text, _ in dated}
+    for note in extra:
+        if note not in seen:
+            seen.add(note)
+            lines.append(note)
+    return lines
 
 
 def _turn_span(robot: Any, pose_idx: int, before: Pose, after: Pose, commanded: float) -> float | None:
     """Measured degrees turned since `pose_idx` (handles multi-turn spins via trace poses)."""
     poses = getattr(getattr(robot, "trace", None), "poses", ())
-    if len(poses) > pose_idx + 1:
-        yaws = [p[3] for p in poses[pose_idx:]]
+    if len(poses) > pose_idx:
+        yaws = [math.radians(before.yaw), *(p[3] for p in poses[pose_idx:])]
         return math.degrees(sum(abs(wrap(b - a)) for a, b in zip(yaws, yaws[1:], strict=False)))
     if commanded < 180:
         return abs((after.yaw - before.yaw + 180) % 360 - 180)
@@ -113,34 +114,54 @@ class Tool:
 
 
 @dataclass
+class TodoStep:
+    title: str
+    done: bool = False
+    blocker: str = ""
+
+    def status(self) -> str:
+        return f"{self.title} (blocked: {self.blocker})" if self.blocker else self.title
+
+
+@dataclass
 class Todo:
     """The model's own to-do list for a request with several parts, shown back to it every turn."""
 
-    steps: list[str] = field(default_factory=list)
-    done: list[bool] = field(default_factory=list)
+    steps: list[TodoStep] = field(default_factory=list)
 
     def write(self, steps: list[str]) -> None:
         if any(not isinstance(step, str) or not step.strip() for step in steps):
             raise ToolError("the to-do list needs non-empty step descriptions")
-        completed = [step for step, done in zip(self.steps, self.done, strict=True) if done]
+        completed = [step for step in self.steps if step.done]
         if len(completed) + len(steps) > MAX_TODO_STEPS:
             raise ToolError(f"the to-do list can hold at most {MAX_TODO_STEPS} steps including completed steps")
-        self.steps = completed + [step.strip() for step in steps]
-        self.done = [True] * len(completed) + [False] * len(steps)
+        self.steps = completed + [TodoStep(step.strip()) for step in steps]
 
-    def tick(self, number: int) -> None:
+    def _step(self, number: int) -> TodoStep:
         if not 1 <= number <= len(self.steps):
             raise ToolError(f"there is no step {number}; the to-do list has {len(self.steps)} steps")
-        self.done[number - 1] = True
+        return self.steps[number - 1]
+
+    def tick(self, number: int) -> None:
+        step = self._step(number)
+        step.done, step.blocker = True, ""
+
+    def block(self, number: int, reason: str) -> None:
+        step = self._step(number)
+        if step.done:
+            raise ToolError(f"step {number} is already done")
+        step.blocker = reason
 
     def open_steps(self) -> list[str]:
-        return [s for s, d in zip(self.steps, self.done, strict=True) if not d]
+        return [step.status() for step in self.steps if not step.done]
+
+    def done_steps(self) -> list[str]:
+        return [step.title for step in self.steps if step.done]
 
     def text(self) -> str:
         if not self.steps:
             return "(no to-do list)"
-        return "\n".join(f"{i}. [{'x' if d else ' '}] {s}" for i, (s, d) in enumerate(zip(self.steps, self.done,
-                                                                                          strict=True), 1))
+        return "\n".join(f"{i}. [{'x' if step.done else ' '}] {step.status()}" for i, step in enumerate(self.steps, 1))
 
 
 def _num(value: Any) -> float:
@@ -258,6 +279,12 @@ class Tools:
     def __init__(self, robot: Any, memory: Any = None) -> None:
         self.robot = robot
         self.memory = memory if memory is not None else getattr(robot, "store", None)
+        robot_persists = (
+            self.memory is not None
+            and getattr(robot, "persists_facts", False)
+            and getattr(robot, "store", None) is self.memory
+        )
+        self._fact_store = None if robot_persists else self.memory
         self.todo = Todo()
         self.looked: list[str] = []  # cameras the model asked to see since the last observation
         self.moved = False  # the robot moved since the last observation
@@ -265,6 +292,8 @@ class Tools:
         self.pictures: list[tuple[str, Any]] = []  # sensor evidence with its provenance, not a new live view
         self._tools = {t.name: t for t in self._define()}
         self.began = robot.pose()  # where this request began
+        self._search_views: dict[tuple[str, ...], list[Pose]] = {}
+        self._searched_landmarks: set[tuple[str, ...]] = set()
         self.done: list[str] = []  # each motion of this request, as it went
         self.turned = 0.0  # degrees of turning in all, either way
 
@@ -291,6 +320,11 @@ class Tools:
         try:
             checked = _check(tool, args)
             raw = tool.run(**checked)
+            res = raw if isinstance(raw, ActionResult) else ActionResult(raw, True, "reached" if tool.moves else "ok")
+            if self.found is not None and name != "search":
+                res = replace(res, text=f"Searched for it: found {self.found.label} {self.found.id}. {res.text}")
+            if tool.moves:
+                self.moved = True
         except ToolError as exc:
             return ActionResult(f"Error: {exc}.{motion_note()}", False, "error", moved_m)
         except NotFound as exc:
@@ -310,31 +344,28 @@ class Tools:
             return ActionResult(f"Timed out: {exc}{motion_note()}.", False, "timeout", moved_m)
         except (ValueError, TypeError) as exc:
             return ActionResult(f"Error: {exc}.", False, "error")
-        else:
-            self.moved |= tool.moves
         finally:
             if before is not None and not self.moved:
                 now = self.robot.pose()
                 if (math.dist((now.x, now.y), (before.x, before.y)) > 0.02
                         or abs((now.yaw - before.yaw + 180) % 360 - 180) > 2.0):
                     self.moved = True
-        res = raw if isinstance(raw, ActionResult) else ActionResult(raw, True, "reached" if tool.moves else "ok")
-        if self.found is not None and name != "search":
-            res = replace(res, text=f"Searched for it: found {self.found.label} {self.found.id}. {res.text}")
-        if tool.moves and (progress := self._progress(name, checked, res)):
-            res = replace(res, text=f"{res.text}\n{progress}")
+        if tool.moves:
+            progress = self._progress(name, checked, res)
+            if progress:
+                res = replace(res, text=res.text + "\n" + progress)
         return res
 
     def _progress(self, name: str, args: dict[str, Any], res: ActionResult) -> str:
         """Keep motion progress compact: always report for repetition-prone steps (turn/move/drive/orbit) or after
         multiple motions, while omitting boilerplate on a single-step go_to/search to keep context lean."""
         if name == "turn":
-            degrees = round(res.turned_deg) if res.status == "partial" else args["degrees"]
+            degrees = round(res.turned_deg)
             self.turned += abs(degrees)
             self.done.append(f"turned {degrees:g} degrees {args['direction']}")
         elif name == "move":
-            metres = f"{res.moved_m:.2f}" if res.status == "partial" else f"{args['metres']:g}"
-            self.done.append(f"moved {metres} m {args['direction']}")
+            metres = round(res.moved_m, 2)
+            self.done.append(f"moved {metres:g} m {args['direction']}")
         else:
             self.done.append(res.text.split(":")[0].split(",")[0].rstrip(".").lower())  # "arrived", "drove for 2 s"
         if name not in ("turn", "move", "drive", "orbit") and len(self.done) <= 1:
@@ -463,19 +494,13 @@ class Tools:
 
     # ---- the tools ----------------------------------------------------------------------------------------------
     def _define(self) -> list[Tool]:
-        target = {"type": "string", "description": "an object ID, \"user\", a room or place, or a visual name "
-                                                   "like \"red ball\". Compare returned distances, not object names."}
+        target = {"type": "string", "description": "Object ID, \"user\", room, saved place, or visual name."}
         side = {"type": "string", "enum": ["left", "right"]}
         return [
-            Tool("go_to", "Go to a target and face it. Use an ID, or any visible thing, area or place by name even if "
-                          "not in the Objects list yet (it will be located or searched for automatically). For a "
-                          "requested side or gap use go_to_side or stop_near. Parking beside something does not go "
-                          "underneath.",
+            Tool("go_to", "Go to and face a named target, searching if needed. For a requested side or gap use "
+                          "go_to_side or stop_near.",
                  {"target": target}, ("target",), self.go_to, moves=True),
-            Tool("go_toward", "Drive about some metres in a direction, around obstacles, only when no named thing, "
-                              "surface or area can be given to go_to (such as an unnamed gap or a plain direction). "
-                              "The front picture shows what is in front of you; rear-left shows behind you on the "
-                              "left; rear-right behind you on the right.",
+            Tool("go_toward", "Drive roughly the given distance toward an unnamed spot, avoiding obstacles.",
                  {"direction": {"type": "string", "enum": list(BEARINGS)},
                   "metres": {"type": "number", "minimum": 0.3, "maximum": 6}},
                  ("direction", "metres"), self.go_toward, moves=True),
@@ -519,19 +544,14 @@ class Tools:
             Tool("face", "Turn once to face a target.", {"target": target}, ("target",), self.face, moves=True),
             Tool("keep_facing", "Keep turning to face a target as it moves, until the user says stop.",
                  {"target": target}, ("target",), self.keep_facing, moves=True),
-            Tool("search", "Find something not in the object list: checks memory, optionally starts beside a likely "
-                           "landmark/area (`near`) or heads a promising camera direction first (`toward`), then "
-                           "sweeps unseen floor until the cameras see it.",
+            Tool("search", "Find an unlisted object: check memory, then drive to inspect unseen floor if needed.",
                  {"what": {"type": "string", "description": "a visual name, like \"red ball\" or \"keys\", "
                                                            "without a distance comparison"},
                   "area": {"type": "string", "description": "\"here\" (this room), a room name, or \"everywhere\", not "
                                                            "a direction."},
-                  "near": {"type": "string", "description": "optional: a known or visible landmark/area to go beside "
-                                                           "first, where the thing likely is (e.g. \"sofa 4\", "
-                                                           "\"kitchen\", \"stairs\")"},
+                  "near": {"type": "string", "description": "Known or visible landmark/area to approach first."},
                   "toward": {"type": "string", "enum": list(BEARINGS),
-                             "description": "optional: camera direction to head first when a doorway or likely area "
-                                            "lies that way"}},
+                             "description": "Camera direction to head first."}},
                  ("what",), self.search, moves=True),
             Tool("look", "Inspect fresh camera pictures without driving. To label what you see, supply its visual name.",
                  {"direction": {"type": "string", "enum": list(CAMERAS)},
@@ -551,14 +571,16 @@ class Tools:
                  {"fact": {"type": "string"}}, ("fact",), self.remember),
             Tool("recall", "What you know about something: remembered facts and where it was last seen.",
                  {"query": {"type": "string"}}, ("query",), self.recall),
-            Tool("todo", "Write a to-do list for a request with several parts, in order. It is shown back to you "
-                         "after every step. A revision keeps completed steps; pass [] to clear unfinished steps.",
-                 {"steps": {"type": "array", "items": {"type": "string"},
-                            "maxItems": MAX_TODO_STEPS}}, ("steps",), self.write_todo),
-            Tool("todo_done", "Tick off a finished step of the to-do list by its number.",
+            Tool("todo", "List the steps still needed, in order. To revise the plan, list only unfinished work; "
+                         "completed steps are kept. Use [] to clear remaining work and use the returned step numbers.",
+                 {"steps": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_TODO_STEPS}},
+                 ("steps",), self.write_todo),
+            Tool("todo_done", "Tick off a step by number only when the results show it is finished.",
                  {"step": {"type": "integer", "minimum": 1, "maximum": MAX_TODO_STEPS}}, ("step",), self.todo_done),
-            Tool("say", "Speak mid-task ONLY when you still have more tool calls to make after speaking. Never call "
-                        "this for your final reply: end with plain text and no tool call instead.",
+            Tool("todo_blocked", "Mark an unfinished step as blocked and record why; this does not finish it.",
+                 {"step": {"type": "integer", "minimum": 1, "maximum": MAX_TODO_STEPS}, "reason": {"type": "string"}},
+                 ("step", "reason"), self.todo_blocked),
+            Tool("say", "Speak mid-task only when more tool calls are needed.",
                  {"text": {"type": "string"}}, ("text",), self.say),
         ]
 
@@ -593,7 +615,7 @@ class Tools:
             if moved < 0.1:
                 return ActionResult(f"Already at {self._name(t)}: you did not move.", True, "already_there", moved)
             return ActionResult(f"Arrived at {self._name(t)}.", True, "reached", moved)
-        expected_gap = distance if distance is not None else (0.8 if person else 0.0)
+        expected_gap = distance if distance is not None else (0.8 if person else 0.2 if side else 0.0)
         return self._arrived(t, expected_gap=expected_gap, moved_m=moved)
 
     def go_to_side(self, target: str, side: str, distance: float | None = None) -> str | ActionResult:
@@ -652,8 +674,8 @@ class Tools:
         return ActionResult(f"Moved {shown} m {direction}.", True, "reached", went)
 
     def turn(self, degrees: float, direction: str) -> ActionResult:
-        pose_idx = len(getattr(getattr(self.robot, "trace", None), "poses", ()))
         before = self.robot.pose()
+        pose_idx = len(getattr(getattr(self.robot, "trace", None), "poses", ()))
         self.robot.turn(degrees, direction=direction)
         after = self.robot.pose()
         turned = _turn_span(self.robot, pose_idx, before, after, degrees)
@@ -718,34 +740,71 @@ class Tools:
 
     def search(self, what: str, area: str = "here", near: str = "", toward: str = "") -> str:
         _check_visual_name(what)
+        area = area or "here"
         near_key = near.strip().lower().replace("_", "-")
         if near_key in BEARINGS and not toward:
             toward, near = near_key, ""
+        key = (what.casefold(), area.casefold(), near.casefold(), toward)
+        if key in self._searched_landmarks:
+            raise ToolError("you already searched from that landmark. Try another landmark or search from here")
+        attempts = self._search_views.setdefault(key, [])
+        before = self.robot.pose()
+        if any(geom.dist(before, pose) < 0.25
+               and (not toward or abs((before.yaw - pose.yaw + 180) % 360 - 180) < 30) for pose in attempts):
+            raise ToolError("you made this exact call from here already. Try a new viewpoint or change the search area")
+        approach = ""
+        approached = False
         if near and near_key not in {"here", "everywhere", "room"}:  # start beside a visible/known landmark if found
             try:
                 start = self._resolve(near, find=False, fuzzy_place=True)
-                self.robot.go_to(start, distance=(start.radius + 0.5) if isinstance(start, Object) else 0.0)
-            except (ToolError, NotFound, PathBlocked):
-                pass
-        try:
-            self.found = found = self.robot.search(what, area=area or "here", toward=toward)
-        except TypeError:  # a test fake whose search() takes only (what, area)
-            self.found = found = self.robot.search(what, area=area or "here")
+            except (ToolError, NotFound) as exc:
+                approach = f"Could not locate {near!r} as a starting point: {str(exc).rstrip('.')}."
+            else:
+                try:
+                    self.robot.go_to(start, distance=(start.radius + 0.5) if isinstance(start, Object) else 0.0)
+                except PathBlocked as exc:
+                    approach = f"Could not reach {self._name(start)} before searching: {str(exc).rstrip('.')}."
+                else:
+                    approached = True
+                    approach = f"Approached {self._name(start)} before searching."
+        scope = self.robot.room() if area.casefold() == "here" else area
+        context = f"Search scope: {scope}." + (f" {approach}" if approach else "")
+        origin = self.robot.pose() if approach else before
+        trace = getattr(self.robot, "trace", None)
+        poses = getattr(trace, "poses", ())
+        trail_start = len(poses)
+        self.found = found = self.robot.search(what, area=area, toward=toward)
+        after = self.robot.pose()
+        attempts.extend((before, after))
+        if approached:
+            self._searched_landmarks.add(key)
         if found is None:
-            log = getattr(self.robot, "search_log", [])
-            where = "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
-            stops = f" ({len(log)} stops)" if log else ""
-            return f"Searched {where}{stops}: no {what} found."
+            miss = f"No {what} found in the views checked. {context}"
+            latest = getattr(trace, "poses", ())
+            if latest is not poses:
+                anchor = poses[trail_start - 1] if trail_start else None
+                trail_start = next((i + 1 for i, sample in enumerate(latest) if sample is anchor), None)
+                if trail_start is None:
+                    return miss
+                poses = latest
+            trail = [(origin.x, origin.y), *((x, y) for _, x, y, _ in poses[trail_start:]), (after.x, after.y)]
+            unvisited = [
+                str(name) for name, place in getattr(self.robot, "places", {}).items()
+                if name not in ("start", "where you were before") and isinstance(place, Pose)
+                and all(math.dist((place.x, place.y), point) > 2.2 for point in trail)
+            ]
+            hint = f" Areas not visited closely yet: {'; '.join(unvisited[:4])}." if unvisited else ""
+            return miss + hint
         crop = getattr(self.robot, "target_crop", lambda _: None)(found.id)
         if crop is not None:
             self.pictures.append((f"Recorded detection crop for {found.label} ID {found.id} (not a live view):", crop))
-        others = [o for o in self.robot.where(what, area=area or "here") if o.id != found.id]
+        others = [o for o in self.robot.where(what, area=scope) if o.id != found.id]
         if others:
-            return f"Found candidate {found.label} {found.id}. Known matches: {self._choices([found, *others])}"
+            return f"Found candidate {found.label} {found.id}. {context} Known matches: {self._choices([found, *others])}"
         marked = getattr(self.robot, "marked_cameras", None)
         self.looked.extend(marked({found.id}) if marked else CAMERAS["around"])
         evidence = "" if self.looked or self.pictures else " No matching image is available to verify this ID."
-        return f"Found candidate {found.label} {found.id}, {_where_words(found)}.{evidence}"
+        return f"Found candidate {found.label} {found.id}, {_where_words(found)}. {context}{evidence}"
 
     def go_toward(self, direction: str, metres: float) -> ActionResult:
         before = self.robot.pose()
@@ -795,16 +854,12 @@ class Tools:
 
     def remember(self, fact: str) -> str:
         self.robot.remember(fact)
-        if (self.memory is not None and hasattr(self.memory, "remember_fact")
-                and not (self.memory is getattr(self.robot, "store", None) and hasattr(self.robot, "_owns_store"))):
-            self.memory.remember_fact(fact)
+        if self._fact_store is not None:
+            self._fact_store.remember_fact(fact)
         return "Remembered."
 
     def recall(self, query: str) -> str:
-        stored = recalled_facts(self.memory, query)
-        lines = list(stored)
-        raw_stored = {f.removesuffix(" (most recent)").removesuffix(" (earlier)") for f in stored}
-        lines += [f for f in self.robot.recall(query) if f not in raw_stored and f not in lines]
+        lines = recalled_facts(self.memory, query, extra=self.robot.recall(query))
         room_at = getattr(self.robot, "_room_at", None)
         for o in self.robot.where(query, area="everywhere"):
             ago = "now" if o.last_seen < 2 else f"{o.last_seen / 60:.0f} min ago" if o.last_seen >= 60 else \
@@ -822,3 +877,7 @@ class Tools:
         self.todo.tick(step)
         left = self.todo.open_steps()
         return f"Ticked step {step}. " + (f"Still to do: {'; '.join(left)}." if left else "All steps are done.")
+
+    def todo_blocked(self, step: int, reason: str) -> str:
+        self.todo.block(step, reason)
+        return f"Step {step} blocked: {reason}. It is not finished."

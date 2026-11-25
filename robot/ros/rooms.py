@@ -11,60 +11,53 @@ rectangle around it, the form the rest of the robot uses.
 
 from __future__ import annotations
 
-from collections import Counter, deque
+from collections import Counter
 
 import numpy as np
 
-STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 MARGIN = 2  # a named room takes another name only when another answer leads by this many
 
 
 def _distance_to_blocked(free: np.ndarray) -> np.ndarray:
     """Cells to the nearest blocked cell (4-connected steps), for every cell."""
-    dist = np.where(free, -1, 0)
-    todo = deque(zip(*np.nonzero(~free), strict=True))
-    while todo:
-        i, j = todo.popleft()
-        for di, dj in STEPS:
-            a, b = i + di, j + dj
-            if 0 <= a < free.shape[0] and 0 <= b < free.shape[1] and dist[a, b] < 0:
-                dist[a, b] = dist[i, j] + 1
-                todo.append((a, b))
-    return np.where(dist < 0, free.size, dist)
+    if free.all():
+        return np.full(free.shape, free.size, dtype=np.int32)
+    import cv2
+
+    return cv2.distanceTransform(free.astype(np.uint8), cv2.DIST_L1, 3).astype(np.int32)
 
 
 def segment(free: np.ndarray, cell: float, door: float = 1.0, smallest: float = 1.5) -> list[np.ndarray]:
     """The rooms of a free-floor grid (indexed [x, y], `cell` metres a side), as masks, largest first. `door`: the
     widest doorway to split at; `smallest`: the least floor, square metres, a room's core must have."""
+    import cv2
+
     core = _distance_to_blocked(free) * cell > door / 2
-    labels = np.zeros(free.shape, dtype=np.int32)
-    seeds: list[list[tuple[int, int]]] = []
-    for i, j in zip(*np.nonzero(core), strict=True):
-        if labels[i, j]:
-            continue
-        group, todo = [], deque([(i, j)])
-        labels[i, j] = len(seeds) + 1
-        while todo:
-            a, b = todo.popleft()
-            group.append((a, b))
-            for di, dj in STEPS:
-                c, d = a + di, b + dj
-                if 0 <= c < free.shape[0] and 0 <= d < free.shape[1] and core[c, d] and not labels[c, d]:
-                    labels[c, d] = labels[i, j]
-                    todo.append((c, d))
-        seeds.append(group)
-    keep = [k + 1 for k, g in enumerate(seeds) if len(g) * cell * cell >= smallest]
-    labels = np.where(np.isin(labels, keep), labels, 0)
-    todo = deque(zip(*np.nonzero(labels), strict=True))  # grow every core through the free floor, all at once
-    while todo:
-        i, j = todo.popleft()
-        for di, dj in STEPS:
-            a, b = i + di, j + dj
-            if 0 <= a < free.shape[0] and 0 <= b < free.shape[1] and free[a, b] and not labels[a, b]:
-                labels[a, b] = labels[i, j]
-                todo.append((a, b))
+    n_labels, labels = cv2.connectedComponents(core.astype(np.uint8), connectivity=4)
+    counts = np.bincount(labels.ravel(), minlength=n_labels)
+    keep = [k for k in range(1, n_labels) if counts[k] * cell * cell >= smallest]
+    if not keep:
+        return []
+    keep_lut = np.zeros(n_labels, dtype=np.int32)
+    for k in keep:
+        keep_lut[k] = k
+    labels = keep_lut[labels]
+    # Grow every core through the free floor one 4-connected wavefront at a time.
+    while True:
+        unlabeled = free & (labels == 0)
+        if not unlabeled.any():
+            break
+        grown = np.zeros_like(labels)
+        grown[1:, :] = np.where(grown[1:, :], grown[1:, :], labels[:-1, :])
+        grown[:-1, :] = np.where(grown[:-1, :], grown[:-1, :], labels[1:, :])
+        grown[:, 1:] = np.where(grown[:, 1:], grown[:, 1:], labels[:, :-1])
+        grown[:, :-1] = np.where(grown[:, :-1], grown[:, :-1], labels[:, 1:])
+        step = unlabeled & (grown > 0)
+        if not step.any():
+            break
+        labels[step] = grown[step]
     masks = [labels == k for k in keep]
-    return sorted(masks, key=lambda m: -m.sum())
+    return sorted(masks, key=lambda m: -int(m.sum()))
 
 
 def name(masks: list[np.ndarray], cell: float, size: tuple[float, float], votes: list[Counter], places: dict,

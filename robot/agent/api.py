@@ -188,7 +188,7 @@ class Robot(Protocol):
     def stop(self) -> None:
         """Stop moving."""
 
-    def search(self, description: str, area: str = "here") -> Object | None:
+    def search(self, description: str, area: str = "here", *, toward: str = "") -> Object | None:
         """Memory, then explore; area 'here', a room or 'everywhere'."""
 
     def orbit(self, target: Target, laps: float = 1.0, direction: str = "left", distance: float = 0.5) -> None:

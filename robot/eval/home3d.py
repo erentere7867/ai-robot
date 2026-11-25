@@ -27,6 +27,7 @@ from typing import Any
 
 from robot.agent.api import wrap
 from robot.eval.suite import end, rocks, turned
+from robot.perception.rig import to_robot
 from robot.sim.stack import Home
 
 TUNE = ("apt_0", "v3_sc0_staging_00")  # the layouts tasks and harness are tuned on; hold others out
@@ -34,6 +35,7 @@ WORDS = {"sofa": ("sofa", "couch"), "bike": ("bike", "bicycle"), "tv": ("tv", "t
 SEEN = 94  # pixels (of the judge's 640 x 360 picture) for a thing to be in view: a detector might find it
 CLEAR = 625  # pixels for a thing to be plainly in view, not just detectable
 WATCH = 6.0  # simulated seconds the robot looks around on its dock before a task
+STOP_DWELL = 0.5  # simulated seconds of stillness at the end of a return
 NUMBERS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
 
 
@@ -41,9 +43,14 @@ NUMBERS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight
 class Task:
     id: str
     says: tuple[str, ...]  # one request, or several in a row to the same agent
-    check: Callable[[Referee, dict], bool]
+    criterion: Callable[[Referee, dict], bool | str]  # a string explains a failed condition
     needs: tuple[str, ...] = ()  # labels the layout must have, or the task is skipped there
+    observe_after: float = 0.0
     restart_after: tuple[int, ...] = ()  # 1-based request indices after which robot + agent restart on the same DB
+
+    def problem(self, referee: Referee, start: dict) -> str:
+        result = self.criterion(referee, start)
+        return result if isinstance(result, str) else "" if result else "task criterion not met"
 
 
 class Referee:
@@ -151,9 +158,30 @@ def visited_in_order(sim: Referee, targets: list[Any], margin: float = 0.75) -> 
 
 def forward(sim: Referee, start: dict) -> float:
     """Metres moved along the starting heading (+ forward)."""
-    x, y, _ = end(sim)
-    sx, sy, syaw = start["pose"]
-    return (x - sx) * math.cos(syaw) + (y - sy) * math.sin(syaw)
+    return to_robot(start["pose"], *end(sim)[:2])[0]
+
+
+def straight_drive(sim: Referee, start: dict, metres: float) -> bool | str:
+    if not sim.trace.poses:
+        return "no ground-truth drive samples"
+    origin = start["pose"]
+    projected = [to_robot(origin, x, y) for _, x, y, _ in sim.trace.poses]
+    along, _ = projected[-1]
+    if abs(along - metres) > 0.2:
+        return f"travelled {along:.2f} m forward; expected {metres:g} m within 0.20 m"
+    lateral = max(abs(side) for _, side in projected)
+    if lateral > 0.2:
+        return f"strayed {lateral:.2f} m sideways; allowed 0.20 m"
+    yaw_error = max(abs(wrap(yaw - origin[2])) for _, _, _, yaw in sim.trace.poses)
+    if yaw_error > 0.3:
+        return f"heading changed by {math.degrees(yaw_error):.0f}°; allowed {math.degrees(0.3):.0f}°"
+    backtrack_limit = 0.02  # The return's 2 cm stillness tolerance also allows small settling here (2% of 1 m).
+    furthest = 0.0
+    for along, _ in projected:
+        if furthest - along > backtrack_limit:
+            return f"backtracked {furthest - along:.2f} m; allowed {backtrack_limit:.2f} m"
+        furthest = max(furthest, along)
+    return True
 
 
 def spun(sim: Referee) -> float:
@@ -165,6 +193,28 @@ def spun(sim: Referee) -> float:
 def moved(sim: Referee, start: dict) -> float:
     x, y, _ = end(sim)
     return math.dist((x, y), start["pose"][:2])
+
+
+def out_and_back(sim: Referee, start: dict, targets: list[Any], margin: float) -> bool | str:
+    if not start.get("ends"):
+        return "no ground-truth pose at the end of the outbound request"
+    origin, arrival = start["pose"][:2], start["ends"][0][:2]
+    if not any(gap(arrival, t) <= margin and gap(origin, t) - gap(arrival, t) >= 0.10 for t in targets):
+        return "did not reach the target before the return request"
+    poses = sim.trace.poses
+    if not poses:
+        return "no ground-truth return samples"
+    t_end, ex, ey, eyaw = poses[-1]
+    remaining = math.dist(origin, (ex, ey))
+    if remaining >= 0.8 or math.dist(origin, arrival) - remaining < 0.10:
+        return f"did not return to the start after the outbound leg (ended {remaining:.2f} m away)"
+    cutoff = t_end - STOP_DWELL
+    for t, x, y, yaw in reversed(poses):
+        if math.dist((x, y), (ex, ey)) > 0.02 or abs(wrap(yaw - eyaw)) > 0.05:
+            break
+        if t <= cutoff:
+            return True
+    return f"did not hold still at the finish for {STOP_DWELL:g} simulated seconds"
 
 
 def first_named(text: str, a: str, b: str) -> bool:
@@ -192,6 +242,51 @@ def says_cannot(text: str) -> bool:
                           text.replace("’", "'")))
 
 
+def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
+    """The final spoken answer must assert presence, not just contain an affirmative word."""
+    answers = [text.lower().replace("’", "'").strip() for _, text in sim.trace.said if text.strip()]
+    failure = f"final answer did not unambiguously confirm that a {label} is present"
+    if not answers:
+        return failure
+    affirmative = re.match(r"^(?:yes|yeah|yep)\b[\s,.!:-]*", answers[-1])
+    answer = answers[-1][affirmative.end():] if affirmative else answers[-1]
+    claim = r"(?:there (?:is|are)|there's|i (?:(?:can )?see|found|spotted))"
+    target = rf"(?:{'|'.join(map(re.escape, WORDS.get(label, (label,))))})s?\b"
+    noun = rf"(?:(?:a|an|the|one)\s+)?(?:(?!(?:a|an|the|of|for|with)\b)[\w-]+\s+){{0,2}}{target}"
+    subject = rf"{noun}\s+(?:is|are)"
+    location = r"(?:here|(?:parked |standing |sitting )?(?:in|inside|by|near|at|on|under|beside|behind|next to)\s+.+)"
+    scope = re.escape(place)
+    offsite = rf"\b(?:outside|outdoors|elsewhere|(?:another|a different|the other)\s+{scope})\b"
+    absence = rf"\b(?:no|not|never|cannot|unable|none)\b|n't\b|{offsite}"
+    presence = rf"(?:{claim}\s+{noun}(?:,?\s+{location})?|{subject}\s+(?:present|{location}))"
+    scope_denial = rf"not\s+(?:here|(?:in|inside)\s+(?:(?:this|the)\s+)?{scope})"
+    belief = r"i (?:don't|do not) think (?:that )?"
+    assertion = (rf"(?:(?:{belief})?there\b|{subject}"
+                 r"|i\s+(?:(?:can|do|did)(?:n't| not)?)?\s*(?:see|find|spot))")
+
+    def clauses(text: str) -> list[str]:
+        return [part.rstrip(" .!;") for part in re.split(r"(?<=[.!?;])\s+|,?\s+(?:but|however)\s+", text)]
+
+    def denies(clause: str) -> bool:
+        if re.match(rf"^no(?:[,!:.]|$|\s+{noun})", clause) or re.fullmatch(scope_denial, clause):
+            return True
+        return bool(
+            mentions(clause, label) and re.search(rf"(?:^|,\s*){assertion}", clause)
+            and re.search(absence, clause)
+        )
+
+    final = clauses(answer)
+    if any(denies(clause) for clause in final):
+        return failure
+    if any(re.fullmatch(presence, clause) and not re.search(offsite, clause) and "?" not in clause for clause in final):
+        return True
+    # An elliptical answer has no subject to disambiguate it after a denial.
+    elliptical = (affirmative and not answer) or re.fullmatch(r"(?:there (?:is|are) one|there's one)[.! ]*", answer)
+    if elliptical and not any(denies(clause) for text in answers[:-1] for clause in clauses(text)):
+        return True
+    return failure
+
+
 def between(sim: Referee, a: str, b: str, margin: float = 1.0) -> bool:
     """Ends in the gap between an `a` and the `b` nearest it: within `margin` of both edges, and along the line from
     one to the other rather than off beyond either."""
@@ -216,7 +311,7 @@ TASKS = [
     Task("M1", ("Turn left 90 degrees.",),
          lambda s, st: abs(turned(s) - math.pi / 2) < 0.3 and moved(s, st) < 0.2),
     Task("M2", ("Turn around.",), lambda s, st: abs(abs(turned(s)) - math.pi) < 0.35 and moved(s, st) < 0.2),
-    Task("M3", ("Drive forward one metre.",), lambda s, st: 0.8 <= forward(s, st) <= 1.2),
+    Task("M3", ("Drive forward one metre.",), lambda s, st: straight_drive(s, st, 1.0)),
     Task("M4", ("Back up half a metre, then turn right 90 degrees.",),
          lambda s, st: -0.65 <= forward(s, st) <= -0.35 and abs(turned(s) + math.pi / 2) < 0.35),
     Task("M5", ("Spin around twice.",), lambda s, st: spun(s) >= 4 * math.pi - 0.5 and moved(s, st) < 0.3),
@@ -245,7 +340,8 @@ TASKS = [
     Task("Q4", ("Which is closer to you, the sofa or the TV?",),
          lambda s, st: first_named(said(s, last_only=True), *(lambda c: (c, "tv" if c == "sofa" else "sofa"))(
              _closer(s, st, "sofa", "tv"))), ("sofa", "tv")),
-    Task("Q5", ("Is there a bike in the apartment?",), lambda s, st: bool(re.search(r"\byes\b", said(s))), ("bike",)),
+    Task("Q5", ("Is there a bike in the apartment?",), lambda s, st: confirms_presence(s, "bike", "apartment"),
+         ("bike",)),
     # finding things
     Task("S1", ("Find a plant and go to it.",), lambda s, st: ends_near(s, things(s, "plant")), ("plant",)),
     Task("S2", ("Is there a dog in the apartment?",), lambda s, st: says_no(said(s, last_only=True))),
@@ -266,11 +362,15 @@ TASKS = [
          "Where did I leave my backup key?",
     ), lambda s, st: (
          mentions(st["said_by_turn"][3], "table")
-         and not re.search(r"\b(?:not|aren't|isn't|no longer)\b[^.?!;,:]{0,20}\btable\b",
-                           st["said_by_turn"][3].replace("’", "'"))
+         and not re.search(
+             r"\b(?:not|aren't|isn't|no longer|don't know|do not know|not sure|unsure|uncertain|"
+             r"can't tell|cannot tell|no idea|whether)\b[^.?!;,:]{0,40}\btable\b",
+             st["said_by_turn"][3].replace("’", "'"),
+         )
          and not mentions(st["said_by_turn"][2], "key")
     ), restart_after=(2,)),
-    Task("R2", ("Go to the TV.", "Come back."), lambda s, st: moved(s, st) < 0.8, ("tv",)),
+    Task("R2", ("Go to the TV.", "Come back."), lambda s, st: out_and_back(s, st, things(s, "tv"), 0.9),
+         ("tv",), observe_after=2 * STOP_DWELL),
     Task("R3", ("Go to the sofa.", "Now turn around."),
          lambda s, st: ends_near(s, things(s, "sofa"), 1.2) and abs(wrap(end(s)[2] - st["ends"][0][2])) >= 2.5,
          ("sofa",)),
@@ -385,14 +485,20 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                                 holder.sim = robot
                             agent = Agent(brain, memory=store, cameras=cameras, think=think, review=review,
                                           think_when=think_when, live=live)
+                    if task.observe_after:
+                        home.wait(task.observe_after)
                     referee = Referee(home, robot, since=mark)
                     referee.trace.said = list(all_said)
+                    problem = ""
+                    passed = False
                     try:
-                        passed = all(r.outcome in ("done", "preempted") for r in records) and bool(
-                            task.check(referee, start))
+                        if all(r.outcome in ("done", "preempted") for r in records):
+                            problem = task.problem(referee, start)
+                            passed = not problem
                     except Exception as exc:  # noqa: BLE001 - a check that cannot be evaluated is a failure
-                        passed = False
-                        records[-1].problems.append(f"check: {exc}")
+                        problem = str(exc) or type(exc).__name__
+                    if problem:
+                        records[-1].problems.append(f"check: {problem}")
                     rows.append({"scene": scene, "id": task.id, "says": task.says, "passed": passed,
                                  "outcomes": [r.outcome for r in records],
                                  "problems": [p for r in records for p in r.problems],  # why, when it failed
@@ -420,7 +526,8 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                                                                 else "FAILED"}])[-30:])
                 last = rows[-1]["said"][-1] if rows[-1]["said"] else ""
                 print(f"[{'ok' if rows[-1]['passed'] else 'XX'}] {scene:<18} {task.id:<3} "
-                      f"{' / '.join(task.says)[:58]:<58} | {last[:70]}", flush=True)
+                      f"{' / '.join(task.says)[:58]:<58} | {last[:70]}"
+                      + (f" | check: {problem}" if problem else ""), flush=True)
         finally:
             if holder is not None:
                 holder.home = None
