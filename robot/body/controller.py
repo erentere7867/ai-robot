@@ -22,6 +22,22 @@ class CandidatePath:
     total_score: float = 0.0
 
 
+class Progress:
+    """Credit new ground or a waypoint advance, not repeated travel along the same stretch."""
+
+    def __init__(self, here: tuple[float, float], now: float, radius: float, timeout: float) -> None:
+        self.visited, self.since = [here], now
+        self.radius, self.timeout = radius, timeout
+
+    def stalled(self, here: tuple[float, float], now: float, *, advanced: bool = False) -> bool:
+        if all(math.dist(here, point) >= self.radius for point in reversed(self.visited)):
+            self.visited.append(here)
+            advanced = True
+        if advanced:
+            self.since = now
+        return now - self.since > self.timeout
+
+
 def _clear(a: tuple[float, float], b: tuple[float, float], occupied_fn: Callable[[float, float], bool]) -> bool:
     """No occupied point on the straight line from a to b (checked every 5 cm)."""
     n = max(1, int(math.dist(a, b) / 0.05))
