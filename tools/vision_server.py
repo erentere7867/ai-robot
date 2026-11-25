@@ -35,6 +35,9 @@ ROWS, COLS, PAD = 736, 1280, 8  # the model's input; a 720-row frame sits on row
 IOU, MAX_DET = 0.7, 100         # pads it
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)  # Depth Anything's input normalisation (ImageNet)
 STD = np.array([0.229, 0.224, 0.225], np.float32)
+_DEPTH_SCALE = (1.0 / (255.0 * STD)).astype(np.float32)
+_DEPTH_BIAS = (-MEAN / STD).astype(np.float32)
+_BOX_MAX = np.array([COLS, ROWS - 2 * PAD, COLS, ROWS - 2 * PAD], np.float32)
 
 
 def session(path: Path, provider: str, shape: tuple[int, ...] | None = None) -> ort.InferenceSession:
@@ -66,17 +69,19 @@ def decode(pred: np.ndarray, protos: np.ndarray, n: int, conf: float) -> dict[st
     """Raw predictions (4 + slots + 32, boxes) and prototypes (32, h, w) -> each real word's boxes, as `detect`
     answers them."""
     slots = pred.shape[0] - 4 - protos.shape[0]
-    cx, cy, w, h = pred[:4]
-    boxes = np.stack([cx - w / 2, cy - h / 2 - PAD, cx + w / 2, cy + h / 2 - PAD], 1)
-    boxes = np.clip(boxes, 0, [COLS, ROWS - 2 * PAD, COLS, ROWS - 2 * PAD])
     scores, coefs = pred[4:4 + slots], pred[4 + slots:]
     kept_boxes, kept_scores, kept_words, idx = [], [], [], []
     for j in range(min(n, slots)):
         ok = np.flatnonzero(scores[j] >= conf)
-        keep = ok[nms(boxes[ok], scores[j, ok])]
-        kept_boxes.append(boxes[keep])
+        if not ok.size:
+            continue
+        cx, cy, w, h = pred[0, ok], pred[1, ok], pred[2, ok], pred[3, ok]
+        cand = np.clip(np.stack([cx - w / 2, cy - h / 2 - PAD, cx + w / 2, cy + h / 2 - PAD], 1), 0, _BOX_MAX)
+        sel = nms(cand, scores[j, ok])
+        keep = ok[sel]
+        kept_boxes.append(cand[sel])
         kept_scores.append(scores[j, keep])
-        kept_words.append(np.full(len(keep), j))
+        kept_words.append(np.full(len(keep), j, np.int32))
         idx.append(keep)
     keep = np.concatenate(idx) if idx else np.zeros(0, int)
     out = {"boxes": np.concatenate(kept_boxes).astype(np.float32) if idx else np.zeros((0, 4), np.float32),
@@ -107,28 +112,28 @@ class Models:
         self.slots = self.yoloe.get_inputs()[1].shape[1]
         self.gpu = threading.Lock()  # one run on the GPU at a time: in the 3D run, YOLOE and depth at once beside the
         # simulator's rendering and the language model failed once in DirectML ("Unspecified error") and stalled 20 s
+        self._detect_buf = np.full((1, 3, ROWS, COLS), 114.0 / 255.0, np.float32)
         self.times: dict[str, list[float]] = {"detect": [], "depth": []}
 
     def detect(self, picture: np.ndarray, words: np.ndarray, n: int, conf: float) -> dict[str, np.ndarray]:
         if picture.shape != (ROWS - 2 * PAD, COLS, 3) or words.shape != (1, self.slots, 512):
             raise ValueError(f"want picture {(ROWS - 2 * PAD, COLS, 3)} and words (1, {self.slots}, 512), got "
                              f"{picture.shape} and {words.shape}")
-        x = np.full((ROWS, COLS, 3), 114, np.uint8)
-        x[PAD:ROWS - PAD] = picture
-        x = x.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+        words_f = np.ascontiguousarray(words, np.float32)
         with self.gpu:
+            np.multiply(picture.transpose(2, 0, 1), np.float32(1.0 / 255.0), out=self._detect_buf[0, :, PAD:ROWS - PAD])
             t = time.perf_counter()
-            pred, protos = self.yoloe.run(None, {"picture": x, "words": words.astype(np.float32)})
+            pred, protos = self.yoloe.run(None, {"picture": self._detect_buf, "words": words_f})
             self._took("detect", t)
         return decode(pred[0], protos[0], n, conf)
 
     def run_depth(self, picture: np.ndarray) -> dict[str, np.ndarray]:
         """A picture already at the network's size (uint8, 364x644x3 RGB): normalised here, so a quarter of the
         bytes cross over, and the answer goes back in half precision."""
-        x = ((picture.astype(np.float32) / 255.0 - MEAN) / STD).transpose(2, 0, 1)[None]
+        x = (picture * _DEPTH_SCALE + _DEPTH_BIAS).transpose(2, 0, 1)[None]
         with self.gpu:
             t = time.perf_counter()
-            inverse = self.depth.run(None, {self.depth_input: x.astype(np.float32)})[0][0]
+            inverse = self.depth.run(None, {self.depth_input: np.ascontiguousarray(x, np.float32)})[0][0]
             self._took("depth", t)
         return {"inverse": inverse.astype(np.float16)}
 

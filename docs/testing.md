@@ -61,6 +61,17 @@ They need no GPU, ROS, Habitat or model: the model is scripted (`tests/test_agen
 fed made-up network output (`tests/test_vision_gpu.py`), and the 3D reports are drawn from a made-up run
 (`tests/test_report.py`). A few browser tests skip themselves without Chrome and Playwright.
 
+To test motion wiring with ROS 2 Lyrical and Nav2 but no models or Habitat scene, use an unused ROS domain:
+
+```bash
+. tools/linux/env.sh
+ROS_DOMAIN_ID=196 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST RUN_ROS_MOTION_SMOKE=1 \
+  python -m pytest -q tests/test_motion_ros.py
+```
+
+The test sends a real Nav2 action through Collision Monitor to the Habitat wheel callback using synthetic sensors.
+It checks source stamps, cancellation, late replies and direct-drive handoff. It does not measure stopping distance.
+
 ## Setting up a Linux machine for levels 2 and 3
 
 Tested on Ubuntu 26.04 with its Python 3.14 and ROS 2 lyrical. Everything below except ROS and Habitat lives in the

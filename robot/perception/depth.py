@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -77,21 +78,41 @@ def _tilt_matrix(pitch_rad: float, roll_rad: float) -> np.ndarray:
     return ry @ rx
 
 
+@lru_cache(maxsize=16)
+def _base_rays(cam: Camera, h: int, w: int, stride: int = 1):  # noqa: ANN202
+    """Tilt-independent 1D ray components for `(cam, h, w, stride)` (~4 KB per entry)."""
+    cam = cam.at(w, h)
+    u = np.arange(0, w, stride, dtype=np.float32)[None, :] + 0.5
+    v = np.arange(h, dtype=np.float32)[:, None] + 0.5
+    x_opt = (u - cam.width / 2) / cam.focal
+    y_opt = (v - cam.height / 2) / cam.focal
+    c, s_ = math.cos(cam.yaw), math.sin(cam.yaw)
+    fx, fy = c + x_opt * s_, s_ - x_opt * c  # the ray (forward 1, right x_opt) on the floor plane: 1 x columns
+    fx.flags.writeable = fy.flags.writeable = y_opt.flags.writeable = False
+    return cam, fx, fy, y_opt
+
+
+@lru_cache(maxsize=8)
 def _rays(cam: Camera, h: int, w: int, pitch_rad: float, roll_rad: float, stride: int = 1):  # noqa: ANN202
     """For a picture h x w from `cam` (columns every `stride`): each column's direction on the floor plane per metre
     of depth along the lens axis (fx, fy: 1 x columns), each pixel's rise per metre of depth (vz: rows x columns),
     and the lens's height above the floor, all with the body tipped by pitch and roll."""
-    cam = cam.at(w, h)
+    cam, fx, fy, y_opt = _base_rays(cam, h, w, stride)
     r_tilt = _tilt_matrix(pitch_rad, roll_rad)
-    u = np.arange(0, w, stride, dtype=np.float32)[None, :] + 0.5
-    v = np.arange(h, dtype=np.float32)[:, None] + 0.5
-    x_opt, y_opt = (u - cam.width / 2) / cam.focal, (v - cam.height / 2) / cam.focal
-    c, s_ = math.cos(cam.yaw), math.sin(cam.yaw)
-    fx, fy = c + x_opt * s_, s_ - x_opt * c  # the ray (forward 1, right x_opt) on the floor plane: 1 x columns
-    fz = -y_opt * np.ones_like(fx)
-    vz = r_tilt[2, 0] * fx + r_tilt[2, 1] * fy + r_tilt[2, 2] * fz
+    vz = (r_tilt[2, 0] * fx + r_tilt[2, 1] * fy) - r_tilt[2, 2] * y_opt
     cam_z = float((r_tilt @ np.array([cam.x, cam.y, cam.z], dtype=np.float32))[2])
+    vz.flags.writeable = False
     return cam, fx, fy, vz, cam_z
+
+
+def _nanmedian_axis1(win: np.ndarray) -> np.ndarray:
+    """Vectorized row-wise nanmedian for small windows without per-row Python dispatch."""
+    s = np.sort(win, axis=1)
+    cnt = np.sum(~np.isnan(s), axis=1)
+    idx = np.arange(len(cnt))
+    lo = np.maximum(0, (cnt - 1) // 2)
+    hi = np.maximum(0, cnt // 2)
+    return np.where(cnt > 0, 0.5 * (s[idx, lo] + s[idx, hi]), np.nan)
 
 
 def fit_to_floor(inverse: np.ndarray, cam: Camera, pitch_rad: float = 0.0, roll_rad: float = 0.0,
@@ -104,28 +125,62 @@ def fit_to_floor(inverse: np.ndarray, cam: Camera, pitch_rad: float = 0.0, roll_
     and the shift. None when too little floor is in view to fit."""
     h, w = inverse.shape
     _, _, _, vz, cam_z = _rays(cam, h, w, pitch_rad, roll_rad)
-    floor = np.clip(-vz / cam_z, 0.0, None)  # 1 / depth of the floor at each pixel
+    floor = -vz / cam_z  # 1 / depth of the floor at each pixel
     region = floor > 1.0 / reach
-    x, y = inverse[region][::5].astype(np.float64), floor[region][::5].astype(np.float64)
-    if len(x) < 50:
+    x = np.asarray(inverse[region][::5], dtype=np.float32)
+    y = np.asarray(floor[region][::5], dtype=np.float32)
+    n = len(x)
+    if n < 50:
         return None
     rng = np.random.default_rng(0)
-    best, best_n = None, 0
-    for _ in range(200):
-        i, j = rng.choice(len(x), 2, replace=False)
-        if abs(x[i] - x[j]) < 1e-9:
-            continue
-        a = (y[i] - y[j]) / (x[i] - x[j])
-        if a <= 0:  # nearer must stay nearer
-            continue
-        inliers = np.abs(a * x + (y[i] - a * x[i]) - y) < 0.08 * y
-        if inliers.sum() > best_n:
-            best, best_n = inliers, int(inliers.sum())
-    if best is None or best_n < 0.3 * len(x):
+    i = rng.integers(0, n, size=200)
+    j = rng.integers(0, n - 1, size=200)
+    j = np.where(j >= i, j + 1, j)
+    dx = x[i] - x[j]
+    valid = np.abs(dx) >= 1e-9
+    a_cand = np.where(valid, (y[i] - y[j]) / np.where(valid, dx, 1.0), -1.0)
+    keep = valid & (a_cand > 0)
+    if not keep.any():
         return None
-    a, b = np.polyfit(x[best], y[best], 1)
-    inv = a * inverse + b
-    return np.where(inv > 1e-3, 1.0 / np.maximum(inv, 1e-3), np.inf).astype(np.float32)
+    a_c = a_cand[keep].astype(np.float32)
+    b_c = (y[i[keep]] - a_c * x[i[keep]]).astype(np.float32)
+    # Score hypotheses on ~1,500 strided samples (fits in L2 cache); if the winner fails the full inlier
+    # threshold, fall back to full-set scoring so a borderline valid frame is never dropped.
+    s_step = max(1, n // 1500)
+    xs, ys = x[::s_step], y[::s_step]
+    tol_s = np.float32(0.08) * ys
+    best_k, best_s = -1, 0
+    for s in range(0, len(a_c), 32):
+        counts = np.count_nonzero(np.abs(a_c[s:s + 32, None] * xs + b_c[s:s + 32, None] - ys) < tol_s, axis=1)
+        k = int(np.argmax(counts))
+        if int(counts[k]) > best_s:
+            best_k, best_s = s + k, int(counts[k])
+    if best_k < 0:
+        return None
+    tol = np.float32(0.08) * y
+    best = np.abs(a_c[best_k] * x + b_c[best_k] - y) < tol
+    if int(np.count_nonzero(best)) < 0.3 * n:
+        best_n = int(np.count_nonzero(best))
+        for s in range(0, len(a_c), 16):
+            counts = np.count_nonzero(np.abs(a_c[s:s + 16, None] * x + b_c[s:s + 16, None] - y) < tol, axis=1)
+            k = int(np.argmax(counts))
+            if int(counts[k]) > best_n:
+                best_k, best_n = s + k, int(counts[k])
+        if best_n < 0.3 * n:
+            return None
+        best = np.abs(a_c[best_k] * x + b_c[best_k] - y) < tol
+    xb, yb = x[best].astype(np.float64), y[best].astype(np.float64)
+    xm, ym = float(xb.mean()), float(yb.mean())
+    dx_b = xb - xm
+    denom = float(dx_b @ dx_b)
+    if denom < 1e-12:
+        return None
+    a = np.float32(float(dx_b @ (yb - ym)) / denom)
+    b = np.float32(ym - float(a) * xm)
+    inv = a * np.asarray(inverse, dtype=np.float32) + b
+    out = np.full(inv.shape, np.inf, dtype=np.float32)
+    np.divide(np.float32(1.0), inv, out=out, where=inv > 1e-3)
+    return out
 
 
 FLOOR_TOL = 0.06  # metres: what rises less than this off the floor is floor to the cameras (lower things: the ToF)
@@ -155,9 +210,11 @@ def synthetic_scan(depths: dict[str, np.ndarray], rig: dict[str, Camera] = RIG, 
     """
     step = 2 * math.pi / num_beams
     angle_min = -math.pi
-    ranges = np.full(num_beams, np.nan, dtype=np.float32)
+    ranges = np.full(num_beams, np.inf, dtype=np.float32)
+    hit = np.zeros(num_beams, dtype=bool)
     clear = np.zeros(num_beams, dtype=bool)
     stride = 2  # every other column of a 640-wide estimate
+    offsets = np.arange(RUN, dtype=np.int32)[None, :]
     for name, depth_img in depths.items():
         if name not in rig or depth_img is None:
             continue
@@ -175,10 +232,8 @@ def synthetic_scan(depths: dict[str, np.ndarray], rig: dict[str, Camera] = RIG, 
         in_reach = floor_inv > 1.0 / max_range  # rows that would see the floor within the scan's range
         face = (rate < FACE) & in_reach
         # the foot: the lowest row with a face going up from it, RUN rows and FLOOR_TOL high at the floor's range there
-        face_up = np.zeros(face.shape, np.int32)  # face rows from each row upward, unbroken
-        face_up[0] = face[0]
-        for r in range(1, h):
-            face_up[r] = (face_up[r - 1] + 1) * face[r]
+        cs = np.cumsum(face, axis=0, dtype=np.int32)
+        face_up = cs - np.maximum.accumulate(np.where(face, 0, cs), axis=0)
         per_row = np.full_like(vz, np.inf)  # metres a face at the floor's range in that row rises per row
         per_row[1:] = (cam_z / -np.minimum(vz[1:], -1e-6)) * np.maximum(vz[:-1] - vz[1:], 1e-9)
         foot_at = (face_up >= np.maximum(RUN, np.ceil(FLOOR_TOL / per_row))) & in_reach
@@ -186,44 +241,64 @@ def synthetic_scan(depths: dict[str, np.ndarray], rig: dict[str, Camera] = RIG, 
         foot = h - 1 - np.argmax(foot_at[::-1], axis=0)  # row of the foot's lowest pixel in each column
         cols = np.arange(d.shape[1])
         seen_floor = ((rate >= FACE) & in_reach).any(axis=0)
-        for j in cols[~has & seen_floor]:  # floor all the way up: clear as far as the camera sees
-            b = math.atan2(cam.y + fy[0, j], cam.x + fx[0, j])
-            clear[int((b - angle_min) / step) % num_beams] = True
+        clear_cols = cols[~has & seen_floor]
+        if clear_cols.size:  # floor all the way up: clear as far as the camera sees
+            b = np.arctan2(cam.y + fy[0, clear_cols], cam.x + fx[0, clear_cols])
+            clear[((b - angle_min) / step).astype(np.int32) % num_beams] = True
+        has_cols = cols[has]
+        if not has_cols.size:
+            continue
+        r0 = foot[has_cols]
+        top = r0 - face_up[r0, has_cols] + 1
+        # the face's own lowest rows: the rate in the SLOPE_ROWS rows under a face already reaches into it
+        r_start = np.maximum(top, r0 - SLOPE_ROWS - RUN + 1)
+        r_end = np.maximum(top, r0 - SLOPE_ROWS)
+        row_idx = np.minimum(r_start[:, None] + offsets, r_end[:, None])
+        valid_slot = (r_start[:, None] + offsets) <= r_end[:, None]
+        zf = _nanmedian_axis1(np.where(valid_slot, z[row_idx, has_cols[:, None]], np.nan))
+        keep_h = ~(zf > clearance)  # an overhang the robot passes under: nothing known beyond it
+        if not keep_h.any():
+            continue
+        kc = has_cols[keep_h]
+        r0_k = r0[keep_h]
+        rs_k = r_start[keep_h]
+        zf_k = zf[keep_h]
+        seen = _nanmedian_axis1(np.where(valid_slot[keep_h], d[row_idx[keep_h], kc[:, None]], np.nan))
+        vz_r0 = vz[r0_k, kc]
+        on_floor = (vz_r0 < -1e-3) & (zf_k < OVERHANG)
+        along = np.where(on_floor, cam_z / np.where(on_floor, -vz_r0, 1.0), seen)
         band = ok & (z > FLOOR_TOL) & (z <= clearance)
         band_run = band.copy()
         for k in range(1, RUN):
             band_run[:-k] &= band[k:]
-        for j in cols[has]:
-            r0 = foot[j]
-            # the face's own lowest rows: the rate in the SLOPE_ROWS rows under a face already reaches into it
-            top = r0 - face_up[r0, j] + 1
-            rows = slice(max(top, r0 - SLOPE_ROWS - RUN + 1), max(top, r0 - SLOPE_ROWS) + 1)
-            zf = float(np.nanmedian(z[rows, j]))
-            if zf > clearance:
-                continue  # an overhang the robot passes under: nothing known beyond it
-            seen = float(np.nanmedian(d[rows, j]))  # the face's depth, as the network judges it
-            if vz[r0, j] < -1e-3 and zf < OVERHANG:  # standing on the floor: its lowest row meets it there
-                along = cam_z / -float(vz[r0, j])
-            else:  # its lowest edge is clearly off the floor (or above the horizon): only depth can range it
-                along = seen
-            above = band_run[: rows.start, j]  # something in the robot's height nearer than the foot, higher up
-            if above.any():  # (a table's edge, a staircase's underside, in front of the wall seen under it)
-                nearer = d[: rows.start, j][above]  # depth against depth: a scale error the network makes on
-                nearer = nearer[(nearer * math.hypot(fx[0, j], fy[0, j]) < NEAR) & (nearer < AHEAD * seen)]
-                if nearer.size:  # the whole face is no overhang in front of itself
-                    along = min(along, float(nearer.min()))
-            px, py = cam.x + along * float(fx[0, j]), cam.y + along * float(fy[0, j])  # same in every row
-            r = math.hypot(px, py)
-            if r > max_range:
-                continue
-            k = int((math.atan2(py, px) - angle_min) / step) % num_beams
-            if not r >= ranges[k]:  # nan or farther
-                ranges[k] = r
-    ranges[np.isnan(ranges) & clear] = np.inf
+        # something in the robot's height nearer than the foot, higher up (table edge, staircase underside)
+        d_sub = d[:, kc]
+        ray_xy = np.hypot(fx[0, kc], fy[0, kc])
+        row_grid = np.arange(h, dtype=np.int32)[:, None]
+        cand_over = (
+            band_run[:, kc]
+            & (row_grid < rs_k[None, :])
+            & (d_sub * ray_xy[None, :] < NEAR)
+            & (d_sub < AHEAD * seen[None, :])
+        )
+        if cand_over.any():
+            along = np.minimum(along, np.where(cand_over, d_sub, np.inf).min(axis=0))
+        px = cam.x + along * fx[0, kc]
+        py = cam.y + along * fy[0, kc]
+        r = np.hypot(px, py)
+        in_r = r <= max_range
+        if in_r.any():
+            ks = ((np.arctan2(py[in_r], px[in_r]) - angle_min) / step).astype(np.int32) % num_beams
+            np.minimum.at(ranges, ks, r[in_r])
+            hit[ks] = True
+    ranges[~hit & ~clear] = np.nan
     return ranges, angle_min, step
 
 
 STEP_UP = 0.035  # metres: what rises more than this off the floor stops the wheels (they climb 3 cm)
+
+
+_TOF_OFFSETS = ((np.arange(8, dtype=np.float32) + 0.5) - 4.0) / 4.0
 
 
 def tof_scan(grid: np.ndarray, side: str, num_beams: int = 360, pitch_rad: float = 0.0, roll_rad: float = 0.0,
@@ -235,28 +310,29 @@ def tof_scan(grid: np.ndarray, side: str, num_beams: int = 360, pitch_rad: float
     from robot.ros.model import TOF
 
     x0, yaw, z0, pitch, hfov, max_range = TOF[side]
-    out = np.full(num_beams, np.nan, dtype=np.float32)
+    out = np.full(num_beams, np.inf, dtype=np.float32)
     g = np.asarray(grid, dtype=np.float32).reshape(8, 8)
+    valid = np.isfinite(g) & (g > 0.02) & (g < max_range)
+    if not valid.any():
+        return np.full(num_beams, np.nan, dtype=np.float32)
     r_tilt = _tilt_matrix(pitch_rad, roll_rad)
     t = math.tan(hfov / 2)
     cp, sp, cy, sy = math.cos(pitch), math.sin(pitch), math.cos(yaw), math.sin(yaw)
-    step = 2 * math.pi / num_beams
-    for row in range(8):
-        for col in range(8):
-            d = float(g[row, col])
-            if not (math.isfinite(d) and 0.02 < d < max_range):
-                continue
-            right, down = ((col + 0.5) - 4) / 4 * t, ((row + 0.5) - 4) / 4 * t
-            fwd, up = cp - down * sp, -sp - down * cp  # the zone's ray on the sensor tipped down by its pitch
-            bx = x0 + d * (fwd * cy + right * sy)
-            by = d * (fwd * sy - right * cy)
-            bz = z0 + d * up
-            z = float(r_tilt[2, 0] * bx + r_tilt[2, 1] * by + r_tilt[2, 2] * bz)
-            if STEP_UP < z <= clearance:
-                k = int((math.atan2(by, bx) + math.pi) / step) % num_beams
-                r = math.hypot(bx, by)
-                if not r >= out[k]:
-                    out[k] = r
+    right = _TOF_OFFSETS[None, :] * t
+    down = _TOF_OFFSETS[:, None] * t
+    fwd, up = cp - down * sp, -sp - down * cp  # the zone's ray on the sensor tipped down by its pitch
+    d = np.where(valid, g, np.float32(0.0))
+    bx = x0 + d * (fwd * cy + right * sy)
+    by = d * (fwd * sy - right * cy)
+    bz = z0 + d * up
+    z = r_tilt[2, 0] * bx + r_tilt[2, 1] * by + r_tilt[2, 2] * bz
+    obs = valid & (z > STEP_UP) & (z <= clearance)
+    if obs.any():
+        step = 2 * math.pi / num_beams
+        bx_o, by_o = bx[obs], by[obs]
+        ks = ((np.arctan2(by_o, bx_o) + math.pi) / step).astype(np.int32) % num_beams
+        np.minimum.at(out, ks, np.hypot(bx_o, by_o))
+    out[np.isinf(out)] = np.nan
     return out
 
 

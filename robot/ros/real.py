@@ -14,6 +14,7 @@ import re
 import threading
 import time
 from collections import Counter, deque
+from collections.abc import Iterator
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -126,13 +127,17 @@ class RealRobot(RosRobot):
         super().shutdown()
 
     # ---- perception from the cameras ------------------------------------------------------------------------------
-    def _pose_at(self, stamp: Any) -> tuple[float, float, float] | None:
+    def _pose_at(self, stamp: Any, *, frame: str = "map") -> tuple[float, float, float] | None:
+        from rclpy.clock import ClockType
         from rclpy.time import Time
 
-        for when in (Time.from_msg(stamp), Time()):
+        when = (Time(nanoseconds=round(stamp * 1e9), clock_type=ClockType.ROS_TIME)
+                if isinstance(stamp, float) else Time.from_msg(stamp))
+        times = (when, Time()) if frame == "map" else (when,)
+        for when in times:
             try:
-                tr = self.tf.lookup_transform("map", "base_link", when).transform
-            except Exception:  # noqa: BLE001 - not at that time: try the latest
+                tr = self.tf.lookup_transform(frame, "base_link", when).transform
+            except Exception:  # noqa: BLE001 - transform not available at that time
                 self.stale_poses = getattr(self, "stale_poses", 0) + 1
                 continue
             q = tr.rotation
@@ -593,59 +598,71 @@ class RealRobot(RosRobot):
                 return cand
         return None
 
-    def _goal_point(self, target: Point | Pose | Object, distance: float) -> tuple[Point, float] | None:
+    def _goal_candidates(self, target: Point | Pose | Object,
+                         distance: float) -> Iterator[tuple[Point, float]]:
         """For a standing/elevated visual track (e.g. an umbrella tucked behind a wall corner), approach from the
         visible `spotted_from` side rather than stopping on the occluded side of a corner."""
-        where = super()._goal_point(target, distance)
+        where = next(super()._goal_candidates(target, distance), None)
         if not isinstance(target, Object):
-            return where
+            if where is not None:
+                yield where
+            return
         goal, reach = self._reach(target, distance)
         cand = self._spotted_standpoint(target, distance)
         if cand is not None:
             if math.dist((self.x, self.y), cand) <= 0.25:
-                return where
+                if where is not None:
+                    yield where
+                return
             if self._plan(cand, 0.15) is not None:
-                return cand, math.atan2(goal[1] - cand[1], goal[0] - cand[0])
+                yield cand, math.atan2(goal[1] - cand[1], goal[0] - cand[0])
+        if where is None:
+            return
         tracker = getattr(self.perception, "tracker", None)
         if tracker is None:
-            return where
+            yield where
+            return
         with self.perception.lock:
             track = tracker.tracks.get(tracker.current(target.id))
-            if track is None or not track.visual or not track.present or track.radius <= 0.0:
-                return where
-            spotted = track.spotted_from
+            spotted = track.spotted_from if track and track.visual and track.present and track.radius > 0.0 else None
+        if spotted is None:
+            yield where
+            return
         ds = math.dist(spotted, goal)
-        if ds < 0.2 or where is None or self._occ(*spotted, self.inflated):
-            return where
+        if ds < 0.2 or self._occ(*spotted, self.inflated):
+            yield where
+            return
         end, _ = where
-        # If A* stopped >60 deg off the side the robot actually saw it from, step onto the spotted_from ray.
+        # Prefer the saved-map approach when it is already on the visible side.
         a_end = math.atan2(end[1] - goal[1], end[0] - goal[0])
         a_spot = math.atan2(spotted[1] - goal[1], spotted[0] - goal[0])
         if abs(math.atan2(math.sin(a_end - a_spot), math.cos(a_end - a_spot))) <= math.radians(60):
-            return where
+            yield where
+            where = None
         ux, uy = (spotted[0] - goal[0]) / ds, (spotted[1] - goal[1]) / ds
         for r in (reach, reach + 0.15, reach + 0.3, ds):
             cand = (goal[0] + min(r, ds) * ux, goal[1] + min(r, ds) * uy)
             if not self._occ(*cand, self.inflated) and self._plan(cand, 0.15) is not None:
-                return cand, math.atan2(goal[1] - cand[1], goal[0] - cand[0])
-        return where
+                yield cand, math.atan2(goal[1] - cand[1], goal[0] - cand[0])
+        if where is not None:
+            yield where
 
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
         if isinstance(target, Object) and hasattr(getattr(self, "perception", None), "detector"):
             self._watch(target.label)
         super()._go(target, distance, side=side)
         self._note_place()
-        if side or not isinstance(target, Object):
+
+    def _finish_approach(self, target: Object, distance: float, rejected: set[Point]) -> None:
+        end = self._spotted_standpoint(target, distance)
+        if end is None or end in rejected:
             return
-        cand = self._spotted_standpoint(target, distance)
-        if cand is None:
-            return
-        d = math.dist((self.x, self.y), cand)
-        if 0.10 < d <= 0.40 and self._clear_line((self.x, self.y), cand, grid=self.inflated):
+        d = math.dist((self.x, self.y), end)
+        if 0.10 < d <= 0.40 and self._clear_line((self.x, self.y), end, grid=self.inflated):
             # Nav2's xy_goal_tolerance (0.25 m) can stop just off a narrow corner sightline (E2 umbrella: ~18 cm off
             # hid it behind the wall corner); step straight onto the spotting standpoint via drive_on_heading.
             try:
-                self._rotate(wrap(math.atan2(cand[1] - self.y, cand[0] - self.x) - self.yaw))
+                self._rotate(wrap(math.atan2(end[1] - self.y, end[0] - self.x) - self.yaw))
                 self._move(d)
             except PathBlocked:
                 pass
@@ -690,10 +707,21 @@ class RealRobot(RosRobot):
                 # distant black wheel peeking under a desk scored black=98.8%, red=0.7% on _ask_color.
                 if wanted and hasattr(self.brain, "decide") and self._ask_color(rgb[y1:y2, x1:x2], base or label) not in wanted:
                     continue
-                scan, _ = taken_with(p.scans, _seconds(stamp), 0.5)
-                if scan is None:
-                    scan = p.scan
-                place = locate_crop(RIG[cam_name], (x1, y1, x2, y2), depth, scan, on_floor=on_floor)
+                rgb_time = _seconds(stamp)
+                scan, offset = taken_with(p.scans, rgb_time, 0.5)
+                scan_time = rgb_time + offset
+                if scan is None and p.scans:
+                    scan_time, scan = p.scans[-1]
+                scan_in_camera = None
+                if scan is not None:
+                    photo_odom = self._pose_at(stamp, frame="odom")
+                    scan_odom = self._pose_at(scan_time, frame="odom")
+                    if photo_odom is not None and scan_odom is not None:
+                        sx, sy = to_robot(photo_odom, *scan_odom[:2])
+                        scan_in_camera = sx, sy, scan_odom[2] - photo_odom[2]
+                place = locate_crop(RIG[cam_name], (x1, y1, x2, y2), depth,
+                                    scan if scan_in_camera is not None else None,
+                                    on_floor=on_floor, scan_in_camera=scan_in_camera)
                 if place is None:
                     continue
                 mx, my = to_map(pose, place.x, place.y)
@@ -843,32 +871,28 @@ class RealRobot(RosRobot):
                 trail.append((x, y))
         return trail
 
-    def _frontier_step(self, frontiers: list[Pose], max_leg: float = 3.2) -> Point | None:
+    def _frontier_steps(self, frontiers: list[Pose], max_leg: float = 3.2) -> list[Point]:
         """Nearest frontier by A* path length (not Euclidean through walls), capped to `max_leg` m so cameras and
         mid-leg trail snapshots (4 m window) inspect every corridor along the way instead of driving 12 m blind."""
-        best: tuple[float, list[Point]] | None = None
-        for v in frontiers[:6]:
+        candidates: list[tuple[float, Point]] = []
+        for v in frontiers:
             path = self._plan((v.x, v.y), 0.25)
             if not path:
                 continue
             pts = [(self.x, self.y), *path]
-            total = sum(math.dist(a, b) for a, b in zip(pts, pts[1:], strict=False))
-            if best is None or total < best[0]:
-                best = (total, pts)
-        if best is None:
-            return None
-        dist, pts = 0.0, best[1]
-        for a, b in zip(pts, pts[1:], strict=False):
-            seg = math.dist(a, b)
-            if dist + seg >= max_leg and seg > 1e-6:
-                f = (max_leg - dist) / seg
-                cand = (a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]))
-                if not self._occ(*cand, self.inflated):
-                    return cand
-            dist += seg
-        return pts[-1]
+            dist, end = 0.0, path[-1]
+            for a, b in zip(pts, pts[1:], strict=False):
+                seg = math.dist(a, b)
+                if dist < max_leg <= dist + seg:
+                    f = (max_leg - dist) / seg
+                    cand = (a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]))
+                    if not self._occ(*cand, self.inflated):
+                        end = cand
+                dist += seg
+            candidates.append((dist, end))
+        return list(dict.fromkeys(end for _, end in sorted(candidates, key=lambda item: item[0])))
 
-    def _next_stop(self, description: str, region: str | None, tried: list[Point]) -> Point | None:
+    def _next_stops(self, description: str, region: str | None, tried: list[Point]) -> Iterator[Point | Pose]:
         """Where a search looks next, judged by the vision model from what each camera shows: for each direction with
         floor it can reach away from where it already looked, how likely going that way leads to the thing (a yes/no
         answer's probability); it drives to the farthest such floor in the likeliest direction. Asked to pick one of
@@ -890,11 +914,12 @@ class RealRobot(RosRobot):
                 f"the way this picture shows likely lead to {description}? Answer yes or no.")))
             options.append((p, cam, spots))
         if not options:
-            return None
+            return
         named = ", ".join(f"{c.replace('_camera', '').replace('_', '-')} {q:.0%}" for q, c, _ in options)
         p, cam, spots = max(options, key=lambda o: o[0])
         facing = self.yaw + RIG[cam].yaw
         back = self._floor_toward(facing + math.pi, STEP_BACK)
+        stop: Point | Pose | None
         if not spots and p >= 0.5 and not self._stepped_back and all(
                 math.dist(back, a) >= STEP_BACK / 2 for a in (*tried, (self.x, self.y))):
             stop, went, self._stepped_back = Pose(*back, math.degrees(facing)), "stepped back to see {} whole", True
@@ -912,19 +937,21 @@ class RealRobot(RosRobot):
                 away = (*tried, *self._search_trail(), (self.x, self.y))
                 frontiers = [v for v in self._unseen(region or "all")
                              if all(math.dist((v.x, v.y), a) >= 1.2 for a in away)]
-                step = self._frontier_step(frontiers) if frontiers else None
-                if step is not None:
-                    stop, went = step, "explored unseen area"
-                else:
-                    stop, went = max(fresh, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
+                steps = [end for end in self._frontier_steps(frontiers) if end not in tried]
+                if steps:
+                    self._log_search_stop(description, f"{named}: explored unseen area")
+                    yield from steps
+                stop, went = max(fresh, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
             else:
                 stop, went = max(spots, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
-        if stop is None:
-            return None
-        self.search_log.append(f"{named}: {went.format(cam.replace('_camera', '').replace('_', '-'))}")
-        self.trace.asked.append((round(self.t, 2), f"search {description}: which way", self.search_log[-1]))
-        print(f"search {description!r}: {self.search_log[-1]}", flush=True)
-        return stop
+        if stop is not None and stop not in tried:
+            self._log_search_stop(description, f"{named}: {went.format(cam.replace('_camera', '').replace('_', '-'))}")
+            yield stop
+
+    def _log_search_stop(self, description: str, message: str) -> None:
+        self.search_log.append(message)
+        self.trace.asked.append((round(self.t, 2), f"search {description}: which way", message))
+        print(f"search {description!r}: {message}", flush=True)
 
     def _clear_line(self, a: Point, b: Point, step: float = 0.1, *, grid: np.ndarray | None = None) -> bool:
         n = max(1, int(math.dist(a, b) / step))
