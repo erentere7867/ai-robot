@@ -87,8 +87,8 @@ def recalled_facts(memory: Any, query: str, extra: Iterable[str] = ()) -> list[s
 def _turn_span(robot: Any, pose_idx: int, before: Pose, after: Pose, commanded: float) -> float | None:
     """Measured degrees turned since `pose_idx` (handles multi-turn spins via trace poses)."""
     poses = getattr(getattr(robot, "trace", None), "poses", ())
-    if len(poses) > pose_idx + 1:
-        yaws = [p[3] for p in poses[pose_idx:]]
+    if len(poses) > pose_idx:
+        yaws = [math.radians(before.yaw), *(p[3] for p in poses[pose_idx:])]
         return math.degrees(sum(abs(wrap(b - a)) for a, b in zip(yaws, yaws[1:], strict=False)))
     if commanded < 180:
         return abs((after.yaw - before.yaw + 180) % 360 - 180)
@@ -360,12 +360,12 @@ class Tools:
         """Keep motion progress compact: always report for repetition-prone steps (turn/move/drive/orbit) or after
         multiple motions, while omitting boilerplate on a single-step go_to/search to keep context lean."""
         if name == "turn":
-            degrees = round(res.turned_deg) if res.status == "partial" else args["degrees"]
+            degrees = round(res.turned_deg)
             self.turned += abs(degrees)
             self.done.append(f"turned {degrees:g} degrees {args['direction']}")
         elif name == "move":
-            metres = f"{res.moved_m:.2f}" if res.status == "partial" else f"{args['metres']:g}"
-            self.done.append(f"moved {metres} m {args['direction']}")
+            metres = round(res.moved_m, 2)
+            self.done.append(f"moved {metres:g} m {args['direction']}")
         else:
             self.done.append(res.text.split(":")[0].split(",")[0].rstrip(".").lower())  # "arrived", "drove for 2 s"
         if name not in ("turn", "move", "drive", "orbit") and len(self.done) <= 1:
@@ -674,8 +674,8 @@ class Tools:
         return ActionResult(f"Moved {shown} m {direction}.", True, "reached", went)
 
     def turn(self, degrees: float, direction: str) -> ActionResult:
-        pose_idx = len(getattr(getattr(self.robot, "trace", None), "poses", ()))
         before = self.robot.pose()
+        pose_idx = len(getattr(getattr(self.robot, "trace", None), "poses", ()))
         self.robot.turn(degrees, direction=direction)
         after = self.robot.pose()
         turned = _turn_span(self.robot, pose_idx, before, after, degrees)

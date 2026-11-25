@@ -509,14 +509,17 @@ class Agent:
 
     @staticmethod
     def _review(instruction: str, record: TaskRecord, tools: Tools) -> str:
-        """Before a task ends: the request, what was done, and any open to-do steps, for one last check."""
+        """Before a task ends: the request, what was done, and what remains."""
         calls = [line for line in record.lines() if not line.startswith("reply:")]
         done = ("\n".join(f"- {line}" for line in calls[-12:]) if calls else
                 "- no tool call at all: you have not moved, turned, looked or done anything for this request; only "
                 "tools do things, so saying you did something does not do it")
-        open_steps = tools.todo.open_steps()
+        open_steps = [step.title for step in tools.todo.steps if not step.done and not step.blocker]
+        blocked_steps = [step.status() for step in tools.todo.steps if not step.done and step.blocker]
         done_steps = tools.todo.done_steps()
         todo = f"\nCompleted to-do steps: {'; '.join(done_steps)}." if done_steps else ""
+        if blocked_steps:
+            todo += f"\nBlocked to-do steps: {'; '.join(blocked_steps)}."
         if open_steps:
             todo += f"\nOpen to-do steps: {'; '.join(open_steps)}."
         return (f'Before you finish, check every part of the request: "{instruction}"\nWhat you did:\n{done}{todo}\n'

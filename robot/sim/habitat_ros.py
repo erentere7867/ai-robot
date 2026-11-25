@@ -1,7 +1,7 @@
 """Sprocket's hardware in a Habitat home, on ROS: what the real robot's drivers publish, made from the simulated world.
 
-The real robot has camera drivers (three colour cameras), an MCU (the motor controller that takes /cmd_vel, wheel
-odometry, the ToF grids) and an IMU. This node stands in for those and nothing else: the robot's own software (the
+The real robot has camera drivers (three colour cameras), an MCU (motor commands, wheel odometry, the ToF grids) and
+an IMU. This node stands in for those and nothing else: the robot's own software (the
 EKF, SLAM or AMCL, Nav2, the depth node, perception, the agent) runs on top unchanged and never sees the truth.
 
 It owns the clock. Simulated time runs at `rtf` times wall-clock time, so that software running slower here than on
@@ -24,10 +24,10 @@ from typing import Any
 import numpy as np
 
 from robot.ros.model import CAMERAS, MAX_DV, MAX_DW, MAX_V, MAX_W, TOF, TRACK, WHEEL_R
+from robot.ros.motion import COMMAND_AGE_NS, WHEELS, command
 from robot.sim.habitat import Habitat
 
 DT = 0.02  # the motor controller's period, simulated seconds
-WATCHDOG = 0.3  # the MCU stops the wheels when no command came for this long
 TOF_EVERY = 5  # ticks: 10 Hz
 TRUTH_EVERY = 5
 # what the real parts get wrong (one draw per run for the biases; noise per reading)
@@ -89,7 +89,7 @@ class Hardware:
         self.truth = self.world.call(op="reset", pose=start)
         self.t = 0.0
         self.v = self.w = 0.0
-        self.cmd, self.cmd_t = (0.0, 0.0), -1.0
+        self.cmd = (0, 0.0, 0.0)  # ROS stamp in ns, v, w
         self.odom = [0.0, 0.0, 0.0]  # what the wheels make of the way so far
         self.wheels = [0.0, 0.0]  # wheel angles, radians
         self.bumps = 0
@@ -103,7 +103,7 @@ class Hardware:
             **{f"{name}/image": pub(Image, f"/{name}/image", 2) for name in CAMERAS},
             **{f"{name}/info": pub(CameraInfo, f"/{name}/camera_info", 2) for name in CAMERAS},
         }
-        self.node.create_subscription(TwistStamped, "/cmd_vel", self._command, 10)
+        self.node.create_subscription(TwistStamped, WHEELS, self._command, 1)
         # the simulator's own control, not the robot's: put the body back on its dock between eval tasks
         from std_msgs.msg import Empty
 
@@ -114,7 +114,14 @@ class Hardware:
         self.rendered: list[float] = []  # wall seconds per picture, for the report
 
     def _command(self, msg: Any) -> None:
-        self.cmd, self.cmd_t = (msg.twist.linear.x, msg.twist.angular.z), self.t
+        v, w, stamp = command(msg)
+        if self.cmd[0] <= stamp <= round(self.t * 1e9):
+            self.cmd = (stamp, v, w) if math.isfinite(v) and math.isfinite(w) else (stamp, 0.0, 0.0)
+
+    def _want(self) -> tuple[float, float]:
+        # DDS delivery must not restart the watchdog for a command already old at its source.
+        stamp, v, w = self.cmd
+        return (v, w) if 0 < stamp and 0 <= round(self.t * 1e9) - stamp <= COMMAND_AGE_NS else (0.0, 0.0)
 
     def _stamp(self) -> Any:
         """The time as a ROS stamp, from whole nanoseconds (splitting the float seconds instead once turned 4.99999
@@ -127,9 +134,10 @@ class Hardware:
     # ---- one motor-controller period ---------------------------------------------------------------------------
     def tick(self, k: int) -> None:
         if self.reset_asked:  # the wheels' own count carries on: the robot was carried, not driven
-            self.reset_asked, self.v, self.w, self.cmd = False, 0.0, 0.0, (0.0, 0.0)
+            self.reset_asked, self.v, self.w = False, 0.0, 0.0
+            self.cmd = (round(self.t * 1e9), 0.0, 0.0)
             self.truth = self.world.call(op="reset", pose=self.start)
-        want = self.cmd if self.t - self.cmd_t <= WATCHDOG else (0.0, 0.0)
+        want = self._want()
         self.v = _approach(self.v, max(-MAX_V, min(MAX_V, want[0])), MAX_DV * DT)
         self.w = _approach(self.w, max(-MAX_W, min(MAX_W, want[1])), MAX_DW * DT)
         before = self.truth

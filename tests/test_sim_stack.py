@@ -83,4 +83,3 @@ def test_home_robot_opens_per_map_sqlite_store_by_default(monkeypatch, tmp_path)
     home.robot(Mock(), store=None)
     assert captured[1]["store"] is None
     assert captured[1]["owns_store"] is False
-

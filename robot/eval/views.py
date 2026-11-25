@@ -27,15 +27,14 @@ from robot.eval.report import same_name
 
 
 def render(scene: str, count: int, out: Path, seed: int = 3) -> None:
-    from robot.sim.habitat import Habitat, start
+    from robot.sim.habitat import Habitat, free_mask, start
 
     server, port = start(scene)
     world = Habitat(port)
     try:
         info = world.call(op="info")
         label = {o["id"]: o["label"] for o in info["objects"]}
-        nx, ny = info["shape"]
-        free = np.argwhere(np.unpackbits(np.frombuffer(info["free"], np.uint8))[: nx * ny].reshape(nx, ny))
+        free = np.argwhere(free_mask(info))
         rng = np.random.default_rng(seed)
         rgbs, pixels = [], []
         for i, j in free[rng.choice(len(free), count, replace=False)]:
