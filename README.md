@@ -20,7 +20,6 @@ rules for changing it are in [AGENTS.md](AGENTS.md).
   apartment with its live page and task reports, and the demo.
 - [docs/architecture.md](docs/architecture.md): the design: body, perception, memory, the agent.
 - [docs/simulation_3d.md](docs/simulation_3d.md): the 3D apartment, and what has been measured in it.
-- [docs/ideas/sprocket-harness.md](docs/ideas/sprocket-harness.md): how the agent harness came to be, with its numbers.
 - [AGENTS.md](AGENTS.md): rules for anyone (person or coding agent) changing the code.
 
 ## Layout

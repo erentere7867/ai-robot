@@ -12,6 +12,7 @@ For people and coding agents changing this repository.
 4. [docs/architecture.md](docs/architecture.md): the design; section 6 is the agent as it is.
 5. [docs/simulation_3d.md](docs/simulation_3d.md): what has been measured, including what did not work and why (read
    it before trying an idea again: picking numbered dots, the fixed word list and the fridge task are there).
+6. [docs/mission.md](docs/mission.md): the longer-term work and how to measure it.
 
 When a 3D task fails, open its report (`runs/<tag>/<scene>/<task>/report.html`) first: it shows
 what the robot believed against what was really there, where it went, and every model turn with the pictures it was

@@ -169,7 +169,8 @@ SQLite stores structured spatial/state records alongside normalized float32 embe
 
 ## 6. Layer 2: The Agent (`robot/agent/`, `robot/mind/brain.py`)
 
-An agentic loop, as in coding agents, around the robot's vision-language model. The design and the reasons for it are in [docs/ideas/sprocket-harness.md](ideas/sprocket-harness.md).
+An agentic loop, as in coding agents, around the robot's vision-language model. Earlier harness experiments are in
+[simulation_3d.md](simulation_3d.md#early-harness-baselines-18-and-19-november-2026).
 
 1. **One task is one running conversation** (`robot/agent/agent.py`). The first message holds what the robot senses — room, battery, the tracked objects (id, what, how far, which way: people and the things tools have looked for) and the three cameras' pictures with ids drawn on — then the user's words. Each model turn may speak, call tools, or both; every tool result goes back to the model before its next turn.
 2. **Native tool calls** (`Brain.chat`). Tools are JSON function schemas; llama-server uses the model's chat template. Batched calls run in order. A failure or a tool returning visual evidence skips the rest of that batch: the model must see the result before it chooses its next action. A reply the server marks incomplete at its output limit dispatches no calls.

@@ -29,7 +29,6 @@ Read these, in order:
    partly built.
 5. `docs/simulation_3d.md`. It records what has been measured, including what failed and why. Never retry an idea
    it says failed without a new reason.
-6. `docs/ideas/sprocket-harness.md`.
 
 ## 1. The machine: this PC
 
