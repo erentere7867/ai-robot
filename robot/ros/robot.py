@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from robot.agent.api import (
@@ -16,6 +17,7 @@ from robot.agent.api import (
     Preempted,
     SafetyStop,
     TargetLost,
+    Timeout,
     choose,
     wrap,
     xy,
@@ -31,6 +33,7 @@ from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 PROGRESS_S, PROGRESS_M = 30.0, 0.25
 CANCEL_WAIT_S = 2.0
 DIRECT = "direct"
+PLAN_TIMEOUT_S, PLAN_ENDPOINT_M = 2.0, 0.10
 
 
 class RosRobot(SimRobot):
@@ -38,7 +41,7 @@ class RosRobot(SimRobot):
                  synthetic_scan: bool = True) -> None:
         import rclpy
         from geometry_msgs.msg import TwistStamped
-        from nav2_msgs.action import DriveOnHeading, FollowPath, NavigateToPose, Spin
+        from nav2_msgs.action import ComputePathToPose, DriveOnHeading, FollowPath, NavigateToPose, Spin
         from rclpy.action import ActionClient
         from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
         from rclpy.executors import MultiThreadedExecutor
@@ -58,7 +61,7 @@ class RosRobot(SimRobot):
         self.tf = Buffer()
         self._tf_listener = TransformListener(self.tf, self.node)
         self.kinds = {"navigate_to_pose": NavigateToPose, "follow_path": FollowPath, "spin": Spin,
-                      "drive_on_heading": DriveOnHeading}
+                      "drive_on_heading": DriveOnHeading, "compute_path_to_pose": ComputePathToPose}
         self.actions: dict[str, Any] = {}
         self._twist = TwistStamped
         self.cmd = self.node.create_publisher(TwistStamped, motion.WHEELS, 1)
@@ -249,22 +252,29 @@ class RosRobot(SimRobot):
         self._wait(DT)
         self._sync()
 
+    def _client(self, name: str, timeout: float, retry: float = 0.0) -> Any:
+        client = self.actions[name]
+        if client.wait_for_server(timeout_sec=timeout):
+            return client
+        if retry:
+            from rclpy.action import ActionClient
+
+            if hasattr(client, "destroy"):
+                client.destroy()
+            self.actions[name] = client = ActionClient(self._action_node, self.kinds[name], name)
+            if client.wait_for_server(timeout_sec=retry):
+                return client
+        return None
+
     def _act(self, name: str, *, watch: Object | None = None, **fields: Any) -> None:
         """Send one action goal and wait for it, keeping the trace and the stop checks running meanwhile."""
         self._interrupts()
         with self._motion.lock:
             self._motion_available()
             self._halt()
-        client = self.actions[name]
-        if not client.wait_for_server(timeout_sec=10.0):
-            from rclpy.action import ActionClient
-
-            if hasattr(client, "destroy"):
-                client.destroy()
-            self.actions[name] = ActionClient(self._action_node, self.kinds[name], name)
-            client = self.actions[name]
-            if not client.wait_for_server(timeout_sec=20.0):
-                raise RuntimeError(f"the {name} action server is not up")
+        client = self._client(name, 10.0, retry=20.0)
+        if client is None:
+            raise RuntimeError(f"the {name} action server is not up")
         goal = self.kinds[name].Goal()
         for key, value in fields.items():
             setattr(goal, key, value)
@@ -346,23 +356,66 @@ class RosRobot(SimRobot):
             yaws = [p[3] for p in self.trace.poses if p[0] >= t_start]
             done += sum(wrap(b - a) for a, b in zip(yaws, yaws[1:], strict=False))
 
-    def _goal_point(self, target: Point | Pose | Object, distance: float) -> tuple[Point, float] | None:
+    def _nav_reaches(self, end: Point, yaw: float = 0.0) -> bool:
+        """Check the live costmap without arming motion. Nav2 can report success for a path 0.20 m short."""
+        name = "compute_path_to_pose"
+        self._interrupts()
+        client = self._client(name, PLAN_TIMEOUT_S)
+        if client is None:
+            raise Timeout("navigation planner unavailable: Nav2's planner did not become ready")
+        goal = self.kinds[name].Goal()
+        goal.goal = self._pose_msg(*end, yaw)
+        pending = motion.NavGoal(client.send_goal_async(goal), self._motion.lock)
+        try:
+            if not pending.wait_terminal(PLAN_TIMEOUT_S, self._interrupts):
+                raise Timeout("navigation planner unavailable: Nav2's planner did not answer in time")
+        except BaseException:
+            pending.cancel()
+            raise
+        result = pending.result_future()
+        if result is None:
+            return False
+        outcome = result.result()
+        if outcome.status != motion.DONE:
+            return False
+        path = outcome.result.path.poses
+        if not path:
+            return False
+        last = path[-1].pose.position
+        return math.dist(end, (last.x, last.y)) <= PLAN_ENDPOINT_M
+
+    def _goal_point(self, target: Point | Pose | Object, distance: float, *,
+                    rejected: set[Point] | None = None) -> tuple[Point, float] | None:
+        if rejected is None:
+            rejected = set()
+        for end, yaw in self._goal_candidates(target, distance):
+            if end not in rejected:
+                if self._nav_reaches(end, yaw):
+                    return end, yaw
+                rejected.add(end)
+        if rejected:
+            raise PathBlocked("Nav2 found no path to a usable goal on its live costmap")
+        return None
+
+    def _goal_candidates(self, target: Point | Pose | Object,
+                         distance: float) -> Iterator[tuple[Point, float]]:
         """A free spot on the static map within reach of the target, and the heading to arrive with."""
         goal, reach = self._reach(target, distance)
         if math.dist(goal, (self.x, self.y)) <= reach:
-            return None
+            return
         path = self._route(target, goal, reach)
         if path is None:
             raise PathBlocked(f"no free path to ({goal[0]:.1f}, {goal[1]:.1f})")
         if not path:  # already on the nearest floor there is
-            return None
+            return
         end = path[-1] if isinstance(target, Object) or self._occ(*goal, self.inflated) else goal
         if isinstance(target, Pose):
-            return end, math.radians(target.yaw)
-        if isinstance(target, Object) and distance > 0 and math.dist(end, goal) > 0.05:
-            return end, math.atan2(goal[1] - end[1], goal[0] - end[0])
-        before = path[-2] if len(path) > 1 else (self.x, self.y)
-        return end, math.atan2(end[1] - before[1], end[0] - before[0])
+            yield end, math.radians(target.yaw)
+        elif isinstance(target, Object) and distance > 0 and math.dist(end, goal) > 0.05:
+            yield end, math.atan2(goal[1] - end[1], goal[0] - end[0])
+        else:
+            before = path[-2] if len(path) > 1 else (self.x, self.y)
+            yield end, math.atan2(end[1] - before[1], end[0] - before[0])
 
     # ---- motion: the 2D world's skills call these, so every skill drives through Nav2 ---------------------------
     def _face_goal(self, goal: Point) -> None:
@@ -374,22 +427,29 @@ class RosRobot(SimRobot):
             except PathBlocked:
                 pass
 
+    def _finish_approach(self, target: Object, distance: float, rejected: set[Point]) -> None:
+        """Refine the view without retrying a point Nav2 rejected."""
+
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
         """Nav2 drives there; when it gives up short of the target, so does the robot, and the caller hears why."""
         watch = target if isinstance(target, Object) else None
         target, distance = self._destination(target, distance, side)
         goal = xy(target)
         reach = (target.radius if isinstance(target, Object) else 0.0) + max(distance, 0.35)
-        where = self._goal_point(target, distance)
+        rejected: set[Point] = set()
+        where = self._goal_point(target, distance, rejected=rejected)
         if where is not None:
             (gx, gy), yaw = where
             try:
                 self._act("navigate_to_pose", watch=watch, pose=self._pose_msg(gx, gy, yaw))
             except PathBlocked:
+                rejected.add((gx, gy))
                 self._sync()
                 if math.dist(goal, (self.x, self.y)) > reach + 0.35 and math.dist((gx, gy), (self.x, self.y)) > 0.35:
                     raise
                 self._face_goal(goal)  # stopped just short (or at nearest free cell beside furniture): face it
+        if isinstance(target, Object):
+            self._finish_approach(target, distance, rejected)
         if isinstance(target, Pose):
             self._rotate(wrap(math.radians(target.yaw) - self.yaw))
 
