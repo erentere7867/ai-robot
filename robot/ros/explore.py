@@ -204,13 +204,20 @@ class Explorer:
         return yaml
 
 
-def load_grid(yaml: Path, shape: tuple[int, int], size: tuple[float, float]) -> np.ndarray:
-    """A saved map as the planner's occupancy grid: indexed [x, y], `shape` cells over a `size` (width, height) area
-    centred on the house frame's origin. Unknown space counts as blocked: the robot has not seen it is free."""
+def read_map(yaml: Path) -> tuple[float, tuple[float, float], np.ndarray]:
+    """Read a saved Nav2 map: returns `(resolution, (ox, oy), image)` with the PGM top row first."""
     text = yaml.read_text()
     resolution = float(re.search(r"resolution: ([\d.]+)", text).group(1))
     ox, oy, _ = (float(v) for v in re.search(r"origin: \[([^\]]+)\]", text).group(1).split(","))
     image = _pgm(yaml.with_name(re.search(r"image: (.+)", text).group(1).strip()))
+    return resolution, (ox, oy), image
+
+
+def load_grid(saved: tuple[float, tuple[float, float], np.ndarray], shape: tuple[int, int],
+              size: tuple[float, float]) -> np.ndarray:
+    """A saved map (from `read_map`) as the planner's occupancy grid: indexed [x, y], `shape` cells over a `size`
+    (width, height) area centred on the house frame's origin. Unknown space counts as blocked."""
+    resolution, (ox, oy), image = saved
     nx, ny = shape
     xs = -size[0] / 2 + (np.arange(nx) + 0.5) * size[0] / nx
     ys = -size[1] / 2 + (np.arange(ny) + 0.5) * size[1] / ny
@@ -219,14 +226,6 @@ def load_grid(yaml: Path, shape: tuple[int, int], size: tuple[float, float]) -> 
     inside = (cols[:, None] >= 0) & (cols[:, None] < image.shape[1]) & (rows[None, :] >= 0) & (rows[None, :] < image.shape[0])
     values = image[np.clip(rows, 0, image.shape[0] - 1)[None, :], np.clip(cols, 0, image.shape[1] - 1)[:, None]]
     return ~(inside & (values > 250))
-
-
-def coverage(yaml: Path, truth: Any) -> float:
-    """Share of the floor the simulator (a SimRobot of the true scene) knows to be free that the saved map shows as
-    free. The simulator's grid is indexed [x, y]; a map image's first row is its largest y."""
-    free = ~truth.occupied
-    mapped = ~load_grid(yaml, truth.occupied.shape, (truth.scene.width, truth.scene.height))
-    return int(np.count_nonzero(free & mapped)) / max(int(np.count_nonzero(free)), 1)
 
 
 def _pgm(path: Path) -> np.ndarray:

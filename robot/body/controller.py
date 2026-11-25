@@ -7,8 +7,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from robot.agent.api import wrap
-
 
 @dataclass
 class CandidatePath:
@@ -194,7 +192,7 @@ class BodyController:
         else:
             speed = v_cruise
 
-        err = wrap(math.atan2(waypoints[idx][1] - pose[1], waypoints[idx][0] - pose[0]) - pose[2])
+        err = math.remainder(math.atan2(waypoints[idx][1] - pose[1], waypoints[idx][0] - pose[0]) - pose[2], math.tau)
         # A waypoint well off to the side or behind: turn on the spot to face it first, as a differential drive can
         # (arcs need room a corner may not have), and keep turning until nearly facing it, not just under the limit.
         if abs(err) > 0.8 or (self._turning_to == waypoints[idx] and abs(err) > 0.15):

@@ -16,14 +16,10 @@ def name(pixels: np.ndarray) -> str:
     if pixels.size == 0:
         return ""
     px = pixels.reshape(-1, 3)
-    if px.dtype == np.uint8:
-        hi, lo = px.max(axis=1), px.min(axis=1)
-        # Integer equivalent of (hi - lo) / hi > 0.35 & hi > 50, avoiding a float64 copy of the whole crop.
-        colourful = (hi > 50) & ((hi - lo).astype(np.uint16) * 20 > hi.astype(np.uint16) * 7)
-    else:
-        px = px.astype(np.float32, copy=False)
-        hi, lo = px.max(axis=1), px.min(axis=1)
-        colourful = ((hi - lo) / np.maximum(hi, 1e-6) > 0.35) & (hi > 50)
+    hi, lo = px.max(axis=1), px.min(axis=1)
+    # Equivalent to (hi - lo) / hi > 0.35 & hi > 50 without casting the full uint8 crop to float64.
+    w = np.uint16 if px.dtype == np.uint8 else np.float32
+    colourful = (hi > 50) & ((hi - lo).astype(w, copy=False) * 20 > hi.astype(w, copy=False) * 7)
     n_col = int(np.count_nonzero(colourful))
     if n_col >= 20 and n_col >= 0.08 * len(px):
         px = px[colourful]
