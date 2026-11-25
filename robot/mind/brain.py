@@ -128,13 +128,12 @@ class Brain:
         messages: list[dict[str, Any]],
         rules: str,
         max_tokens: int,
-        temperature: float = 0.0,
     ) -> Reply:
         """One answer held to the grammar `rules` (short yes/no, one-word and number answers)."""
         payload: dict[str, Any] = {
             "messages": messages,
             "grammar": rules,
-            "temperature": temperature,
+            "temperature": 0.0,
             "max_tokens": max_tokens,
             "cache_prompt": True,
             "stream": False,
