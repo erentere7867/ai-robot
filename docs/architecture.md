@@ -138,6 +138,7 @@ An agentic loop, as in coding agents, around the robot's vision-language model. 
    Repeated calls and the overall turn budget are guarded. An empty reply gets one repair turn. A plain reply
    can finish the task after a review of actions and plan state; open steps are reported, not silently passed.
 5. **Interrupt.** Stop and wait bypass the model. Other words during a task cancel the running skill, if any,
-   and join the conversation with fresh observations. A correction during tool preparation prevents the
-   superseded call from starting. The loop also discards stale plain or truncated replies.
+   and join the conversation with fresh observations. The agent checks for corrections before preparing the
+   tool call. After validation and any skill-state transition, `Tools` checks again before running the tool.
+   The loop also discards stale plain or truncated replies.
    The dashboard exposes the tool results and model turns.
