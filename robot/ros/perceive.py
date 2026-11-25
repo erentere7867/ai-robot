@@ -320,6 +320,8 @@ class SyntheticScanPublisher:
         self._pub: Any = None
         self._laser_scan_cls: Any = None
         self._last_pub_s: float = -1.0
+        self._last_depth_s: float | None = None
+        self._depth_dts: deque[float] = deque(maxlen=6)
         self._drive = (-1e9, 0.0)  # when, and the forward speed the motors were last told
         self._wheels_t: float | None = None
         self._stalled = 0.0  # seconds the wheels have not followed the drive
@@ -349,6 +351,16 @@ class SyntheticScanPublisher:
                 node.create_subscription(Float32MultiArray, topic, lambda m, s=side: self._tof(s, m),
                                          qos_profile_sensor_data)
             node.create_subscription(Imu, "/imu", self._imu, qos_profile_sensor_data)
+
+    def _sector_age(self) -> float:
+        """Keep sectors for at least SECTOR_AGE, or a full slow-CPU camera cycle plus half a frame."""
+        if len(self._depth_dts) < 2:
+            return SECTOR_AGE
+        return max(SECTOR_AGE, (len(self.cam_depths) + 0.5) * float(np.median(self._depth_dts)))
+
+    def _fresh_parts(self, t: float) -> list[tuple[float, tuple[float, float, float], np.ndarray]]:
+        age = self._sector_age()
+        return [p for p in self.parts.values() if t - p[0] <= age]
 
     def tilt_at(self, stamp: Any) -> tuple[float, float]:
         return _tilt_at(self.tilts, stamp)
@@ -382,7 +394,7 @@ class SyntheticScanPublisher:
         if self._pub is not None:
             stamp = self._clock().now().to_msg()
             with self._lock:
-                parts = [p for p in self.parts.values() if t - p[0] <= SECTOR_AGE]
+                parts = self._fresh_parts(t)
                 scan = combine([*parts, self._contact_part(t, pose)], pose)
                 self._last_pub_s = max(self._last_pub_s, t)
             self._publish_scan(stamp, scan)
@@ -463,8 +475,11 @@ class SyntheticScanPublisher:
         part = synthetic_scan({name: depth}, pitch_rad=pitch, roll_rad=roll)[0]  # this camera's sector
         pose = self.odom_at(stamp) if self.odom_at is not None else (0.0, 0.0, 0.0)
         with self._lock:
+            if self._last_depth_s is not None and t > self._last_depth_s:
+                self._depth_dts.append(t - self._last_depth_s)
+            self._last_depth_s = max(self._last_depth_s, t) if self._last_depth_s is not None else t
             self.parts[name] = (t, pose, part)
-            parts = [p for p in self.parts.values() if t - p[0] <= SECTOR_AGE]
+            parts = self._fresh_parts(t)
             scan = combine([*parts, self._contact_part(t, pose)], pose)
             self.scan = scan
             self.scans.append((t, scan))

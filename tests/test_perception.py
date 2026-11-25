@@ -805,6 +805,42 @@ def test_ranging_uses_the_same_camera_and_exposure_even_if_another_frame_is_newe
     assert scan.depth_for("front_camera", stamp(2))[0] is None
 
 
+def test_slow_depth_cadence_keeps_all_three_camera_sectors_until_one_misses_a_cycle(monkeypatch):
+    from robot.ros import perceive
+
+    beams = {"front_camera": (180, 1.5), "rear_left_camera": (270, 2.0), "rear_right_camera": (90, 2.5)}
+
+    def fake_scan(depths, **_kwargs):
+        ranges = np.full(360, np.nan, dtype=np.float32)
+        for cam in depths:
+            idx, dist = beams[cam]
+            ranges[idx] = dist
+        return ranges, -math.pi, math.tau / 360
+
+    monkeypatch.setattr(perceive, "synthetic_scan", fake_scan)
+    pub = SyntheticScanPublisher(publish=True)
+    dummy = np.ones((2, 2), dtype=np.float32)
+
+    def stamp(sec: float):
+        whole = int(sec)
+        return SimpleNamespace(sec=whole, nanosec=round((sec - whole) * 1e9))
+
+    # 0.7 s simulated spacing (Base FP32 on CPU at --rtf 0.33): oldest sector is 1.4 s > SECTOR_AGE, still kept.
+    pub.ingest_depth("front_camera", stamp(10.0), dummy)
+    pub.ingest_depth("rear_left_camera", stamp(10.7), dummy)
+    ranges, _, _ = pub.ingest_depth("rear_right_camera", stamp(11.4), dummy)
+    assert ranges[180] == pytest.approx(1.5)
+    assert ranges[270] == pytest.approx(2.0)
+    assert ranges[90] == pytest.approx(2.5)
+
+    # Once front_camera misses a full cycle (age 2.8 s > 3.5 * 0.7 s), its stale sector expires.
+    pub.ingest_depth("rear_left_camera", stamp(12.1), dummy)
+    ranges, _, _ = pub.ingest_depth("rear_right_camera", stamp(12.8), dummy)
+    assert np.isnan(ranges[180])
+    assert ranges[270] == pytest.approx(2.0)
+    assert ranges[90] == pytest.approx(2.5)
+
+
 def test_a_thing_the_detector_stops_finding_is_gone_only_when_the_vision_model_agrees():
     import threading
     import time
