@@ -265,7 +265,7 @@ class MonoDepth:
     relative inverse depth, and `fit_to_floor` makes it metres. Its input is `height` pixels tall; the result is at
     the size of a `width`-wide copy of the frame."""
 
-    def __init__(self, weights: str = "depth-anything-v2-base-onnx/model.onnx", height: int = 364, width: int = 640,
+    def __init__(self, weights: str = "vision/depth_base.onnx", height: int = 364, width: int = 640,
                  threads: int = 0, server: Any = None) -> None:
         """Use the vision server when supplied, otherwise run the network on the CPU with `threads`."""
         self.server, self.height, self.width = server, height, width

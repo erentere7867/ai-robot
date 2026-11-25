@@ -28,7 +28,7 @@ the agent waits for one.
 
 The robot has no depth camera and no lidar. Its obstacle scan comes from the colour cameras:
 
-1. **Depth Anything V2 Base FP32** (ONNX, `models/depth-anything-v2-base-onnx/model.onnx`) estimates relative
+1. **Depth Anything V2 Base FP32** (ONNX, `models/vision/depth_base.onnx`, shared by CPU and server) estimates relative
    inverse depth for each frame (`robot/perception/depth.py`, `MonoDepth`).
 2. **Metres from the floor's geometry** (`fit_to_floor`): the camera's height and the IMU's tilt give the floor's
    true distance at every pixel; a robust line fit of the network's output to it in the lower picture gives the scale

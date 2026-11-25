@@ -32,9 +32,7 @@ get() {  # get <url> <file>: download unless present (resumes a partial download
 fetch() {
   get "$HF/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/LFM3-VL-2B-QAD-Q4_0.gguf" "$MODELS_DIR/llm/LFM3-VL-2B-QAD-Q4_0.gguf"
   get "$HF/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/mmproj-LFM3-VL-2B-F16.gguf" "$MODELS_DIR/llm/mmproj-LFM3-VL-2B-F16.gguf"
-  depth="$HF/onnx-community/depth-anything-v2-base/resolve/main"
-  get "$depth/onnx/model.onnx" "$MODELS_DIR/depth-anything-v2-base-onnx/model.onnx"
-  get "$depth/preprocessor_config.json" "$MODELS_DIR/depth-anything-v2-base-onnx/preprocessor_config.json"
+  get "$HF/onnx-community/depth-anything-v2-base/resolve/main/onnx/model.onnx" "$MODELS_DIR/vision/depth_base.onnx"
   [ -x "$VENV_PY" ] || { echo "no $VENV_PY: run tools/linux/setup.sh first"; exit 1; }
   for asset in yoloe-26l-seg.pt yolo26n-pose.pt mobileclip2_b.ts; do  # from models/: ultralytics looks there
     [ -f "$MODELS_DIR/$asset" ] || (cd "$MODELS_DIR" && "$VENV_PY" -c \
@@ -45,19 +43,16 @@ from piper.download_voices import download_voice as d; p = Path('$MODELS_DIR/voi
 d('en_US-lessac-medium', p)"  # piper writes into the folder but does not make it
   [ -f "$MODELS_DIR/whisper/faster-whisper-base.en/model.bin" ] || "$VENV_PY" -c "from faster_whisper.utils import \
 download_model as d; d('base.en', output_dir='$MODELS_DIR/whisper/faster-whisper-base.en')"
-  # the vision server's files: YOLOE with 8 word slots (a few minutes on a CPU), and the depth network
-  mkdir -p "$MODELS_DIR/vision"
+  # YOLOE with 8 word slots (a few minutes on a CPU)
   [ -f "$MODELS_DIR/vision/yoloe26l_8.onnx" ] || (cd "$MODELS_DIR" && "$VENV_PY" "$HERE/export_yoloe.py" \
     yoloe-26l-seg.pt vision/yoloe26l_8.onnx)
-  [ -f "$MODELS_DIR/vision/depth_base.onnx" ] || cp "$MODELS_DIR/depth-anything-v2-base-onnx/model.onnx" \
-    "$MODELS_DIR/vision/depth_base.onnx"
 }
 
 check() {
   local missing=0
   echo "=== $MODELS_DIR ==="
   for rel in llm/LFM3-VL-2B-QAD-Q4_0.gguf llm/mmproj-LFM3-VL-2B-F16.gguf yoloe-26l-seg.pt yolo26n-pose.pt \
-             mobileclip2_b.ts depth-anything-v2-base-onnx/model.onnx voice/en_US-lessac-medium.onnx \
+             mobileclip2_b.ts voice/en_US-lessac-medium.onnx \
              whisper/faster-whisper-base.en/model.bin vision/yoloe26l_8.onnx vision/depth_base.onnx; do
     if [ -e "$MODELS_DIR/$rel" ]; then printf "  [OK]   %-44s %s\n" "$rel" "$(du -shL "$MODELS_DIR/$rel" | cut -f1)"
     else printf "  [MISS] %s\n" "$rel"; missing=$((missing + 1)); fi
