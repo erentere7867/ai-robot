@@ -17,6 +17,7 @@ from robot.agent.api import (
     Preempted,
     SafetyStop,
     TargetLost,
+    Timeout,
     choose,
     wrap,
     xy,
@@ -364,7 +365,7 @@ class RosRobot(SimRobot):
         client = self.actions[name]
         self._interrupts()
         if not client.wait_for_server(timeout_sec=PLAN_TIMEOUT_S):
-            raise RuntimeError("Nav2's planner is unavailable")
+            raise Timeout("navigation planner unavailable: Nav2's planner did not become ready")
         goal = self.kinds[name].Goal()
         goal.goal = self._pose_msg(*end, yaw)
         deadline = time.monotonic() + PLAN_TIMEOUT_S
@@ -373,7 +374,7 @@ class RosRobot(SimRobot):
             while not future.done():
                 self._interrupts()
                 if time.monotonic() >= deadline:
-                    raise RuntimeError("Nav2's planner did not answer in time")
+                    raise Timeout("navigation planner unavailable: Nav2's planner did not answer in time")
                 time.sleep(0.02)
             return future.result()
 
