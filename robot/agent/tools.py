@@ -365,7 +365,7 @@ class Tools:
         if tool.skill is not None:
             self.machine.start(Goal(
                 tool.skill,
-                target=args.get("target") or args.get("what") or args.get("direction") or "",
+                target=args.get("target") or args.get("what") or args.get("direction") or args.get("until") or "",
                 region=args.get("area") or args.get("near") or "",
                 timeout=args.get("seconds"),
             ))

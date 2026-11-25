@@ -82,6 +82,21 @@ def test_validation_does_not_start_a_skill_and_failure_does_not_block_the_next_o
     assert (tools.machine.state, tools.machine.goal, tools.machine.busy) == (Skill.IDLE, None, False)
 
 
+def test_conditional_wait_records_the_checked_target(monkeypatch):
+    robot = SimRobot(living_room())
+    tools = Tools(robot)
+
+    def wait_for(description, *, seconds):
+        assert description == "person"
+        assert tools.machine.goal == Goal(Skill.WAITING, "person", timeout=seconds)
+        return None
+
+    monkeypatch.setattr(robot, "wait_for", wait_for)
+    result = tools.execute("wait", {"seconds": 2, "until": " person "})
+    assert (result.text, result.ok, result.status) == ("Waited 2 s; no person came into view.", True, "ok")
+    assert tools.machine.state is Skill.IDLE
+
+
 def test_preempted_skill_propagates_and_returns_to_idle(monkeypatch):
     robot = SimRobot(living_room())
     tools = Tools(robot)
