@@ -102,8 +102,6 @@ def test_live_nav2_motion_handoff(tmp_path, monkeypatch):
             wait_for(lambda: node.count_publishers(NAV) >= 2, "Nav2 nodes did not remap their command output")
             robot = RosRobot(Scene(10, 10, [], {}, start=Pose(0, 0, 0)), synthetic_scan=False)
             assert [pub.node_name for pub in node.get_publishers_info_by_topic(WHEELS)] == ["sprocket_api"]
-            delayed = node.create_publisher(TwistStamped, CHECKED, 1)
-            wait_for(lambda: delayed.get_subscription_count() >= 2, "checked topic did not discover the motion gate")
             errors = []
 
             def drive():
@@ -119,31 +117,28 @@ def test_live_nav2_motion_handoff(tmp_path, monkeypatch):
             wait_for(lambda: moving in checked and moving in nav, "wheel command lost its original stamp")
             gate = robot._motion
             check = gate.checked
-            received = threading.Event()
-            pending = None
-            tail = age_at_delivery = 0
-            accepted = False
+            delivered = threading.Event()
+            tail = 0
+            fresh = accepted = False
 
-            def delay_reply(v, w, stamp):
-                nonlocal pending, tail, age_at_delivery, accepted
+            def stop_before_first_reply(v, w, stamp):
+                nonlocal tail, fresh, accepted
                 with gate.lock:
-                    if (pending is None and v > 0 and stamp in gate._in_flight and stamp > gate._checked
-                            and 0 <= gate._now() - stamp <= COMMAND_AGE_NS):
-                        # Stop before returning to the executor; all other replies still go straight to the gate.
-                        pending = (v / 2, w, stamp)
+                    if (not delivered.is_set() and v > 0 and stamp in gate._in_flight and stamp > gate._checked
+                            and 0 <= gate._now() - stamp <= COMMAND_AGE_NS // 2):
+                        # Deliver this real Collision Monitor reply to the gate only after stop.
                         tail = len(wheels)
                         robot.stop()
-                        delayed.publish(robot._twist_msg(*pending))
+                        check(v, w, stamp)
+                        fresh = 0 <= gate._now() - stamp <= COMMAND_AGE_NS
+                        accepted = gate._checked >= stamp
+                        delivered.set()
                         return
                     check(v, w, stamp)
-                    if (v, w, stamp) == pending:
-                        age_at_delivery = gate._now() - stamp
-                        accepted = gate._checked >= stamp
-                        received.set()
 
-            monkeypatch.setattr(gate, "checked", delay_reply)
-            assert received.wait(2.0), "the motion gate did not receive the delayed reply"
-            assert 0 <= age_at_delivery <= COMMAND_AGE_NS, "the delayed reply had already expired"
+            monkeypatch.setattr(gate, "checked", stop_before_first_reply)
+            assert delivered.wait(2.0), "no pending Collision Monitor reply reached the motion gate"
+            assert fresh, "stop and delivery exhausted the remaining freshness window"
             assert not accepted, "the gate accepted a reply from the stopped goal"
             monkeypatch.setattr(gate, "checked", check)
             wait_for(lambda: bool(errors), "Nav2 motion did not preempt")
