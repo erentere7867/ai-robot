@@ -1089,7 +1089,9 @@ def test_badge_deoverlap_and_detector_max_asked():
     # Even with plenty of GPU prompt slots, Detector keeps only MAX_ASKED recent asked words so stale tasks don't leak.
     fake_server = SimpleNamespace(slots=12)
     det = Detector(server=fake_server, always=("person",))
-    for w in ("umbrella", "shoes", "stool", "mug", "bicycle"):
+    words = ("umbrella", "shoes", "stool", "mug", "bicycle")
+    det._features = {w: np.zeros(512, np.float32) for w in words}
+    for w in words:
         det.watch(w)
     assert len(det.asked) == MAX_ASKED == 3
     assert det.asked == ["stool", "mug", "bicycle"]
