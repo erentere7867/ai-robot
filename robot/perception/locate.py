@@ -32,7 +32,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from robot.perception.rig import Camera
+from robot.perception.rig import Camera, to_map
 
 SCAN_Z = 0.25  # beam height for scan refinement (replaces legacy spinning lidar)
 LIDAR_AGREES = 0.12  # the lidar is trusted within this fraction of the floor estimate (its middle half was within 7%)
@@ -249,10 +249,10 @@ def locate_crop(cam: Camera, box: tuple[float, float, float, float], depth: np.n
 
     Unlike `locate()` for tight detector boxes, a coarse crop can include foreground furniture near its side edges
     (sampling the middle half of columns and the 25th depth percentile cut `dock -> kitchen` edge error from 1.50 m
-    to 0.00 m). With a scan pose relative to the RGB capture, associate beams in the RGB frame but return the lidar
-    hit in the scan's frame. Floor-flat targets (rugs) are kept when at least 60% of below-horizon pixels lie on the
-    floor and weighted by r^2 (exact flat-floor Jacobian dr ∝ r^2 dv) over [0.4, 3.5] m: unweighted median fell at 0.72 m near
-    the robot's feet, linear r stopped at 0.88 m, r^2 up to 3.0 m landed at 0.69 m (1.02 m after Nav2's 0.25 m goal
+    to 0.00 m). With a scan pose relative to the RGB capture, associate and place lidar hits in the RGB frame.
+    Floor-flat targets (rugs) are kept when at least 60% of below-horizon pixels lie on the floor and weighted by r^2
+    (exact flat-floor Jacobian dr ∝ r^2 dv) over [0.4, 3.5] m: unweighted median fell at 0.72 m near the robot's feet,
+    linear r stopped at 0.88 m, r^2 up to 3.0 m landed at 0.69 m (1.02 m after Nav2's 0.25 m goal
     tolerance), and r^2 up to 3.5 m landed the 2-camera centroid's nearest free cell at 0.56 m."""
     x1, y1, x2, y2 = box
     a, b = cam.bearing(x1), cam.bearing(x2)
@@ -296,7 +296,10 @@ def locate_crop(cam: Camera, box: tuple[float, float, float, float], depth: np.n
             radius = 0.2
             # The scan hit is the near face, not the centre that navigation uses for its standoff.
             reach = sr + radius
-            return _place(reach * math.cos(beam), reach * math.sin(beam), radius, "lidar", sr)
+            x, y = reach * math.cos(beam), reach * math.sin(beam)
+            if scan_in_camera is not None:
+                x, y = to_map(scan_in_camera, x, y)
+            return _place(x, y, radius, "lidar", sr)
     if seen is None:
         fp = cam.floor(u_mid, max(cam.height / 2.0 + 12.0, (y1 + y2) / 2.0))
         if fp is None:

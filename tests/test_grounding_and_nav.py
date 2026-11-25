@@ -853,7 +853,11 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
     assert gp is not None and math.dist(gp[0], (passed.x - 0.8, passed.y)) < 0.2
 
 
-def test_visual_lidar_fallback_associates_and_maps_beams_at_capture_time(monkeypatch):
+@pytest.mark.parametrize(("photo_map", "scan_map", "expected"), [
+    ((0.0, 0.0, 0.0), (0.0, 0.1, math.pi / 2), (2.2, 0.1)),
+    ((10.0, 20.0, math.pi / 2), (-4.0, -7.0, 0.0), (9.9, 22.2)),
+])
+def test_visual_lidar_fallback_uses_continuous_odometry_across_map_corrections(monkeypatch, photo_map, scan_map, expected):
     from collections import deque
 
     from robot.ros import real as grounding
@@ -869,14 +873,20 @@ def test_visual_lidar_fallback_associates_and_maps_beams_at_capture_time(monkeyp
     real.perception = SimpleNamespace(lock=Lock(), tracker=tracker, crops={},
                                       frames={"front_camera": (stamp, rgb)},
                                       scans=deque([(0.8, (ranges, -math.pi, math.tau / 360))]))
-    real._pose_at = lambda at: (0.0, 0.0, 0.0) if at is stamp else (0.0, 0.1, math.pi / 2)
+    def pose_at(at, *, frame="map"):
+        assert at is stamp or at == pytest.approx(0.8)
+        if frame == "odom":
+            return (0.0, 0.0, 0.0) if at is stamp else (0.0, 0.1, math.pi / 2)
+        return photo_map if at is stamp else scan_map
+
+    real._pose_at = pose_at
     monkeypatch.setattr(grounding, "see_probability", lambda *args, **kwargs: 1.0)
     monkeypatch.setattr(grounding, "locate_in_picture", lambda *args: ((560, 100, 720, 400), False))
 
     real._see_target("chair")
 
     track, = tracker.objects()
-    assert (track.x, track.y) == pytest.approx((2.2, 0.1))
+    assert (track.x, track.y) == pytest.approx(expected)
 
 
 def test_floor_flat_visual_object_drives_onto_free_floor():

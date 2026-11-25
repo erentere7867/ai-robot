@@ -1002,7 +1002,7 @@ def test_locate_crop_ranks_returns_by_distance_from_the_photo_pose():
     place = locate_crop(RIG["front_camera"], (560, 100, 720, 400),
                         scan=(ranges, -math.pi, math.tau / 360), scan_in_camera=(4.0, 0.0, 0.0))
     assert place is not None and place.how == "lidar"
-    assert math.hypot(place.x, place.y) - place.radius == pytest.approx(3.0)
+    assert math.hypot(place.x - 4.0, place.y) - place.radius == pytest.approx(3.0)
 
 
 def test_locate_in_picture_refines_the_strongest_third_when_every_third_is_positive():
