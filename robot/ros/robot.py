@@ -221,17 +221,7 @@ class RosRobot(SimRobot):
             setattr(goal, key, value)
         if watch is not None:
             self._check_goal(watch)
-        pose = fields.get("pose") if name == "navigate_to_pose" else None
-        to = (pose.pose.position.x, pose.pose.position.y) if pose is not None else None
-        route_sample: tuple[float, Point] | None = None
-
-        def feedback(msg: Any) -> None:
-            nonlocal route_sample
-            sample = msg.feedback
-            pos = sample.current_pose.pose.position
-            route_sample = sample.distance_remaining, (pos.x, pos.y)
-
-        sent = client.send_goal_async(goal, feedback_callback=feedback) if to is not None else client.send_goal_async(goal)
+        sent = client.send_goal_async(goal)
         try:
             while not sent.done():
                 self._step(0.0, 0.0)
@@ -247,41 +237,23 @@ class RosRobot(SimRobot):
             raise PathBlocked(f"{name} refused the goal")
         self._goal, result = handle, handle.get_result_async()
         next_check = 0.0
-        best_gap, best_route, since = math.inf, math.inf, self.t
-        previous: tuple[float, Point] | None = None
-        route_at = (self.x, self.y)
+        visited = [(self.x, self.y)]
+        since = self.t
         try:
             while not result.done():
                 self._step(0.0, 0.0)
                 if watch is not None and time.monotonic() >= next_check:
                     self._check_goal(watch)
                     next_check = time.monotonic() + 0.2
-                if to is not None and not result.done():
+                if name == "navigate_to_pose" and not result.done():
+                    # Replanning can change path length without motion, and repeated recovery can retrace the same
+                    # stretch. Only reaching new ground counts, including a detour that leads away from the goal.
                     here = (self.x, self.y)
-                    gap = math.dist(to, here)
-                    if gap < best_gap - PROGRESS_M:
-                        best_gap, since = gap, self.t
-                    # An apartment route measured 13.12 m for a 7.23 m straight line. Count progress along detours,
-                    # but not a shorter replan while stationary or Nav2's zero feedback when no path is available.
-                    sample = route_sample
-                    if sample is not None and sample != previous:
-                        left, at = sample
-                        if math.isfinite(left) and left > 0:
-                            if previous is None:
-                                best_route, route_at = left, at
-                            else:
-                                change = left - previous[0]
-                                travelled = math.dist(at, previous[1])
-                                if change > travelled + PROGRESS_M:
-                                    best_route, route_at = left, at
-                                elif change < 0:
-                                    if travelled == 0 or -change > travelled + PROGRESS_M:
-                                        best_route, route_at = min(best_route, left), at
-                                    elif left < best_route - PROGRESS_M and math.dist(at, route_at) >= PROGRESS_M:
-                                        best_route, route_at, since = left, at, self.t
-                            previous = sample
+                    if all(math.dist(here, point) >= PROGRESS_M for point in reversed(visited)):
+                        visited.append(here)
+                        since = self.t
                     if self.t - since > PROGRESS_S:
-                        raise PathBlocked(f"no nearer to ({to[0]:.1f}, {to[1]:.1f}) in {PROGRESS_S:g} s")
+                        raise PathBlocked(f"no navigation progress for {PROGRESS_S:g} s")
         except BaseException as exc:
             handle.cancel_goal_async()
             self._publish(0.0, 0.0)
