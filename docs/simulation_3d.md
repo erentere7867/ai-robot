@@ -163,7 +163,8 @@ on the development PC GPU at temperature 0.1:
 | Same plus 768 px images, plain badges, colours and finish review | 27/50 | 0.8–2.8 s (cache hit or miss) |
 
 On identical code, a 512-token thinking cap gave 32/50 versus 26/50 without thinking (16.3 versus 5.0 s per
-task), and 9/10 versus 8/10 on a small 3D set. The original 3D audit scored:
+task). Relative-motion tasks improved from 3/8 without thinking to 6/8 with it. The small 3D set scored
+9/10 with thinking versus 8/10 without it. The original 3D audit scored:
 
 | Run | `apt_0` | `v3_sc0_staging_00` | Total |
 | :--- | ---: | ---: | ---: |
