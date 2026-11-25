@@ -1128,33 +1128,82 @@ def test_a_thing_mapped_into_a_walls_margin_is_approached_from_the_nearest_floor
         sim._go(far, 0.0)
 
 
-def test_a_search_steps_back_from_a_likely_way_with_no_floor_to_see_the_thing_whole():
+def test_frontier_reranker_promotes_high_confidence_direction_and_falls_back_below_threshold():
+    # Two-wing scene: closer frontier in rear-left, farther frontier in front; robot at origin facing +x.
+    scene = Scene(
+        14.0, 12.0, [], {},
+        walls=[((-1.5, 0.5), (-1.5, 4.5)), ((2.5, -4.0), (2.5, 1.5))],
+        start=Pose(0.0, 0.0, 0.0),
+    )
     real = object.__new__(RealRobot)
-    SimRobot.__init__(real, Scene(10.0, 10.0, [], {}))
-    real.search_log, asked, floor, real._stepped_back = [], [], {"front_camera": []}, False
+    SimRobot.__init__(real, scene)
+    real.search_log, real._searching = [], True
+    real.coverage = np.zeros_like(real.occupied)
+    real._cover()
+    rgb_front = np.full((8, 8, 3), 200, dtype=np.uint8)
+    rgb_left = np.full((8, 8, 3), 50, dtype=np.uint8)
+    rgb_right = np.full((8, 8, 3), 10, dtype=np.uint8)
+    real.perception = SimpleNamespace(frames={
+        "front_camera": (0.0, rgb_front),
+        "rear_left_camera": (0.0, rgb_left),
+        "rear_right_camera": (0.0, rgb_right),
+    })
+    # Two discovered frontiers: rear-left is closer (1.8 m), front is farther (3.0 m).
+    near_left = (1.8, (-0.9, 1.5), (-0.9, 1.5))
+    far_front = (3.0, (3.0, 0.0), (3.0, 0.0))
+    asked_means: list[float] = []
 
-    def spots(camera: str, **_: Any) -> tuple:
-        asked.append(camera)
-        return np.zeros((4, 4, 3), np.uint8), floor.get(camera, [(-2.0, 2.0)])
+    def score_high_front(msgs: list) -> float:
+        import base64
 
-    real.floor_spots = spots
-    odds = {"front_camera": 0.95}
-    real.brain = SimpleNamespace(yes_probability=lambda _: odds.get(asked[-1], 0.07))
-    stop = next(real._next_stops("blue bicycle", None, []))  # right in front: the bicycle itself leaves no floor that way
-    assert isinstance(stop, Pose) and (round(stop.x, 2), round(stop.y, 2), stop.yaw) == (-1.0, 0.0, 0.0)
-    assert real.search_log[-1].endswith("stepped back to see front whole")
-    assert list(real._next_stops("blue bicycle", None, [])) == [(-2.0, 2.0)]  # once a search: no second step back
-    real._stepped_back = False
-    odds["front_camera"] = 0.3  # likeliest, but unlikely: nothing worth backing off to see
-    assert list(real._next_stops("blue bicycle", None, [])) == [(-2.0, 2.0)]
-    assert real.search_log[-1].endswith("went rear-left")
-    odds["front_camera"] = 0.95
-    assert list(real._next_stops("blue bicycle", None, [(-1.0, 0.0)])) == [(-2.0, 2.0)]  # stepped back already
-    assert real.search_log[-1].endswith("went rear-left")
-    floor.update({"rear_left_camera": [], "rear_right_camera": []})
-    assert not list(real._next_stops("blue bicycle", None, [(-1.0, 0.0)]))  # nowhere new to go: the search ends
-    floor["front_camera"] = [(1.5, 0.0), (3.0, 0.5)]
-    assert list(real._next_stops("blue bicycle", None, [])) == [(3.0, 0.5)]  # floor that way: the farthest, as before
+        import cv2
+
+        b64 = msgs[0]["content"][0]["image_url"]["url"].split(",", 1)[1]
+        arr = cv2.imdecode(np.frombuffer(base64.b64decode(b64), np.uint8), cv2.IMREAD_COLOR)
+        m = float(arr.mean())
+        asked_means.append(m)
+        return 0.85 if m > 150 else 0.15
+
+    real.brain = SimpleNamespace(yes_probability=score_high_front)
+    ordered, note = real._rerank_frontiers("umbrella", [near_left, far_front])
+    assert ordered == [(3.0, 0.0), (-0.9, 1.5)]  # promoted front, kept rear-left as fallback candidate
+    assert len(asked_means) == 2 and all(m > 25 for m in asked_means)  # rear-right had no frontier: never queried
+    assert note.endswith("reranked front frontier first")
+
+    # Below confidence threshold: automatic fallback to nearest frontier (A* path-length order).
+    real.brain = SimpleNamespace(yes_probability=lambda _: 0.30)
+    ordered_low, note_low = real._rerank_frontiers("umbrella", [near_left, far_front])
+    assert ordered_low == [(-0.9, 1.5), (3.0, 0.0)]
+    assert note_low.endswith("below threshold, nearest frontier")
+
+    # Single-direction candidates skip VLM calls entirely.
+    called = Mock(return_value=0.9)
+    real.brain = SimpleNamespace(yes_probability=called)
+    ordered_single, note_single = real._rerank_frontiers("umbrella", [far_front])
+    assert ordered_single == [(3.0, 0.0)] and note_single == "nearest frontier"
+    called.assert_not_called()
+
+
+def test_frontier_search_stops_when_covered_and_filters_live_costmap_obstacles():
+    scene = Scene(12.0, 6.0, [], {}, walls=[((0.0, -3.0), (0.0, 1.0))], start=Pose(-3.0, 0.0, 0.0))
+    real = object.__new__(RealRobot)
+    SimRobot.__init__(real, scene)
+    real.search_log, real._searching = [], True
+    real.brain = SimpleNamespace(yes_probability=Mock(return_value=0.95))
+
+    # Fully covered map -> no frontier candidates, VLM never called, search terminates without looping.
+    real.coverage = np.ones_like(real.occupied)
+    assert list(real._next_stops("umbrella", None, [])) == []
+    real.brain.yes_probability.assert_not_called()
+
+    # Live Nav2 costmap marking the right half lethal (>= 99) removes frontiers there.
+    real.coverage = np.zeros_like(real.occupied)
+    real._cover()
+    assert real._unseen("all")  # has frontiers in the uncovered right room before costmap overlay
+    cm_data = np.zeros((120, 240), dtype=np.int8)
+    cm_data[:, 120:] = 100  # x >= 0.0 blocked on live costmap
+    real._costmap = (cm_data, 0.05, (-6.0, -3.0))
+    assert not any(v.x >= 0.0 for v in real._unseen("all"))
 
 
 @pytest.mark.parametrize(("seen_ago", "answer", "confirmed"), [(0.4, None, True), (6.6, 0.9, True), (6.6, 0.1, False)])
@@ -1305,15 +1354,14 @@ def test_search_uses_unseen_map_frontiers_instead_of_zigzagging_when_no_camera_h
     real = object.__new__(RealRobot)
     SimRobot.__init__(real, scene)
     real._nav_reaches = lambda *_: True
-    real.search_log, real._stepped_back, real._searching = [], False, True
+    real.search_log, real._searching = [], True
     real.coverage = np.zeros_like(real.occupied)
     real._cover()
-    real.floor_spots = lambda camera, **_: (np.zeros((4, 4, 3), np.uint8), [(-1.5, 0.0)])  # already-covered spot
     real.brain = SimpleNamespace(yes_probability=lambda _: 0.15)  # no visual lead in any camera
     stop = next(real._next_stops("umbrella", None, []), None)
     assert stop is not None and stop[0] > -3.0 and stop != (-1.5, 0.0)
     assert math.dist(stop, (-3.0, 0.0)) <= 3.3  # capped to a <=3.2 m path hop along the way around the wall
-    assert real.search_log[-1].endswith("explored unseen area")
+    assert "nearest frontier" in real.search_log[-1]
 
 
 def test_search_toward_and_lean_stationary_look():

@@ -1,7 +1,7 @@
 """Sprocket v2 full ROS 2 robot stack: Nav2 motion, 3-CSI perception, Brain VLM, and CirculatingMemory.
 
 `RealRobot` is a `RosRobot` whose objects, 3D bounds, velocities, and people come from YOLOE-26 looking for the words
-tools ask for, and the tracker (robot/ros/perceive.py); whose vision checks, room names and floor spots come from
+tools ask for, and the tracker (robot/ros/perceive.py); whose vision checks, room names and frontier reranking come from
 LFM3-VL-2B via `Brain`; and whose long-term spatial habits, clear-space observations, and speaker identity persist in
 `CirculatingMemory` (robot/mind/memory.py). The scene truth is used solely for post-run evaluation (`judge`).
 """
@@ -49,12 +49,9 @@ COLOR_WORDS = (*sorted(COLORS), "unknown")
 SMALL = 0.15  # metres across from the middle: a thing this small is something to look at, not an obstacle to plan round
 ROOM_ASK_S = 8.0  # seconds between the vision model's looks at what kind of room the robot is in
 ROOM_ANSWERS = 5  # answers kept per room; more change nothing
-SPOT_AHEAD = (0.7, 1.1, 1.6, 2.2, 3.0, 4.0)  # metres ahead of the camera, for the floor spots the model picks from
-SPOT_ACROSS = 0.5  # metres between neighbouring spots across
-SPOT_GAP = 48  # pixels at least between two spots as seen in a 768-wide picture: spread across the view
-SEARCH_AWAY = 1.6  # metres: keep new search stops well clear of already-driven trail (1.0 m zigzagged across one room)
-STEP_BACK = 1.0  # metres a search backs off from what is too near to name: YOLOE named the blue bicycle from the dock
-# (2.3 m) and 1.05 m from its centre, but beside it (0.2 m from its edge) in 1 of 2 front frames and in 0 of 8
+FRONTIER_AWAY = 1.2  # metres: ignore frontier clusters already within this distance of the search trail or tried stops
+RERANK_CONFIDENCE = 0.5  # minimum VLM score to promote a frontier direction; below this, fall back to nearest frontier
+COSTMAP_BLOCKED = 99  # Nav2 OccupancyGrid cost (>=99 is inscribed/lethal obstacle on the 0..100 scale)
 TRAIL_STEP = 0.25  # metres between lightweight mid-drive snapshots (umbrella corridor window measured ~0.30 m wide)
 ELEVATED_Z = 0.45  # metres above floor: above the 22 cm camera, occluded by tabletops/counters once closer than ~1.2 m
 
@@ -82,11 +79,18 @@ class RealRobot(RosRobot):
             self.coverage = np.zeros_like(grid)
             self._rooms = segment(~grid, RES)
         self._room_answers: list[Counter] = [Counter() for _ in self._rooms]  # the vision model's, per room
-        self.search_log: list[str] = []  # the last search: where the model thought the thing was, stop by stop
+        self.search_log: list[str] = []  # the last search: frontier reranking decisions, stop by stop
         self._trail_views: deque = deque(maxlen=24)  # (mono_t, pose, {cam: (stamp, rgb, depth)}) every TRAIL_STEP m (6 m)
         self._searching = False
         self._search_snap_after = 0.0
         self._search_coverage: dict[str, np.ndarray] = {}
+        self._costmap: tuple[np.ndarray, float, tuple[float, float]] | None = None
+        from nav_msgs.msg import OccupancyGrid
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+
+        costmap_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                                 reliability=ReliabilityPolicy.RELIABLE)
+        self.node.create_subscription(OccupancyGrid, "/global_costmap/costmap", self._on_costmap, costmap_qos)
         self.perception = Perception(self.node, detector, self._pose_at, brain,
                                      scan_bridge=getattr(self, "_scan_bridge", None))
         self.brain = brain
@@ -806,43 +810,33 @@ class RealRobot(RosRobot):
                 return found
         return None
 
-    # ---- spots on the floor, picked by the vision model -----------------------------------------------------------
-    def floor_spots(self, camera: str = "front_camera", width: int = 768, away: tuple = (),
-                    region: str | None = None) -> tuple[np.ndarray | None, list[Point]]:
-        """The camera's newest picture, `width` wide, and the floor spots in its view that the robot can reach (free
-        on its map, with nothing on the map between it and them), on the map; none within SEARCH_AWAY of a point in
-        `away`, nor outside `region` (a room) when one is given."""
-        import cv2
+    # ---- frontier-first search with VLM semantic reranking --------------------------------------------------------
+    def _on_costmap(self, msg: Any) -> None:
+        info = msg.info
+        data = np.asarray(msg.data, dtype=np.int8).reshape(info.height, info.width)
+        self._costmap = (data, float(info.resolution), (float(info.origin.position.x), float(info.origin.position.y)))
 
-        frame = self.perception.frames.get(camera)
-        pose = self._pose_at(frame[0]) if frame is not None else None
-        if pose is None:
-            return None, []
-        cam, rgb = RIG[camera], frame[1]
-        k = width / cam.width
-        img = cv2.resize(rgb, (width, round(rgb.shape[0] * k)), interpolation=cv2.INTER_AREA)
-        spots: list[Point] = []
-        marks: list[tuple[float, float]] = []
-        for ahead in SPOT_AHEAD:
-            for i in range(-6, 7):
-                across = i * SPOT_ACROSS
-                bx = cam.x + ahead * math.cos(cam.yaw) - across * math.sin(cam.yaw)
-                by = cam.y + ahead * math.sin(cam.yaw) + across * math.cos(cam.yaw)
-                uv = cam.project(bx, by, 0.0)
-                if uv is None:
-                    continue
-                u, v = uv[0] * k, uv[1] * k
-                if any(math.dist((u, v), m) < SPOT_GAP * k * cam.width / 768 for m in marks):
-                    continue
-                mx, my = to_map(pose, bx, by)
-                if self._occ(mx, my, self.inflated) or not self._clear_line(pose[:2], (mx, my)):
-                    continue
-                if any(math.dist((mx, my), a) < SEARCH_AWAY for a in away) or \
-                        (region and self._room_at(mx, my) != region):
-                    continue
-                spots.append((mx, my))
-                marks.append((u, v))
-        return img, spots
+    def _search_blocked(self) -> np.ndarray:
+        """Occupancy mask combining static inflated walls with live Nav2 global costmap lethal/inscribed obstacles."""
+        blocked = self.inflated
+        costmap = getattr(self, "_costmap", None)
+        if costmap is None:
+            return blocked
+        data, res, (ox, oy) = costmap
+        rows, cols = np.nonzero(data >= COSTMAP_BLOCKED)
+        if not rows.size:
+            return blocked
+        wx = ox + (cols + 0.5) * res
+        wy = oy + (rows + 0.5) * res
+        nx, ny = blocked.shape
+        ii = ((wx + self.scene.width / 2) / RES).astype(int)
+        jj = ((wy + self.scene.height / 2) / RES).astype(int)
+        inside = (ii >= 0) & (ii < nx) & (jj >= 0) & (jj < ny)
+        if not inside.any():
+            return blocked
+        out = blocked.copy()
+        out[ii[inside], jj[inside]] = True
+        return out
 
     def begin(self) -> None:
         super().begin()
@@ -854,7 +848,6 @@ class RealRobot(RosRobot):
     def search(self, description: str, area: str = "here", *, toward: str = "") -> Object | None:
         self.search_log = []
         self._search_from = len(self.trace.poses)  # where this search's own trail begins
-        self._stepped_back = False  # once a search: a second step back backed away from "kitchen" again and again
         self._searching = True
         self._search_snap_after = time.monotonic()
         # Keep per-target coverage within one request (cleared in begin()) so a follow-up search(near=...) checks
@@ -879,10 +872,11 @@ class RealRobot(RosRobot):
                 trail.append((x, y))
         return trail
 
-    def _frontier_steps(self, frontiers: list[Pose], max_leg: float = 3.2) -> list[Point]:
-        """Nearest frontier by A* path length (not Euclidean through walls), capped to `max_leg` m so cameras and
-        mid-leg trail snapshots (4 m window) inspect every corridor along the way instead of driving 12 m blind."""
-        candidates: list[tuple[float, Point]] = []
+    def _frontier_plans(self, frontiers: list[Pose], max_leg: float = 3.2) -> list[tuple[float, Point, Point]]:
+        """Reachable frontiers sorted by A* path length (not Euclidean through walls), capped to `max_leg` m so
+        cameras and mid-leg trail snapshots (4 m window) inspect every corridor along the way instead of driving
+        12 m blind. Returns `(path_dist, end_point, heading_point)` deduplicated by `end_point`."""
+        candidates: list[tuple[float, Point, Point]] = []
         for v in frontiers:
             path = self._plan((v.x, v.y), 0.25)
             if not path:
@@ -897,64 +891,83 @@ class RealRobot(RosRobot):
                     if not self._occ(*cand, self.inflated):
                         end = cand
                 dist += seg
-            candidates.append((dist, end))
-        return list(dict.fromkeys(end for _, end in sorted(candidates, key=lambda item: item[0])))
+            candidates.append((dist, end, path[0]))
+        seen: set[Point] = set()
+        out: list[tuple[float, Point, Point]] = []
+        for item in sorted(candidates, key=lambda c: c[0]):
+            if item[1] not in seen:
+                seen.add(item[1])
+                out.append(item)
+        return out
+
+    def _frontier_steps(self, frontiers: list[Pose], max_leg: float = 3.2) -> list[Point]:
+        return [end for _, end, _ in self._frontier_plans(frontiers, max_leg)]
+
+    def _camera_for(self, point: Point) -> str:
+        """Camera whose horizontal sector faces `point` from the robot's current pose."""
+        bearing = wrap(math.atan2(point[1] - self.y, point[0] - self.x) - self.yaw)
+        return min(RIG, key=lambda name: abs(wrap(bearing - RIG[name].yaw)))
+
+    def _rerank_frontiers(self, description: str,
+                          candidates: list[tuple[float, Point, Point]]) -> tuple[list[Point], str]:
+        """Rerank discovered frontier candidates semantically with the VLM.
+
+        Only cameras facing at least one discovered frontier are scored. If there is only one candidate/direction,
+        no VLM/frames are available, or the top score is below `RERANK_CONFIDENCE`, falls back automatically to
+        nearest-frontier (A* path-length) order. Every candidate stays in the returned list so Nav2 tries the next
+        frontier if an earlier one is blocked on the live costmap.
+        """
+        nearest = [end for _, end, _ in candidates]
+        brain = getattr(self, "brain", None)
+        if len(candidates) <= 1 or brain is None:
+            return nearest, "nearest frontier"
+        tagged = [(dist, end, self._camera_for(head)) for dist, end, head in candidates]
+        cams = list(dict.fromkeys(cam for _, _, cam in tagged))
+        if len(cams) <= 1:
+            return nearest, "nearest frontier"
+        frames = getattr(getattr(self, "perception", None), "frames", {})
+        scores: dict[str, float] = {}
+        for cam in cams:
+            frame = frames.get(cam)
+            if frame is None:
+                continue
+            rgb = frame[1] if isinstance(frame, tuple) else frame
+            if rgb is None or not getattr(rgb, "size", 0):
+                continue
+            scores[cam] = brain.yes_probability(_with_image(data_url(rgb, max_width=512), (
+                f"This camera faces an unexplored area in a home. The robot is looking for {description}. "
+                f"Is {description} likely to be found in this direction? Answer yes or no."
+            )))
+        if not scores:
+            return nearest, "nearest frontier"
+        named = ", ".join(f"{c.replace('_camera', '').replace('_', '-')} {q:.0%}" for c, q in scores.items())
+        best_cam, best_p = max(scores.items(), key=lambda kv: kv[1])
+        if best_p < RERANK_CONFIDENCE:
+            return nearest, f"{named}: below threshold, nearest frontier"
+        promoted = sorted(
+            (item for item in tagged if scores.get(item[2], 0.0) >= RERANK_CONFIDENCE),
+            key=lambda item: (-scores[item[2]], item[0]),
+        )
+        rest = [item for item in tagged if scores.get(item[2], 0.0) < RERANK_CONFIDENCE]
+        ordered = [end for _, end, _ in (*promoted, *rest)]
+        return ordered, f"{named}: reranked {best_cam.replace('_camera', '').replace('_', '-')} frontier first"
 
     def _next_stops(self, description: str, region: str | None, tried: list[Point]) -> Iterator[Point | Pose]:
-        """Where a search looks next, judged by the vision model from what each camera shows: for each direction with
-        floor it can reach away from where it already looked, how likely going that way leads to the thing (a yes/no
-        answer's probability); it drives to the farthest such floor in the likeliest direction. Asked to pick one of
-        20-odd numbered dots across the three pictures instead, the 2B model took the last number offered nearly
-        every time ("dot 23 of 23", "dot 4 of 4") with reasons like "most likely at Dot July".
+        """Frontier-first exploration with VLM semantic reranking.
 
-        Every camera is asked, also one with no floor to drive to that way: there the thing may be right in front,
-        too near for the detector to name. Beside the blue bicycle YOLOE found no bike in 24 frames, the vision model
-        said yes to that front picture with 95% (7% for the way the search then went), and only the cameras with floor
-        had been asked. Then the robot steps back, still facing that way, to see the thing whole."""
-        options = []
-        for cam in RIG:
-            img, spots = self.floor_spots(cam, width=512, away=(*tried, *self._search_trail(), (self.x, self.y)),
-                                          region=region)
-            if img is None:
-                continue
-            p = self.brain.yes_probability(_with_image(data_url(img), (
-                f"This picture is from the camera of a small robot looking for {description} in a home. Would going "
-                f"the way this picture shows likely lead to {description}? Answer yes or no.")))
-            options.append((p, cam, spots))
-        if not options:
+        Extracts clustered frontier boundaries from the 2D occupancy/costmap grid, plans A* hops capped to 3.2 m,
+        and uses the VLM strictly to rerank those frontier candidates (falling back to nearest frontier below
+        `RERANK_CONFIDENCE`). Yields every candidate so Nav2 keeps trying if a top candidate is blocked.
+        """
+        away = (*tried, *self._search_trail(), (self.x, self.y))
+        frontiers = [v for v in self._unseen(region or "all")
+                     if all(math.dist((v.x, v.y), a) >= FRONTIER_AWAY for a in away)]
+        candidates = [c for c in self._frontier_plans(frontiers) if c[1] not in tried]
+        if not candidates:
             return
-        named = ", ".join(f"{c.replace('_camera', '').replace('_', '-')} {q:.0%}" for q, c, _ in options)
-        p, cam, spots = max(options, key=lambda o: o[0])
-        facing = self.yaw + RIG[cam].yaw
-        back = self._floor_toward(facing + math.pi, STEP_BACK)
-        stop: Point | Pose | None
-        if not spots and p >= 0.5 and not self._stepped_back and all(
-                math.dist(back, a) >= STEP_BACK / 2 for a in (*tried, (self.x, self.y))):
-            stop, went, self._stepped_back = Pose(*back, math.degrees(facing)), "stepped back to see {} whole", True
-        else:
-            p, cam, spots = max((o for o in options if o[2]), key=lambda o: o[0], default=(0.0, cam, []))
-            cov = self.coverage if getattr(self, "_searching", False) and self.walls.any() else None
-            fresh = [s for s in spots if cov is None or not self._occ(*s, cov)]
-            if p >= 0.5 and spots:
-                # Strong visual lead: prefer uncovered floor in that camera's view before already-covered floor.
-                stop = max(fresh or spots, key=lambda s: math.dist(s, (self.x, self.y)))
-                went = "went {}"
-            elif cov is not None:
-                # No promising visual lead in any camera (<50%): drive to the nearest uncovered map frontier instead
-                # of zigzagging across already-seen rooms (cut apt_0 full sweep from 14+ zigzags to 5 stops).
-                away = (*tried, *self._search_trail(), (self.x, self.y))
-                frontiers = [v for v in self._unseen(region or "all")
-                             if all(math.dist((v.x, v.y), a) >= 1.2 for a in away)]
-                steps = [end for end in self._frontier_steps(frontiers) if end not in tried]
-                if steps:
-                    self._log_search_stop(description, f"{named}: explored unseen area")
-                    yield from steps
-                stop, went = max(fresh, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
-            else:
-                stop, went = max(spots, key=lambda s: math.dist(s, (self.x, self.y)), default=None), "went {}"
-        if stop is not None and stop not in tried:
-            self._log_search_stop(description, f"{named}: {went.format(cam.replace('_camera', '').replace('_', '-'))}")
-            yield stop
+        stops, note = self._rerank_frontiers(description, candidates)
+        self._log_search_stop(description, note)
+        yield from stops
 
     def _log_search_stop(self, description: str, message: str) -> None:
         self.search_log.append(message)

@@ -15,6 +15,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -89,25 +90,128 @@ def _box_sum(mask: np.ndarray, half: int) -> np.ndarray:
     return total[k:, k:] - total[:-k, k:] - total[k:, :-k] + total[:-k, :-k]
 
 
+@dataclass(frozen=True)
+class Frontier:
+    """A clustered boundary between explored/covered free floor and unknown/unseen space."""
+
+    x: float
+    y: float
+    yaw: float  # radians, facing into the unknown/unseen space
+    size: int  # unknown-cell gain within reach, or cluster cell count when reach <= 0
+
+
+def _touches_mask(mask: np.ndarray) -> np.ndarray:
+    """Cells with at least one 4-neighbour set in `mask`."""
+    touches = np.zeros_like(mask, dtype=bool)
+    touches[1:, :] |= mask[:-1, :]
+    touches[:-1, :] |= mask[1:, :]
+    touches[:, 1:] |= mask[:, :-1]
+    touches[:, :-1] |= mask[:, 1:]
+    return touches
+
+
+def _connected_clusters(mask: np.ndarray, min_cells: int, max_span_cells: float) -> list[list[tuple[int, int]]]:
+    """8-connected components of `mask`, splitting long curves/rings wider than `max_span_cells`."""
+    rows, cols = np.nonzero(mask)
+    if not rows.size:
+        return []
+    remaining = {(int(r), int(c)) for r, c in zip(rows, cols, strict=True)}
+    clusters: list[list[tuple[int, int]]] = []
+    while remaining:
+        seed = next(iter(remaining))
+        remaining.remove(seed)
+        comp = [seed]
+        stack = [seed]
+        while stack:
+            r, c = stack.pop()
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nb = (r + dr, c + dc)
+                    if nb in remaining:
+                        remaining.remove(nb)
+                        comp.append(nb)
+                        stack.append(nb)
+        if len(comp) < min_cells:
+            continue
+        r_min = min(r for r, _ in comp)
+        r_max = max(r for r, _ in comp)
+        c_min = min(c for _, c in comp)
+        c_max = max(c for _, c in comp)
+        if max_span_cells > 0 and math.hypot(r_max - r_min, c_max - c_min) > max_span_cells:
+            # Split long boundaries / 360-degree rings into bounded spatial tiles so each direction gets a candidate.
+            step = max(1, int(round(max_span_cells)))
+            tiles: dict[tuple[int, int], list[tuple[int, int]]] = {}
+            for r, c in comp:
+                tiles.setdefault(((r - r_min) // step, (c - c_min) // step), []).append((r, c))
+            for sub in tiles.values():
+                if len(sub) >= min_cells:
+                    clusters.append(sub)
+        else:
+            clusters.append(comp)
+    return clusters
+
+
+def extract_frontier_clusters(
+    free: np.ndarray,
+    unknown: np.ndarray,
+    resolution: float,
+    origin: tuple[float, float],
+    *,
+    min_cells: int = 4,
+    max_span: float = 2.5,
+    reach: float = 0.0,
+    min_gain: int = 0,
+    region_mask: np.ndarray | None = None,
+) -> list[Frontier]:
+    """Extract and cluster frontier boundaries where known free floor meets unknown/unseen space.
+
+    Returns one representative `Frontier` per cluster: the cluster cell closest to its centroid (always a valid
+    free cell on the boundary, never inside an obstacle or the middle of an open ring), facing into unknown space.
+    """
+    known_free = free & ~unknown
+    boundary = known_free & _touches_mask(unknown)
+    gain_map = _box_sum(unknown, max(1, round(reach / resolution))) if reach > 0 else None
+    if gain_map is not None and min_gain > 0:
+        boundary &= gain_map >= min_gain
+    if region_mask is not None:
+        boundary &= region_mask
+    clusters = _connected_clusters(boundary, min_cells, max_span / resolution)
+    if not clusters:
+        # Unvisited room/region (or before first coverage pass) may have free unknown floor with no covered boundary.
+        fallback = free & unknown
+        if region_mask is not None:
+            fallback &= region_mask
+        if gain_map is not None and min_gain > 0:
+            fallback &= gain_map >= min_gain
+        clusters = _connected_clusters(fallback, min_cells, max_span / resolution)
+    h, w = unknown.shape
+    out: list[Frontier] = []
+    for comp in clusters:
+        mr = sum(r for r, _ in comp) / len(comp)
+        mc = sum(c for _, c in comp) / len(comp)
+        rr, cc = min(comp, key=lambda rc: (rc[0] - mr) ** 2 + (rc[1] - mc) ** 2)
+        r0, r1 = max(0, rr - 2), min(h, rr + 3)
+        c0, c1 = max(0, cc - 2), min(w, cc + 3)
+        ur, uc = np.nonzero(unknown[r0:r1, c0:c1])
+        yaw = math.atan2(float((ur + r0 - rr).mean()), float((uc + c0 - cc).mean())) if ur.size else 0.0
+        size = int(gain_map[rr, cc]) if gain_map is not None else len(comp)
+        out.append(Frontier(origin[0] + (cc + 0.5) * resolution, origin[1] + (rr + 0.5) * resolution, yaw, size))
+    return out
+
+
 def frontiers(data: np.ndarray, resolution: float, origin: tuple[float, float], reach: float = 1.0,
               clearance: float = 0.25, min_gain: int = 20) -> list[tuple[float, float, int]]:
-    """Places worth driving to, as (x, y, gain): free cells that touch unknown space, at least `clearance` from any
-    obstacle (the robot must fit there), each with the number of unknown cells within `reach`. A frontier's cells, not
-    its middle: early in a map the frontier is a ring around the robot, and a ring's middle is where the robot stands."""
+    """Clustered frontier boundaries as (x, y, gain): free cells touching unknown space, at least `clearance` from any
+    obstacle (the robot must fit there), each with the number of unknown cells within `reach`. Representative cells
+    lie on each cluster's boundary, never inside an obstacle or the middle of an open ring."""
     free = (data >= 0) & (data < FREE_BELOW)
     unknown = data < 0
-    touches = np.zeros_like(free)
-    touches[1:, :] |= unknown[:-1, :]
-    touches[:-1, :] |= unknown[1:, :]
-    touches[:, 1:] |= unknown[:, :-1]
-    touches[:, :-1] |= unknown[:, 1:]
     near_wall = _box_sum(data >= FREE_BELOW, max(1, round(clearance / resolution))) > 0
-    gain = _box_sum(unknown, max(1, round(reach / resolution)))
-    cells = free & touches & ~near_wall & (gain >= min_gain)
-    rows, cols = np.nonzero(cells)
-    step = max(1, len(rows) // 400)  # a few hundred candidates are plenty
-    return [(origin[0] + (c + 0.5) * resolution, origin[1] + (r + 0.5) * resolution, int(gain[r, c]))
-            for r, c in zip(rows[::step], cols[::step], strict=True)]
+    return [(f.x, f.y, f.size) for f in extract_frontier_clusters(
+        free & ~near_wall, unknown, resolution, origin, reach=reach, min_gain=min_gain,
+    )]
 
 
 class Explorer:
