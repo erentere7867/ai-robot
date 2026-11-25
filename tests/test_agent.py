@@ -42,12 +42,18 @@ def tool_results(messages: list[dict]) -> list[str]:
     return [m["content"] for m in messages if m["role"] == "tool"]
 
 
+def _text(content: str | list[dict]) -> str:
+    return content[0]["text"] if isinstance(content, list) else content
+
+
 def test_a_result_comes_back_and_a_plain_reply_ends_the_task_after_one_check():
     sim = SimRobot(living_room())
     brain = Scripted(call("turn", degrees=90, direction="left"), say("Done!"), say("Turned left."))
     record = Agent(brain, review=True).do("Turn left 90 degrees.", sim)
     assert record.outcome == "done"
-    assert tool_results(brain.seen[1])[0].startswith("Turned 90 degrees left.\nThis request so far: turned 90 degrees left")
+    moved_result = tool_results(brain.seen[1])[0]
+    assert _text(moved_result).startswith("Turned 90 degrees left.\nThis request so far: turned 90 degrees left")
+    assert isinstance(moved_result, list) and sum(p.get("type") == "image_url" for p in moved_result) == 1
     assert "Before you finish" in brain.seen[2][-1]["content"]  # the stop hook asked once
     assert [t for _, t in sim.trace.said] == ["Turned left."]
     assert [line for line in record.lines() if line.startswith("reply:")] == ['reply: "Turned left."']
@@ -238,7 +244,7 @@ def test_the_next_request_sees_what_the_last_one_did_and_where_it_began():
     agent.do("Go forward a metre.", sim)
     agent.do("Come back.", sim)
     assert "Places you can go_to by name: start (where this request began, 1.0 m behind)" \
-        in tool_results(brain.seen[1])[0]  # a move's result says where the request began, from the new spot
+        in _text(tool_results(brain.seen[1])[0])  # a move's result says where the request began, from the new spot
     second = brain.seen[2]  # the first turn of "Come back." (the first request took two: act, reply)
     assert [m["role"] for m in second] == ["system", "user"]  # one user turn: the last request is told, not replayed
     text = " ".join(p.get("text", "") for p in second[1]["content"])
@@ -247,7 +253,7 @@ def test_the_next_request_sees_what_the_last_one_did_and_where_it_began():
     assert "where you were before (where the request before began, 1.0 m behind)" in text
     assert text.endswith('The user says: "Come back."')
     # After arriving back at "where you were before", "start" is hidden so it doesn't lure the robot back out.
-    returned = tool_results(brain.seen[3])[0]
+    returned = _text(tool_results(brain.seen[3])[0])
     assert "where you were before (where the request before began, here)" in returned
     assert "start (where this request began" not in returned
 
@@ -263,7 +269,7 @@ def test_each_motion_says_what_the_request_has_done_so_far():
     spin = call("turn", degrees=360, direction="left")
     brain = Scripted(spin, spin, say("Done."), say("Spun twice."))
     Agent(brain).do("Spin around twice.", sim)
-    second = tool_results(brain.seen[2])[-1]  # what the model reads after its second full turn
+    second = _text(tool_results(brain.seen[2])[-1])  # what the model reads after its second full turn
     assert "turned 360 degrees left; turned 360 degrees left; 720 degrees of turning in all" in second
     assert "facing the way it began" in second
 
@@ -312,4 +318,4 @@ def test_a_number_written_with_an_exponent_or_a_leading_dot_still_moves_the_robo
                      say("Done."), say("Turned and moved."))
     Agent(brain).do("Turn left a quarter turn, then go forward half a metre.", sim)
     results = tool_results(brain.seen[2])
-    assert results[0].startswith("Turned 90 degrees left.") and "0.5" in results[1]
+    assert _text(results[0]).startswith("Turned 90 degrees left.") and "0.5" in _text(results[1])

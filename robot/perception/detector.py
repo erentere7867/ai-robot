@@ -60,6 +60,10 @@ class Detector:
     def vocabulary(self) -> list[str]:
         return [*self.always, *self.asked]
 
+    def clear(self) -> None:
+        """Drop previous request's asked words so old tasks stop spawning tracks while keeping `always`."""
+        self.asked.clear()
+
     def watch(self, *words: str) -> None:
         """Look for these words from now on, beside the other recent ones (the oldest give way)."""
         for w in (w.lower().strip() for w in words):

@@ -524,6 +524,46 @@ Measured 3D results after these fixes (`vlm2-b`, `vlm2-c`, `vlm2-home`, `vlm2-n1
   `E1` (beanbag, **PASS**, `49.1 s`, 2 turns, `0.64 m`). `E5` (`Turn to face the sofa.`) had 0 bumps in `18.9 s` but
   the 2B model chose `go_to('sofa')` instead of `face('sofa')`.
 
+#### Interactive multi-step & spatial requests (22 November, `apt_0`)
+
+Two live interactive requests exposed general-purpose harness and perception bugs (strictly fixed without task/object
+rules):
+
+- **Colour confirmation on arrival and visual placement (`robot/ros/real.py`).** Looking for `"red bike"` from beside
+  the blue bike placed a false track 2.3 m short on a distant black wheel peeking under a desk (`_ask_color`:
+  `black 98.8%, red 0.7%`), and `sees_now` dropped the requested colour (`is_there("bike")=0.78` vs
+  `is_there("red bike")=0.36`, 768 px `0.001`), confirming arrival on empty floor. `_see_target` now verifies crop
+  colour via shared `_ask_color` before placing a colour-qualified visual track; `sees_now` keeps `track.visual_color`,
+  never fast-passes visual tracks on `last_seen`, and clears stale colour or absent tracks when close-up confirmation
+  fails.
+- **Closed-loop open-loop vision & `_trim_images` caption removal (`robot/agent/agent.py`, `robot/agent/tools.py`).**
+  With `see_after_moves=False`, open-loop `drive`/`go_toward`/`move`/`turn` ran blind for metres without a fresh
+  picture. Default `see_after_moves="front"` now attaches 1 `front_camera` frame after open-loop moves (`go_to` already
+  verifies via `sees_now`), and `Tools.run` sets `self.moved` on failure only when the body actually moved (`>0.02 m`
+  or `>2°`). Evicting Turn 1's images had left `"(older picture removed)"` stubs concatenated onto Turn 1 text,
+  collapsing LFM3-VL-2B's context by Turn 5; `_trim_images` now removes each evicted image with its caption cleanly.
+- **Guarding YOLOE & GPU slots across requests (`robot/agent/tools.py`, `robot/perception/detector.py`,
+  `robot/mind/brain.py`, `robot/ros/perceive.py`, `robot/ros/real.py`).** Location phrases (`"chair in living room"`,
+  `"cup on table"`) and object IDs (`"bike 7"`, `"25 CHAIR"`) previously leaked into YOLOE and spawned bogus tracks;
+  `RELATION` (now including `in/on/by/at`) and shared `_object_id` reject them in `_check_visual_name` and `_resolve`.
+  `RealRobot.begin()` calls `Detector.clear()` (clearing old-task words while `_go()` re-watches `target.label`),
+  `Brain.busy` + `0.15 s` pacing + active-vocabulary filtering stop background `_verify_loop` from saturating
+  `llama-server` during agent turns, `render_annotated_view` hides absent (`present=False`) and resolves merged track
+  IDs so dead badges don't lure `go_to` retries, and `looks_here >= 3` hides `look_back` alongside `look` until moving.
+
+Measured 3D verification (`apt_0`, `think=low`, 0.33x):
+- `"go to the blue bike, then find the red bike and go to it"`: **PASS** (`15` turns, `277.5 s`, zero context
+  collapse; reached blue bike on Turn 1 at `gap 0.6 m`, rejected false close-up red bike, spotted real red bike at
+  `5.3 m` after 1 frontier hop, cleared the desk via `go_toward` with closed-loop front vision, parked `0.3 m` from
+  the real red bike's edge).
+- `"go to the chair next to the big tv in the living room"`: zero stale vocabulary from the prior task
+  (`vocab=['person', 'tv', 'chair']`) and drove into the living room `0.8 m` from the TV, but ran out of 16 turns
+  after 3 distant `chair` tracks (`4.2 m` monocular depth error) dropped mid-approach (`Target lost`) and a stale
+  `"25 CHAIR"` badge plus stationary `look_back` repeats consumed turns (both fixed right after).
+- `"try going under the chair thats next to the big tv in the living room"`: LFM3-VL-2B at `think=low` still attempted
+  `go_to('chair')` before clarifying (3 turns, `16.7 s`) — consistent with `view-goal-Q5jq` above (2B model
+  instruction-following limit on unsupported under-furniture requests, not routed around in code).
+
 ## Hazards found
 
 - **Under the stairs.** Exploring `apt_0`, the robot drove under the open staircase, whose underside slopes down

@@ -33,7 +33,8 @@ SYSTEM = """You are Sprocket, a small wheeled robot who lives with people, like 
 You have three cameras: front, rear-left (behind you on the left) and rear-right (behind you on the right). You act
 only by calling tools. Your motion tools reach open floor outside objects. You cannot park underneath or inside an
 object, climb steps or pick things up. When the requested destination is unsupported, stay put and tell the user.
-Driving somewhere else first does not help. Ask permission before changing the destination.
+Never use go_to, drive or go_toward to try to squeeze underneath/inside furniture or climb stairs — refuse right
+away and ask permission before substituting a nearby spot.
 
 How you work:
 - The pictures are what you see right now. Use look(direction, what) for a fresh picture with candidate IDs
@@ -98,10 +99,11 @@ def _image_part(url: str) -> dict[str, Any]:
 
 class Agent:
     def __init__(self, brain: Any, *, memory: Any = None, live: Any = None, cameras: str = "all",
-                 see_after_moves: bool = False, max_turns: int = MAX_TURNS, think: str = "low",
+                 see_after_moves: bool | str = "front", max_turns: int = MAX_TURNS, think: str = "low",
                  image_width: int = IMAGE_WIDTH, review: bool = False, think_when: str = "always") -> None:
         """`cameras`: the pictures sent with each request, "front", "all" three, or "none" (the object list only);
-        the model asks for others with look. `see_after_moves`: also send fresh pictures after every move, not only when the model looks.
+        the model asks for others with look. `see_after_moves`: "front" (default: send one fresh front_camera frame
+        after moves for closed-loop sight without 3-camera bloat), True (all cameras + full scene), or False.
         `think`: how long the model may reason before each turn: off, low, medium or high (see THINK).
         `image_width`: pixels across each picture the model gets (16:9). `review`: before a task ends, show the
         model the request and what it did once, for a last check (it costs a model turn on every task).
@@ -224,17 +226,23 @@ class Agent:
 
     @staticmethod
     def _trim_images(messages: list[dict[str, Any]]) -> None:
-        """Keep only the newest pictures so a long task fits the model's context."""
+        """Keep only the newest pictures so a long task fits the model's context; remove each dropped picture along
+        with its caption instead of leaving '(older picture removed)' stubs that concatenate into the user prompt."""
         seen = 0
         for msg in reversed(messages):
             content = msg.get("content")
             if not isinstance(content, list):
                 continue
-            for i in range(len(content) - 1, -1, -1):
+            i = len(content) - 1
+            while i >= 0:
                 if content[i].get("type") == "image_url":
                     seen += 1
                     if seen > MAX_IMAGES:
-                        content[i] = {"type": "text", "text": "(older picture removed)"}
+                        content.pop(i)
+                        if i > 0 and content[i - 1].get("type") == "text" and content[i - 1].get("text", "").endswith(":"):
+                            content.pop(i - 1)
+                            i -= 1
+                i -= 1
 
     # ---- the loop ----------------------------------------------------------------------------------------------
     def do(self, instruction: str, robot: Any, speak: bool = True) -> TaskRecord:
@@ -266,7 +274,7 @@ class Agent:
         first = self._observation(robot, tools, list(self.cameras), "What you sense now:")
         if context:
             first["content"].insert(0, {"type": "text", "text": "\n".join(context) + "\n"})
-        first["content"].append({"type": "text", "text": f'The user says: "{instruction}"'})
+        first["content"].append({"type": "text", "text": f'\nThe user says: "{instruction}"'})
         messages.append(first)
         reviewed = False
         last_said = ""
@@ -342,7 +350,7 @@ class Agent:
                     elif call.name == "look" and call.args.get("what") and looks_here >= 3:
                         result, ok = ("Not run: you already looked around from here without moving. Call search(...) "
                                       "or move somewhere else to see new views."), False
-                        blocked_tools.add("look")
+                        blocked_tools.update(("look", "look_back"))
                         record.problems.append("look: already looked around here")
                     elif (call.name == "search" and seen_calls[key] > 1) or (
                         repeats > REPEATS and call.name != "look"
@@ -371,7 +379,7 @@ class Agent:
                             if call.name == "look" and call.args.get("what"):
                                 looks_here += 1
                                 if looks_here >= 3:
-                                    blocked_tools.add("look")
+                                    blocked_tools.update(("look", "look_back"))
                             elif call.name != "look":
                                 blocked_tools.discard(call.name)
                     step.calls.append((call.name, call.args, result, ok))
@@ -386,24 +394,27 @@ class Agent:
                     seen_calls = {k: v for k, v in seen_calls.items() if k[0] == "search"}
                     looks_here = 0
                     blocked_tools.clear()
-                if tools.moved and not self.see_after_moves:  # where places are from here now ("come back here")
+                if tools.moved and self.see_after_moves is not True:  # where places are from here now ("come back here")
                     snap = robot.snapshot()
                     places = self._places_text(robot, snap.get("pose"))
                     if places:
                         messages[-1]["content"] += f"\nNow in the {snap.get('room') or 'room'}. {places}"
-                    tools.moved = False
 
                 heard = self._drain()
                 think = self._budget(news=failed or bool(heard))
-                moved = self.see_after_moves and tools.moved
-                cameras = list(dict.fromkeys([*(self.cameras if moved else ()), *tools.looked]))
+                full_move = self.see_after_moves is True and tools.moved
+                open_loop = any(ok and name in ("go_toward", "drive", "move", "turn") for name, _, _, ok in step.calls)
+                front_move = (self.see_after_moves == "front" and open_loop and bool(self.cameras)
+                              and not tools.looked and not tools.pictures)
+                move_cams = self.cameras if full_move else ("front_camera",) if front_move else ()
+                cameras = list(dict.fromkeys([*move_cams, *tools.looked]))
                 if heard:  # the user spoke mid-task: a new user turn with their words and what the robot senses now
                     header = "".join(f'The user says: "{h}"\n' for h in heard) + "What you sense now:"
                     messages.append(self._observation(robot, tools, cameras, header))
                 elif cameras or tools.pictures:  # pictures come back inside the requesting tool result, as trained: a
                     # new user message would end its tool-use turn and drop the reasoning so far. Skip re-sending the
-                    # full scene list on stationary looks/crops to keep context lean.
-                    seen = self._observation(robot, tools, cameras, "What you sense now:", include_scene=moved)
+                    # full scene list on stationary looks/crops and single-frame post-move snapshots.
+                    seen = self._observation(robot, tools, cameras, "What you sense now:", include_scene=full_move)
                     result_msg = visual_result if visual_result is not None else messages[-1]
                     result_msg["content"] = [{"type": "text", "text": result_msg["content"]}, *seen["content"]]
                 tools.moved, tools.looked = False, []

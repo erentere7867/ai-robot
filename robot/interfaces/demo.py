@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 
 from robot.agent.agent import Agent
-from robot.agent.api import Preempted
+from robot.agent.api import Preempted, SafetyStop
 from robot.agent.instant import instant
 from robot.interfaces.live import Live
 from robot.mind.brain import Brain
@@ -153,10 +153,11 @@ def drive(live: Live, agent: Agent, holder: Holder, new_scene: Any = None, *,
         if busy():
             agent.stop()
             worker.join(5.0)
-        try:
-            holder.sim.stop()
-        except Preempted:
-            pass
+        if holder.sim is not None:
+            try:
+                holder.sim.stop()
+            except Preempted:
+                pass
 
     def do(text: str) -> None:
         print(f"instruct  {text}", flush=True)
@@ -181,6 +182,8 @@ def drive(live: Live, agent: Agent, holder: Holder, new_scene: Any = None, *,
         elif kind == "scene" and new_scene is not None and text in SCENES:
             halt()
             try:
+                if busy():
+                    raise RuntimeError("The previous task is still stopping; try again once it exits.")
                 new_scene(text)
             except Exception as exc:  # noqa: BLE001 - a room that cannot load must not take the page down
                 print(f"error     room {text}: {exc}", flush=True)
@@ -190,6 +193,8 @@ def drive(live: Live, agent: Agent, holder: Holder, new_scene: Any = None, *,
         elif kind == "stop" or (kind == "instruct" and instant(text) == "stop"):
             halt()
             live.update(status="stopped", posture="neutral", chime="uh_oh")
+        elif kind == "instruct" and text and holder.sim is None:
+            live.update(status="failed", problems=["No robot is loaded; select a room."])
         elif kind == "instruct" and text and busy():
             agent.interject(text)  # joins the running task's conversation
         elif kind == "instruct" and text:
@@ -241,13 +246,26 @@ def main() -> None:
     show_cameras(live, holder)
     threading.Thread(target=refresh, args=(live, holder), daemon=True).start()
 
+    shutdown_failed = False
+
     def new_scene(name: str) -> None:
+        nonlocal shutdown_failed
+        if shutdown_failed:
+            raise RuntimeError("Restart the demo and Nav2 before changing rooms.")
         previous = holder.sim
-        holder.sim = make_robot(name, brain)
-        holder.home = HOMES.get("home") if name == "3D apartment" else None
+        reset_apartment = isinstance(previous, RosRobot) and name == "3D apartment"
+        replacement = None if reset_apartment else make_robot(name, brain)
         if isinstance(previous, RosRobot):
+            holder.sim = holder.home = None
+            shutdown_failed = True
             previous.perception.stop()
-            previous.shutdown()
+            try:
+                previous.shutdown()
+            except SafetyStop as exc:
+                raise RuntimeError("Restart the demo and Nav2 before changing rooms.") from exc
+            shutdown_failed = False
+        holder.sim = make_robot(name, brain) if reset_apartment else replacement
+        holder.home = HOMES.get("home") if name == "3D apartment" else None
         agent.forget()  # a new room: earlier requests no longer apply
         live.update(scene=name, status="idle", instruction="", steps=[], todo="", problems=[], said=[], chime="",
                     true_pose=None, true_trail=[], dock=None, true_objects=[])
