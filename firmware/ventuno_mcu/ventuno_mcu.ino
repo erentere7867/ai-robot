@@ -396,10 +396,12 @@ void setup() {
 }
 
 void readRange() {
-  if (!tofOk || !tof.isDataReady()) return;
+  if (!tofOk) return;
+  bool ready = tof.isDataReady();
+  if (!ready && tof.lastError.lastErrorCode == SF_VL53L5CX_ERROR_TYPE::NO_ERROR) return;
   int closest = 4000, validZones = 0;
   bool cliff = false, stepUp = false;
-  if (tof.getRangingData(&tofData)) {
+  if (ready && tof.getRangingData(&tofData)) {
     for (int i = 0; i < 64; i++) {
       if (!tofData.nb_target_detected[i]) continue;
       int zone = i * VL53L5CX_NB_TARGET_PER_ZONE;

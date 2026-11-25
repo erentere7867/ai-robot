@@ -67,14 +67,21 @@ struct VL53L5CX_ResultsData {
   int16_t distance_mm[64];
 };
 VL53L5CX_ResultsData frame{};
-bool frameReady = false, readOk = true;
+bool frameReady = false, readOk = true, readyOk = true;
 void (*duringRangeRead)() = nullptr;
+enum class SF_VL53L5CX_ERROR_TYPE { NO_ERROR, CANNOT_GET_DATA_READY };
 struct SparkFun_VL53L5CX {
+  struct {
+    SF_VL53L5CX_ERROR_TYPE lastErrorCode;
+  } lastError;
   bool begin() { return true; }
   void setResolution(int) {}
   void setRangingFrequency(int) {}
   void startRanging() {}
-  bool isDataReady() { return frameReady; }
+  bool isDataReady() {
+    lastError.lastErrorCode = readyOk ? SF_VL53L5CX_ERROR_TYPE::NO_ERROR : SF_VL53L5CX_ERROR_TYPE::CANNOT_GET_DATA_READY;
+    return readyOk && frameReady;
+  }
   bool getRangingData(VL53L5CX_ResultsData *data) {
     if (duringRangeRead) duringRangeRead();
     frameReady = false;
@@ -230,7 +237,7 @@ int main(int argc, char **argv) {
     loop();
     assertStopped();
   } else {
-    advance(5);
+    advance(scenario == "readiness failure" ? 1 : 5);
     const auto lastGoodFrame = lastRangeMs;
     if (scenario == "invalid distance") publishFrame(64, 0);
     else if (scenario == "invalid status") publishFrame(64, 240, 255);
@@ -240,6 +247,12 @@ int main(int argc, char **argv) {
       readOk = false;
       publishFrame();
       readOk = true;
+    } else if (scenario == "readiness failure") {
+      loop();
+      assertDriving();
+      readyOk = false;
+      loop();
+      readyOk = true;
     } else {
       assert(false);
     }
