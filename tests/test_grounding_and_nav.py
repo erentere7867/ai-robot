@@ -18,6 +18,7 @@ from robot.ros.perceive import Perception
 from robot.ros.real import RealRobot
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
+from tests.perception_fakes import make_detector, make_image_brain
 
 
 def _make_scene(things: list[Thing] | None = None) -> Scene:
@@ -849,16 +850,7 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
 
     real._step = step
     # Vision model says yes wherever the white patch is present
-    import base64
-
-    import cv2
-
-    def yes_prob(messages):
-        url = messages[0]["content"][0]["image_url"]["url"]
-        arr = cv2.imdecode(np.frombuffer(base64.b64decode(url.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
-        return min(0.98, 0.05 + 12.0 * float((arr > 200).mean()))
-
-    real.brain = SimpleNamespace(yes_probability=yes_prob)
+    real.brain = make_image_brain(lambda arr: min(0.98, 0.05 + 12.0 * float((arr > 200).mean())))
     found = real.detect("computer monitor")
     assert len(found) == 1 and found[0].label == "computer monitor" and 1.7 <= found[0].distance <= 2.3
     tid = found[0].id
@@ -1216,7 +1208,6 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     from robot.agent.agent import Agent
     from robot.agent.tools import Tools
     from robot.mind.brain import Reply, ToolCall
-    from robot.perception.detector import Detector
 
     # 1. Location phrases ("chair in living room") and object IDs ("bike 7") never leak into YOLOE vocabulary
     sim = SimRobot(Scene(8.0, 6.0, [Thing("chair", 2.0, 0.0, 0.3)], {}, start=Pose(0.0, 0.0, 0.0)))
@@ -1248,8 +1239,7 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     assert not any("What you sense now:" in p.get("text", "") for p in tool_content)
 
     # 3. Detector.clear() drops previous request's asked words while preserving `always`
-    det = Detector(server=SimpleNamespace(slots=8), always=("person",))
-    det._features = {w: np.zeros(512, np.float32) for w in ("shoes", "umbrella")}
+    det = make_detector(SimpleNamespace(slots=8), ("shoes", "umbrella"))
     det.watch("shoes", "umbrella")
     assert det.vocabulary == ["person", "shoes", "umbrella"]
     det.clear()

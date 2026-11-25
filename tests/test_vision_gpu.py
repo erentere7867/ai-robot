@@ -15,9 +15,10 @@ import pytest
 
 from robot.agent.agent import Agent
 from robot.eval.suite import living_room
-from robot.perception.detector import Detector, _box_mask, _foot
+from robot.perception.detector import _box_mask, _foot
 from robot.perception.gpu import VisionServer
 from robot.sim.world import SimRobot
+from tests.perception_fakes import make_detector
 from tests.test_agent import Scripted, call, say, tool_results
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,15 +78,9 @@ class FakeServer:
         return server.decode(pred, protos, n, conf)
 
 
-def _detector(fake: FakeServer) -> Detector:
-    det = Detector(server=fake)
-    det._features = {w: np.full(512, i, np.float32) for i, w in enumerate(["person", "ball", "cup", "keys", "cat"])}
-    return det
-
-
 def test_the_newest_words_fill_the_slots_and_a_box_takes_its_word_and_feet():
     fake = FakeServer()
-    det = _detector(fake)
+    det = make_detector(fake, ("ball", "cup", "keys", "cat"))
     det.watch("ball", "cup", "keys", "cat")  # 4 slots, one kept for people: the oldest asked word gives way
     assert det.vocabulary == ["person", "cup", "keys", "cat"]
     det.watch("ball")
