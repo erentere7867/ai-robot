@@ -860,7 +860,7 @@ class RealRobot(RosRobot):
         """Nearest frontier by A* path length (not Euclidean through walls), capped to `max_leg` m so cameras and
         mid-leg trail snapshots (4 m window) inspect every corridor along the way instead of driving 12 m blind."""
         candidates: list[tuple[float, Point]] = []
-        for v in frontiers[:6]:
+        for v in frontiers:
             path = self._plan((v.x, v.y), 0.25)
             if not path:
                 continue

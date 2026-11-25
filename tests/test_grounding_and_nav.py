@@ -195,6 +195,15 @@ def test_frontier_tries_next_candidate_when_nav2_success_ends_short():
     assert requested == [(1.0, 0.0), (0.0, 1.5)]
 
 
+def test_frontier_tries_a_reachable_candidate_after_six_blocked_ones():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    robot._plan = lambda end, _: [end]
+    robot._nav_reaches = lambda end: end == (4.0, 1.0)
+    frontiers = [Pose(0.5 * i, 0.0, 0.0) for i in range(1, 7)] + [Pose(4.0, 1.0, 0.0)]
+    assert robot._frontier_step(frontiers, max_leg=5.0) == (4.0, 1.0)
+
+
 def test_ros_robot_goal_point_heading_faces_object():
     scene = _make_scene()
     robot = MockRosRobot(scene)
