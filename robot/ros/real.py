@@ -39,7 +39,7 @@ from robot.ros.perceive import (
     see_probability,
     taken_with,
 )
-from robot.ros.robot import RosRobot
+from robot.ros.robot import CheckedFrontier, RosRobot
 from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing, visual_name
 
 SEEN_NOW = 1.5  # seconds: a track seen this recently is "in view now"
@@ -857,7 +857,7 @@ class RealRobot(RosRobot):
                 trail.append((x, y))
         return trail
 
-    def _frontier_step(self, frontiers: list[Pose], max_leg: float = 3.2) -> Point | None:
+    def _frontier_step(self, frontiers: list[Pose], max_leg: float = 3.2) -> CheckedFrontier | None:
         """Nearest frontier by A* path length (not Euclidean through walls), capped to `max_leg` m so cameras and
         mid-leg trail snapshots (4 m window) inspect every corridor along the way instead of driving 12 m blind."""
         candidates: list[tuple[float, Point]] = []
@@ -876,7 +876,10 @@ class RealRobot(RosRobot):
                         end = cand
                 dist += seg
             candidates.append((dist, end))
-        return next((end for _, end in sorted(candidates, key=lambda item: item[0]) if self._nav_reaches(end)), None)
+        for _, end in sorted(candidates, key=lambda item: item[0]):
+            if self._nav_reaches(end):
+                return CheckedFrontier(*end)
+        return None
 
     def _next_stop(self, description: str, region: str | None, tried: list[Point]) -> Point | None:
         """Where a search looks next, judged by the vision model from what each camera shows: for each direction with

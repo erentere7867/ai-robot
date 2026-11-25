@@ -218,6 +218,21 @@ def test_object_approach_tries_farther_spot_after_rejecting_same_side_goals():
     assert robot._goal_point(target, 0.0) == ((2.0, 0.0), 0.0)
 
 
+def test_frontier_plans_only_once_before_dispatch():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    checks, moves = [], []
+    robot._nav_reaches = lambda end, yaw=0.0: not checks.append(end)
+    robot._act = lambda name, **kwargs: moves.append(name)
+    robot._pose_msg = lambda *pose: pose
+    robot._note_place = lambda: None
+    stop = robot._frontier_step([Pose(2.0, 0.0, 0.0)])
+    assert stop is not None
+    robot._go(stop, 0.0)
+    assert checks == [stop]
+    assert moves == ["navigate_to_pose"]
+
+
 def test_ros_robot_goal_point_heading_faces_object():
     scene = _make_scene()
     robot = MockRosRobot(scene)

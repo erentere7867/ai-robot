@@ -6,7 +6,7 @@ import math
 import threading
 import time
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, NamedTuple
 
 from robot.agent.api import (
     NotFound,
@@ -33,6 +33,11 @@ PROGRESS_S, PROGRESS_M = 30.0, 0.25
 CANCEL_WAIT_S = 2.0
 DIRECT = "direct"
 PLAN_TIMEOUT_S, PLAN_ENDPOINT_M = 2.0, 0.10
+
+
+class CheckedFrontier(NamedTuple):
+    x: float
+    y: float
 
 
 class RosRobot(SimRobot):
@@ -393,11 +398,12 @@ class RosRobot(SimRobot):
         return math.dist(end, (last.x, last.y)) <= PLAN_ENDPOINT_M
 
     def _goal_point(self, target: Point | Pose | Object, distance: float) -> tuple[Point, float] | None:
+        checked_frontier = target if isinstance(target, CheckedFrontier) else None
         checked: set[Point] = set()
         for end, yaw in self._goal_candidates(target, distance):
             if end not in checked:
                 checked.add(end)
-                if self._nav_reaches(end, yaw):
+                if end == checked_frontier or self._nav_reaches(end, yaw):
                     return end, yaw
         if checked:
             raise PathBlocked("Nav2 found no path to a usable goal on its live costmap")
