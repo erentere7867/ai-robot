@@ -375,7 +375,8 @@ class Agent:
                     key = ("say",) if call.name == "say" else (call.name, json.dumps(call.args, sort_keys=True))
                     repeats = repeats + 1 if key == last_call else 1
                     last_call = key
-                    attempts = seen_calls[key] = seen_calls.get(key, 0) + 1
+                    if call.name == "look":
+                        seen_calls[key] = seen_calls.get(key, 0) + 1
                     move_cams: tuple[str, ...] = ()
                     if call.name == "say" and repeats > 1:
                         result, ok = ("Not run: you already spoke. If the request is finished, end with plain text "
@@ -387,14 +388,12 @@ class Agent:
                                       "or move somewhere else to see new views."), False
                         blocked_tools.update(("look", "look_back"))
                         record.problems.append("look: already looked around here")
-                    elif (call.name == "search" and attempts > 1) or (
-                        repeats > REPEATS and call.name != "look"
-                    ) or (call.name == "look" and attempts > REPEATS + 1):
-                        n_prev = (attempts if call.name in ("look", "search") else repeats) - 1
+                    elif (repeats > REPEATS and call.name not in ("look", "search")
+                          or call.name == "look" and seen_calls[key] > REPEATS + 1):
+                        n_prev = (seen_calls[key] if call.name == "look" else repeats) - 1
                         result, ok = (f"Not run: you made this exact call {n_prev} times. Do something "
                                       "different, or if the request is done, reply to the user."), False
-                        if call.name != "search":  # other search(near=...) areas remain valid
-                            blocked_tools.add(call.name)
+                        blocked_tools.add(call.name)
                         record.problems.append(f"{call.name}: repeated {n_prev} times")
                     else:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
@@ -455,7 +454,7 @@ class Agent:
                 if tools.todo.steps and not {c.name for c in reply.tool_calls} & {"todo", "todo_done"}:
                     messages[-1]["content"] += f"\nTo-do list now:\n{tools.todo.text()}"
                 if tools.moved:
-                    seen_calls = {k: v for k, v in seen_calls.items() if k[0] == "search"}
+                    seen_calls.clear()
                     looks_here = 0
                     blocked_tools.clear()
                 if tools.moved and self.see_after_moves is not True:  # where places are from here now ("come back here")

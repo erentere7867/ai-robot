@@ -120,8 +120,13 @@ class Todo:
     done: list[bool] = field(default_factory=list)
 
     def write(self, steps: list[str]) -> None:
-        self.steps = steps
-        self.done = [False] * len(self.steps)
+        if any(not isinstance(step, str) or not step.strip() for step in steps):
+            raise ToolError("the to-do list needs non-empty step descriptions")
+        completed = [step for step, done in zip(self.steps, self.done, strict=True) if done]
+        if len(completed) + len(steps) > MAX_TODO_STEPS:
+            raise ToolError(f"the to-do list can hold at most {MAX_TODO_STEPS} steps including completed steps")
+        self.steps = completed + [step.strip() for step in steps]
+        self.done = [True] * len(completed) + [False] * len(steps)
 
     def tick(self, number: int) -> None:
         if not 1 <= number <= len(self.steps):
@@ -173,12 +178,8 @@ def _check(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError("a whole number")
                 value = int(number)
             elif kind == "array":
-                lo, hi = spec["minItems"], spec["maxItems"]
-                if not isinstance(value, list) or not lo <= len(value) <= hi or not all(
-                    isinstance(item, str) and item.strip() for item in value
-                ):
-                    raise ValueError(f"a list of {lo} to {hi} non-empty strings")
-                value = [item.strip() for item in value]
+                if not isinstance(value, list):
+                    raise ValueError("a list")
             elif not isinstance(value, str) or not value.strip():
                 raise ValueError("a non-empty string")
             else:
@@ -264,7 +265,6 @@ class Tools:
         self.pictures: list[tuple[str, Any]] = []  # sensor evidence with its provenance, not a new live view
         self._tools = {t.name: t for t in self._define()}
         self.began = robot.pose()  # where this request began
-        self._task_pose_start = len(getattr(getattr(robot, "trace", None), "poses", ()))
         self.done: list[str] = []  # each motion of this request, as it went
         self.turned = 0.0  # degrees of turning in all, either way
 
@@ -324,11 +324,6 @@ class Tools:
         if tool.moves and (progress := self._progress(name, checked, res)):
             res = replace(res, text=f"{res.text}\n{progress}")
         return res
-
-    def run(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
-        """Run one call: (what to tell the model, whether it worked). Stops and preemptions propagate."""
-        res = self.execute(name, args)
-        return res.text, res.ok
 
     def _progress(self, name: str, args: dict[str, Any], res: ActionResult) -> str:
         """Keep motion progress compact: always report for repetition-prone steps (turn/move/drive/orbit) or after
@@ -557,8 +552,8 @@ class Tools:
             Tool("recall", "What you know about something: remembered facts and where it was last seen.",
                  {"query": {"type": "string"}}, ("query",), self.recall),
             Tool("todo", "Write a to-do list for a request with several parts, in order. It is shown back to you "
-                         "after every step.",
-                 {"steps": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                         "after every step. A revision keeps completed steps; pass [] to clear unfinished steps.",
+                 {"steps": {"type": "array", "items": {"type": "string"},
                             "maxItems": MAX_TODO_STEPS}}, ("steps",), self.write_todo),
             Tool("todo_done", "Tick off a finished step of the to-do list by its number.",
                  {"step": {"type": "integer", "minimum": 1, "maximum": MAX_TODO_STEPS}}, ("step",), self.todo_done),
@@ -738,21 +733,9 @@ class Tools:
             self.found = found = self.robot.search(what, area=area or "here")
         if found is None:
             log = getattr(self.robot, "search_log", [])
-            poses = getattr(getattr(self.robot, "trace", None), "poses", ())
-            trail = [(x, y) for _, x, y, _ in poses[self._task_pose_start:]] or [
-                (self.robot.pose().x, self.robot.pose().y)
-            ]
-            mapped = [
-                (str(n), p) for n, p in getattr(self.robot, "places", {}).items()
-                if str(n).lower() not in ("start", "where you were before") and hasattr(p, "x")
-            ]
-            unvisited = [n for n, p in mapped if all(math.dist((p.x, p.y), xy) > 2.2 for xy in trail)]
-            hint = f" Areas not visited closely yet: {'; '.join(unvisited[:4])}." if unvisited else ""
-            where = "all reachable areas" if (mapped and not unvisited and area in ("here", "everywhere")) else (
-                "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
-            )
+            where = "everywhere I can reach" if area == "everywhere" else f"in {area}" if area != "here" else "here"
             stops = f" ({len(log)} stops)" if log else ""
-            return f"Searched {where}{stops}: no {what} found.{hint}"
+            return f"Searched {where}{stops}: no {what} found."
         crop = getattr(self.robot, "target_crop", lambda _: None)(found.id)
         if crop is not None:
             self.pictures.append((f"Recorded detection crop for {found.label} ID {found.id} (not a live view):", crop))

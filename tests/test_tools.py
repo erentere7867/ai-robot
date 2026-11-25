@@ -36,7 +36,7 @@ def test_non_finite_numbers_are_refused(value: float) -> None:
     assert not tools.robot.trace.events
 
 
-@pytest.mark.parametrize("steps", [[], ["   "], [{"text": "a step"}], "first; second", ["step"] * 31])
+@pytest.mark.parametrize("steps", [["   "], [{"text": "a step"}], "first; second", ["step"] * 31, ["step"] * 30])
 def test_invalid_todo_cannot_overwrite_progress(steps: object) -> None:
     tools = Tools(SimRobot(living_room()))
     assert tools.execute("todo", {"steps": ["first", "second"]}).ok
@@ -44,6 +44,15 @@ def test_invalid_todo_cannot_overwrite_progress(steps: object) -> None:
     assert not tools.execute("todo", {"steps": steps}).ok
     assert not tools.execute("todo_done", {"step": 2.5}).ok
     assert tools.todo.open_steps() == ["second"]
+
+
+def test_empty_todo_revision_clears_only_unfinished_work() -> None:
+    tools = Tools(SimRobot(living_room()))
+    assert tools.execute("todo", {"steps": [" first ", "second"]}).ok
+    assert tools.execute("todo_done", {"step": 1}).ok
+    result = tools.execute("todo", {"steps": []})
+    assert result.ok and result.text == "To-do list:\n1. [x] first"
+    assert tools.todo.open_steps() == []
 
 
 def test_non_string_target_cannot_trigger_a_search() -> None:
@@ -82,11 +91,9 @@ def test_tools_uses_robot_store_when_memory_not_passed(tmp_path) -> None:
     robot.store = store  # type: ignore[attr-defined]
     tools = Tools(robot)
     assert tools.memory is store
-    _, ok = tools.run("remember", {"fact": "umbrella is in the closet"})
-    assert ok
+    assert tools.execute("remember", {"fact": "umbrella is in the closet"}).ok
     store.close()
 
     reopened = CirculatingMemory(db)
     assert any("umbrella" in f for f in reopened.query_facts("where is my umbrella"))
     reopened.close()
-
