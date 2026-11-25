@@ -31,6 +31,7 @@ CAMERAS = {  # every direction go_toward takes too: the model used each tool's w
 }
 CAMERA_NAMES = {"front_camera": "front", "rear_left_camera": "rear-left", "rear_right_camera": "rear-right"}
 ROBOT_RADIUS = 0.15  # metres, from the robot's centre to its edge
+MAX_TODO_STEPS = 30
 RELATION = re.compile(r"\b(left of|right of|behind|in front of|front of|next to|beside|near|between|on top of|under"
                       r"neath|under|far side of|close to|in|on|by|at)\b")
 RANGE_ORDER = re.compile(r"\b(?:nearest|closest|farthest|furthest)\b", re.IGNORECASE)
@@ -106,7 +107,8 @@ class Tool:
         return {"type": "function", "function": {
             "name": self.name,
             "description": self.description,
-            "parameters": {"type": "object", "properties": self.params, "required": list(self.required)},
+            "parameters": {"type": "object", "properties": self.params, "required": list(self.required),
+                           "additionalProperties": False},
         }}
 
 
@@ -118,7 +120,7 @@ class Todo:
     done: list[bool] = field(default_factory=list)
 
     def write(self, steps: list[str]) -> None:
-        self.steps = [str(s).strip() for s in steps if str(s).strip()]
+        self.steps = steps
         self.done = [False] * len(self.steps)
 
     def tick(self, number: int) -> None:
@@ -139,18 +141,18 @@ class Todo:
 def _num(value: Any) -> float:
     if isinstance(value, bool):
         raise ValueError("a number, not true/false")
-    if isinstance(value, (int, float)):
-        return float(value)
-    m = NUMBER.fullmatch(str(value))
-    if not m or not math.isfinite(number := float(m.group(1))):
-        raise ValueError(f"a number, not {value!r}")
-    return number
+    m = NUMBER.fullmatch(value) if isinstance(value, str) else None
+    if isinstance(value, (int, float)) or m:
+        number = float(m.group(1) if m else value)
+        if math.isfinite(number):
+            return number
+    raise ValueError(f"a finite number, not {value!r}")
 
 
 def _check(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
     """Arguments as the tool needs them, or a ToolError saying exactly what is wrong."""
     if "_unparsed" in args:
-        raise ToolError(f"{tool.name}: could not read the arguments {args['_unparsed']!r}")
+        raise ToolError(f"{tool.name}: send the arguments as a JSON object with named fields")
     unknown = set(args) - set(tool.params)
     if unknown:
         raise ToolError(f"{tool.name} has no argument {', '.join(sorted(unknown))}; "
@@ -166,14 +168,22 @@ def _check(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
             if kind == "number":
                 value = _num(value)
             elif kind == "integer":
-                value = int(_num(value))
-            elif kind == "boolean":
-                value = value if isinstance(value, bool) else str(value).strip().lower() in ("true", "yes", "1")
+                number = _num(value)
+                if not number.is_integer():
+                    raise ValueError("a whole number")
+                value = int(number)
             elif kind == "array":
-                value = value if isinstance(value, list) else [s.strip() for s in str(value).split(";") if s.strip()]
+                lo, hi = spec["minItems"], spec["maxItems"]
+                if not isinstance(value, list) or not lo <= len(value) <= hi or not all(
+                    isinstance(item, str) and item.strip() for item in value
+                ):
+                    raise ValueError(f"a list of {lo} to {hi} non-empty strings")
+                value = [item.strip() for item in value]
+            elif not isinstance(value, str) or not value.strip():
+                raise ValueError("a non-empty string")
             else:
-                value = str(value).strip()
-        except ValueError as exc:
+                value = value.strip()
+        except (ValueError, OverflowError) as exc:
             raise ToolError(f"{tool.name}: {name} must be {exc}") from None
         if "enum" in spec and value not in spec["enum"]:
             low = "-".join(str(value).lower().replace("_", " ").split())
@@ -560,7 +570,8 @@ class Tools:
                  {"seconds": {"type": "number", "minimum": 0.5, "maximum": 600},
                   "until": {"type": "string", "description": "optional: what to wait for, like \"person\""}},
                  ("seconds",), self.wait),
-            Tool("ask", "Ask the user a question out loud and wait for the answer.",
+            Tool("ask", "Ask one specific question out loud when a missing detail affects your next action. "
+                        "Wait for the answer and read it before acting.",
                  {"question": {"type": "string"}}, ("question",), self.ask),
             Tool("remember", "Keep a fact in long-term memory.",
                  {"fact": {"type": "string"}}, ("fact",), self.remember),
@@ -568,9 +579,10 @@ class Tools:
                  {"query": {"type": "string"}}, ("query",), self.recall),
             Tool("todo", "Write a to-do list for a request with several parts, in order. It is shown back to you "
                          "after every step.",
-                 {"steps": {"type": "array", "items": {"type": "string"}}}, ("steps",), self.write_todo),
+                 {"steps": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                            "maxItems": MAX_TODO_STEPS}}, ("steps",), self.write_todo),
             Tool("todo_done", "Tick off a finished step of the to-do list by its number.",
-                 {"step": {"type": "integer", "minimum": 1, "maximum": 30}}, ("step",), self.todo_done),
+                 {"step": {"type": "integer", "minimum": 1, "maximum": MAX_TODO_STEPS}}, ("step",), self.todo_done),
             Tool("say", "Speak mid-task ONLY when you still have more tool calls to make after speaking. Never call "
                         "this for your final reply: end with plain text and no tool call instead.",
                  {"text": {"type": "string"}}, ("text",), self.say),
@@ -840,8 +852,6 @@ class Tools:
 
     def write_todo(self, steps: list[str]) -> str:
         self.todo.write(steps)
-        if not self.todo.steps:
-            raise ToolError("the to-do list needs at least one step")
         return "To-do list:\n" + self.todo.text()
 
     def todo_done(self, step: int) -> str:

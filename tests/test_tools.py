@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from robot.agent.tools import _num
+from robot.agent.tools import Tools, _num
+from robot.eval.suite import living_room
+from robot.sim.world import SimRobot
 
 
 @pytest.mark.parametrize(("text", "expected"), [
@@ -26,11 +28,32 @@ def test_true_and_false_are_not_numbers() -> None:
         _num(True)
 
 
-def test_honest_move_turn_and_go_toward_partial_outcomes() -> None:
-    from robot.agent.tools import Tools
-    from robot.eval.suite import living_room
-    from robot.sim.world import SimRobot
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_non_finite_numbers_are_refused(value: float) -> None:
+    tools = Tools(SimRobot(living_room()))
+    result = tools.execute("move", {"metres": value, "direction": "forward"})
+    assert not result.ok and "finite number" in result.text
+    assert not tools.robot.trace.events
 
+
+@pytest.mark.parametrize("steps", [[], ["   "], [{"text": "a step"}], "first; second", ["step"] * 31])
+def test_invalid_todo_cannot_overwrite_progress(steps: object) -> None:
+    tools = Tools(SimRobot(living_room()))
+    assert tools.execute("todo", {"steps": ["first", "second"]}).ok
+    assert tools.execute("todo_done", {"step": 1}).ok
+    assert not tools.execute("todo", {"steps": steps}).ok
+    assert not tools.execute("todo_done", {"step": 2.5}).ok
+    assert tools.todo.open_steps() == ["second"]
+
+
+def test_non_string_target_cannot_trigger_a_search() -> None:
+    tools = Tools(SimRobot(living_room()))
+    result = tools.execute("go_to", {"target": ["chair"]})
+    assert not result.ok and "non-empty string" in result.text
+    assert not tools.robot.trace.events
+
+
+def test_honest_move_turn_and_go_toward_partial_outcomes() -> None:
     robot = SimRobot(living_room())
     tools = Tools(robot)
 
@@ -51,10 +74,7 @@ def test_honest_move_turn_and_go_toward_partial_outcomes() -> None:
 
 
 def test_tools_uses_robot_store_when_memory_not_passed(tmp_path) -> None:
-    from robot.agent.tools import Tools
-    from robot.eval.suite import living_room
     from robot.mind.memory import CirculatingMemory
-    from robot.sim.world import SimRobot
 
     db = tmp_path / "store.db"
     store = CirculatingMemory(db)

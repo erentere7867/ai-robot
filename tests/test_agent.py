@@ -181,6 +181,62 @@ def test_search_returns_its_crop_before_a_queued_drive(monkeypatch):
     assert not any(e.name == "go_to" for e in sim.trace.events)
 
 
+@pytest.mark.parametrize(("see_after_moves", "pictures"), [("front", 1), (True, 3)])
+def test_post_move_pictures_are_seen_before_another_batched_action(see_after_moves, pictures):
+    sim = SimRobot(living_room())
+    batch = Reply("", tool_calls=[ToolCall("first", "turn", {"degrees": 90, "direction": "left"}),
+                                 ToolCall("second", "move", {"metres": 1, "direction": "forward"})])
+    brain = Scripted(batch, say("I've turned, but haven't moved forward."))
+    Agent(brain, see_after_moves=see_after_moves).do("Turn left and move if the way is clear.", sim)
+    turned, skipped = tool_results(brain.seen[1])
+    assert sum(p["type"] == "image_url" for p in turned) == pictures
+    assert "inspect the returned pictures" in skipped
+    assert [e.name for e in sim.trace.events if e.name in {"turn", "move"}] == ["turn"]
+
+
+@pytest.mark.parametrize("answer", ["right", None])
+def test_clarification_is_read_before_running_an_action(answer):
+    sim = SimRobot(living_room())
+    if answer:
+        sim.replies = [(0, answer)]
+    batch = Reply("", tool_calls=[ToolCall("question", "ask", {"question": "Which way?"}),
+                                 ToolCall("guess", "turn", {"degrees": 90, "direction": "left"})])
+    followup = [call("turn", degrees=90, direction="right")] if answer else []
+    brain = Scripted(batch, *followup, say("I turned right." if answer else "I'm staying put."))
+    Agent(brain, think_when="news").do("Turn toward the side I name.", sim)
+    result, skipped = tool_results(brain.seen[1])
+    assert result == ('The user answered: "right"' if answer else "No answer.")
+    assert "read the result of asking the user" in skipped and brain.thinks[1] == 128
+    turns = [e for e in sim.trace.events if e.name == "turn"]
+    assert len(turns) == bool(answer)
+    if answer:
+        assert turns[0].args["direction"] == "right"
+
+
+def test_a_malformed_call_blocks_its_batch_and_can_be_repaired():
+    sim = SimRobot(living_room())
+    batch = Reply("", tool_calls=[ToolCall("bad", "turn", {"_unparsed": '{"degrees":'}),
+                                 ToolCall("skipped", "move", {"metres": 1, "direction": "forward"})])
+    brain = Scripted(batch, call("turn", degrees=90, direction="left"), say("Turned left."))
+    record = Agent(brain).do("Turn left.", sim)
+    assert record.outcome == "done"
+    bad, skipped = tool_results(brain.seen[1])
+    assert "send the arguments as a JSON object" in bad and "earlier call in this turn failed" in skipped
+    assert [e.name for e in sim.trace.events if e.name in {"turn", "move"}] == ["turn"]
+
+
+def test_empty_model_reply_gets_one_repair_turn():
+    sim = SimRobot(living_room())
+    brain = Scripted(say(""), say("A brown chair."))
+    assert Agent(brain).do("What do you see?", sim).outcome == "done"
+    assert "no answer or tool call" in brain.seen[1][-1]["content"]
+    assert [text for _, text in sim.trace.said] == ["A brown chair."]
+
+    silent = Scripted(say(""), say(""), say("Should not be reached."))
+    assert Agent(silent).do("What do you see?", SimRobot(living_room())).outcome == "failed"
+    assert len(silent.seen) == 2
+
+
 def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
     sim = SimRobot(living_room())
     cut = call("move", metres=1)
@@ -188,6 +244,28 @@ def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
     record = Agent(Scripted(cut)).do("Drive a metre.", sim)
     assert record.outcome == "failed" and "cut off" in sim.trace.said[-1][1]
     assert not any(e.name == "move" for e in sim.trace.events)
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_correction_supersedes_an_answer_or_cut_off_reply(finish_reason):
+    sim = SimRobot(living_room())
+    stale = call("turn", degrees=90, direction="left") if finish_reason == "length" else say("Turning left.")
+    stale.raw = {"choices": [{"finish_reason": finish_reason}]}
+
+    class Corrected(Scripted):
+        def chat(self, messages, tools, think=0, **_):  # noqa: ANN001, ANN003, ANN201
+            if not self.seen:
+                agent.interject("Actually, stay where you are.")
+            return super().chat(messages, tools, think=think)
+
+    brain = Corrected(stale, say("I'll stay here."))
+    agent = Agent(brain)
+    assert agent.do("Turn left.", sim).outcome == "done"
+    correction = brain.seen[1][-1]["content"]
+    assert "Actually, stay where you are." in _text(correction)
+    assert sum(p["type"] == "image_url" for p in correction) == 3
+    assert not any(e.name == "turn" for e in sim.trace.events)
+    assert [text for _, text in sim.trace.said] == ["I'll stay here."]
 
 
 def test_a_side_and_an_edge_gap_compose_without_losing_the_target_id():
