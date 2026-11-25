@@ -347,14 +347,14 @@ class Agent:
                         messages.append({"role": "user", "content": self._review(instruction, record, tools)})
                         think = self._budget(news=False)
                         continue
-                    if reply.text and speak and not spoke_since_action:
-                        robot.say(speakable(reply.text))
-                    step.said = reply.text if not spoke_since_action else ""  # avoid duplicate speech after say()
-                    last_said = (reply.text if not spoke_since_action else "") or last_said
                     open_steps = tools.todo.open_steps()
                     if open_steps:
                         record.problems.append(f"open to-do steps left unfinished: {'; '.join(open_steps)}")
                         return self._finish(robot, record, "failed", last_said)
+                    if reply.text and speak and not spoke_since_action:
+                        robot.say(speakable(reply.text))
+                    step.said = reply.text if not spoke_since_action else ""  # avoid duplicate speech after say()
+                    last_said = (reply.text if not spoke_since_action else "") or last_said
                     return self._finish(robot, record, "done", last_said)
 
                 barrier = ""
@@ -518,6 +518,10 @@ class Agent:
         """One call. A user who speaks during it interrupts it; a plain stop ends the task (Preempted)."""
         self._acting.set()
         try:
+            if not self._heard.empty():
+                if not self._stopped.is_set():
+                    robot.resume()
+                return ActionResult("Not run: the user spoke (their words follow).", False, "interrupted")
             result = tools.execute(name, args)
         except Preempted:
             if self._stopped.is_set() or self._heard.empty():

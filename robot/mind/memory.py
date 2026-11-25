@@ -350,9 +350,9 @@ class CirculatingMemory:
                     place_rows.append((name, float(px), float(py), float(pyaw)))
                 self.db.executemany("INSERT INTO places VALUES (?,?,?,?)", place_rows)
 
-        # Record facts avoiding exact duplicates
+        # Record facts avoiding exact duplicates without overwriting existing timestamps
         for n in (notes or ()):
-            self.remember_fact(n, now_wall=wall)
+            self.remember_fact(n, now_wall=wall, refresh=False)
 
         # Run routine circulation
         self.circulate(now_wall=wall)
@@ -594,7 +594,8 @@ class CirculatingMemory:
                 )
             return None
 
-    def remember_fact(self, text: str, room: str = "", now_wall: float | None = None) -> None:
+    def remember_fact(self, text: str, room: str = "", now_wall: float | None = None,
+                      *, refresh: bool = True) -> None:
         """Store a semantic fact with text embedding, avoiding exact duplicate entries."""
         text = text.strip()
         if not text:
@@ -608,6 +609,11 @@ class CirculatingMemory:
                 self.db.execute(
                     "INSERT INTO facts (text, room, vec, created_at) VALUES (?, ?, ?, ?)",
                     (text, room, _vec_to_blob(vec), now_wall),
+                )
+            elif refresh:
+                self.db.execute(
+                    "UPDATE facts SET created_at = ?, room = CASE WHEN ? != '' THEN ? ELSE room END WHERE text = ?",
+                    (now_wall, room, room, text),
                 )
 
     def notes(self) -> list[str]:
@@ -628,7 +634,12 @@ class CirculatingMemory:
             if sim >= min_score:
                 scored.append((sim, float(created_at or 0.0), row_id, text))
         scored.sort(key=lambda x: (round(x[0], 4), x[1], x[2]), reverse=True)
-        return [(text, created_at) for _, created_at, _, text in scored[:top_k]]
+        picked = scored[:top_k]
+        if len(scored) > top_k:
+            newest = max(scored, key=lambda x: (x[1], x[2]))
+            if newest not in picked:
+                picked[-1] = newest
+        return [(text, created_at) for _, created_at, _, text in picked]
 
     def query_facts(self, query: str, top_k: int = 3, min_score: float = 0.25) -> list[str]:
         """Semantic vector similarity search over facts; returns top matching texts."""

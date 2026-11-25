@@ -571,3 +571,93 @@ def test_restart_recalls_corrected_fact_on_first_prompt_and_fails_without_memory
     Agent(brain3, memory=None).do("Where did I leave my backup key?", robot3)
     assert "dining table" not in _text(brain3.seen[0][1]["content"])
 
+
+def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from robot.eval import home3d
+    from robot.mind import brain as brain_mod
+    from robot.perception import detector as det_mod
+
+    seen_stores: list[object] = []
+    shutdowns: list[int] = []
+
+    class FakeHome:
+        def __init__(self, scene: str, rtf: float = 1.0) -> None:
+            self.scene, self.bumps = scene, 0
+            self.truth = {"objects": []}
+            self.path = [(0.0, 0.0, 0.0, 0.0)]
+            self.world = SimpleNamespace(
+                call=lambda **kw: {"front_camera": {}, "rear_left_camera": {}, "rear_right_camera": {}},
+            )
+
+        def reset(self) -> None:
+            pass
+
+        def wait(self, seconds: float) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def robot(self, detector: object, brain: object, store: object = None) -> SimRobot:
+            seen_stores.append(store)
+            sim = SimRobot(living_room())
+            sim.store = store  # type: ignore[attr-defined]
+            sim.perception = SimpleNamespace(stop=lambda: None)  # type: ignore[attr-defined]
+            sim._perceive_objects = lambda: None  # type: ignore[attr-defined]
+            sim.shutdown = lambda: shutdowns.append(1)  # type: ignore[attr-defined]
+            return sim
+
+    recall_prompts: list[str] = []
+
+    class PromptAwareBrain:
+        def __init__(self, url: str) -> None:
+            self.turn = 0
+
+        def healthy(self) -> bool:
+            return True
+
+        def chat(self, messages, tools, think=0, **_):  # noqa: ANN001, ANN003, ANN201
+            self.turn += 1
+            if self.turn == 1:
+                return call("remember", fact="spare keys are on the couch")
+            if self.turn == 2:
+                return say("Got it.")
+            if self.turn == 3:
+                return call("remember", fact="spare keys are on the dining table")
+            if self.turn == 4:
+                return say("Updated.")
+            if self.turn == 5:
+                return call("turn", degrees=90, direction="left")
+            if self.turn == 6:
+                return say("Turned left.")
+            prompt = _text(messages[1]["content"])
+            recall_prompts.append(prompt)
+            if "dining table (most recent)" in prompt:
+                return say("Your backup key is on the dining table.")
+            return say("I don't know where your keys are.")
+
+    monkeypatch.setattr(home3d, "Home", FakeHome)
+    monkeypatch.setattr(home3d, "out_dir", lambda: tmp_path)
+    monkeypatch.setattr(home3d, "keep_pictures", lambda robot, folder, kept=None: kept if kept is not None else [])
+    monkeypatch.setattr(home3d, "write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(brain_mod, "Brain", PromptAwareBrain)
+    monkeypatch.setattr(det_mod, "Detector", lambda: object())
+
+    with_mem = home3d.run("mem", ["R1R"], ["apt_0"], "http://fake", "front", "off", 1.0, use_memory=True)
+    assert len(with_mem) == 1 and with_mem[0]["passed"] is True
+    assert len(seen_stores) == 2 and seen_stores[0] is not seen_stores[1]
+    assert len(shutdowns) == 2
+    assert len(recall_prompts) == 1 and "Recent conversation:" not in recall_prompts[0]
+
+    seen_stores.clear()
+    shutdowns.clear()
+    recall_prompts.clear()
+    without_mem = home3d.run("nomem", ["R1R"], ["apt_0"], "http://fake", "front", "off", 1.0, use_memory=False)
+    assert len(without_mem) == 1 and without_mem[0]["passed"] is False
+    assert seen_stores == [None, None]
+    assert len(shutdowns) == 2
+    assert len(recall_prompts) == 1 and "Recent conversation:" not in recall_prompts[0]
+
+
