@@ -13,7 +13,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from robot.agent.api import NotFound, Object, PathBlocked, Pose, TargetLost, Timeout, geom, wrap
+from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted, TargetLost, Timeout, geom, wrap
+from robot.agent.skill import Goal, Skill, SkillMachine
 from robot.sim.world import BEARINGS, visual_name
 
 CAMERAS = {  # every direction go_toward takes too: the model used each tool's words for the other ("front-right")
@@ -102,7 +103,7 @@ class Tool:
     params: dict[str, dict[str, Any]]
     required: tuple[str, ...]
     run: Callable[..., str | ActionResult]
-    moves: bool = False  # what the cameras see afterwards is new
+    skill: Skill | None = None
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function", "function": {
@@ -276,8 +277,9 @@ def _match_place(query: str, places: dict[str, Any], pose: Any = None) -> str | 
 class Tools:
     """The tools bound to one robot for one task."""
 
-    def __init__(self, robot: Any, memory: Any = None) -> None:
+    def __init__(self, robot: Any, memory: Any = None, *, machine: SkillMachine | None = None) -> None:
         self.robot = robot
+        self.machine = SkillMachine() if machine is None else machine
         self.memory = memory if memory is not None else getattr(robot, "store", None)
         robot_persists = (
             self.memory is not None
@@ -300,13 +302,16 @@ class Tools:
     def schemas(self) -> list[dict[str, Any]]:
         return [t.schema() for t in self._tools.values()]
 
-    def execute(self, name: str, args: dict[str, Any]) -> ActionResult:
+    def execute(
+        self, name: str, args: dict[str, Any], *, check_interrupt: Callable[[], None] | None = None
+    ) -> ActionResult:
         """Run one call and return its structured outcome. Stops and preemptions propagate."""
         tool = self._tools.get(name)
         if tool is None:
             return ActionResult(f"There is no tool {name!r}. Tools: {', '.join(self._tools)}.", False, "error")
         self.found = None  # what this call found by searching
-        before = self.robot.pose() if tool.moves else None
+        moves = tool.skill not in (None, Skill.WAITING)
+        before = self.robot.pose() if moves else None
         moved_m = 0.0
 
         def motion_note() -> str:
@@ -319,11 +324,11 @@ class Tools:
 
         try:
             checked = _check(tool, args)
-            raw = tool.run(**checked)
-            res = raw if isinstance(raw, ActionResult) else ActionResult(raw, True, "reached" if tool.moves else "ok")
+            raw = self._run(tool, checked, check_interrupt)
+            res = raw if isinstance(raw, ActionResult) else ActionResult(raw, True, "reached" if moves else "ok")
             if self.found is not None and name != "search":
                 res = replace(res, text=f"Searched for it: found {self.found.label} {self.found.id}. {res.text}")
-            if tool.moves:
+            if moves:
                 self.moved = True
         except ToolError as exc:
             return ActionResult(f"Error: {exc}.{motion_note()}", False, "error", moved_m)
@@ -350,11 +355,33 @@ class Tools:
                 if (math.dist((now.x, now.y), (before.x, before.y)) > 0.02
                         or abs((now.yaw - before.yaw + 180) % 360 - 180) > 2.0):
                     self.moved = True
-        if tool.moves:
+        if moves:
             progress = self._progress(name, checked, res)
             if progress:
                 res = replace(res, text=res.text + "\n" + progress)
         return res
+
+    def _run(self, tool: Tool, args: dict[str, Any], check_interrupt: Callable[[], None] | None) -> str | ActionResult:
+        if tool.skill is not None:
+            self.machine.start(Goal(
+                tool.skill,
+                target=args.get("target") or args.get("what") or args.get("direction") or "",
+                region=args.get("area") or args.get("near") or "",
+                timeout=args.get("seconds"),
+            ))
+        ok = False
+        try:
+            if check_interrupt is not None:
+                check_interrupt()
+            result = tool.run(**args)
+            ok = not isinstance(result, ActionResult) or result.ok
+            return result
+        except Preempted:
+            ok = True
+            raise
+        finally:
+            if tool.skill is not None:
+                self.machine.finish(ok)
 
     def _progress(self, name: str, args: dict[str, Any], res: ActionResult) -> str:
         """Keep motion progress compact: always report for repetition-prone steps (turn/move/drive/orbit) or after
@@ -499,11 +526,11 @@ class Tools:
         return [
             Tool("go_to", "Go to and face a named target, searching if needed. For a requested side or gap use "
                           "go_to_side or stop_near.",
-                 {"target": target}, ("target",), self.go_to, moves=True),
+                 {"target": target}, ("target",), self.go_to, skill=Skill.NAVIGATING),
             Tool("go_toward", "Drive roughly the given distance toward an unnamed spot, avoiding obstacles.",
                  {"direction": {"type": "string", "enum": list(BEARINGS)},
                   "metres": {"type": "number", "minimum": 0.3, "maximum": 6}},
-                 ("direction", "metres"), self.go_toward, moves=True),
+                 ("direction", "metres"), self.go_toward, skill=Skill.NAVIGATING),
             Tool("go_to_side", "Drive to one side of a target, when the user names a side: behind it (its far "
                                "side), in front of it, or its left or right.",
                  {"target": target, "side": {"type": "string", "enum": ["behind", "front", "left", "right", "under"],
@@ -511,39 +538,40 @@ class Tools:
                                                             "verified clearance."},
                   "distance": {"type": "number", "minimum": 0.3, "maximum": 5,
                                "description": "Only if requested: gap in metres from the object's edge."}},
-                 ("target", "side"), self.go_to_side, moves=True),
+                 ("target", "side"), self.go_to_side, skill=Skill.NAVIGATING),
             Tool("stop_near", "Drive toward a target and stop with some metres of space between you and it, when the "
                               "user says how far.",
                  {"target": target, "metres": {"type": "number", "minimum": 0.3, "maximum": 5}},
-                 ("target", "metres"), self.stop_near, moves=True),
+                 ("target", "metres"), self.stop_near, skill=Skill.NAVIGATING),
             Tool("move", "Drive straight forward or backward.",
                  {"metres": {"type": "number", "minimum": 0.05, "maximum": 5},
                   "direction": {"type": "string", "enum": ["forward", "backward"]}},
-                 ("metres", "direction"), self.move, moves=True),
+                 ("metres", "direction"), self.move, skill=Skill.NAVIGATING),
             Tool("turn", "Turn on the spot. 90 is a quarter turn, 180 turns around, 360 is a full spin.",
                  {"degrees": {"type": "number", "minimum": 1, "maximum": 1800}, "direction": side},
-                 ("degrees", "direction"), self.turn, moves=True),
+                 ("degrees", "direction"), self.turn, skill=Skill.NAVIGATING),
             Tool("drive", "Free motion for anything the other tools don't cover (wiggle, rock, slow spin, arc).",
                  {"speed": {"type": "number", "minimum": -0.5, "maximum": 0.5,
                             "description": "metres per second, + forward, - backward"},
                   "turn_rate": {"type": "number", "minimum": -120, "maximum": 120,
                                 "description": "degrees per second, + left, - right"},
                   "seconds": {"type": "number", "minimum": 0.1, "maximum": 60}},
-                 ("speed", "turn_rate", "seconds"), self.drive, moves=True),
+                 ("speed", "turn_rate", "seconds"), self.drive, skill=Skill.NAVIGATING),
             Tool("orbit", "Drive in circles around a target.",
                  {"target": target, "laps": {"type": "number", "minimum": 0.25, "maximum": 10},
                   "direction": {"type": "string", "enum": ["clockwise", "anticlockwise"]},
                   "gap": {"type": "number", "minimum": 0.1, "maximum": 2,
                           "description": "metres between you and its edge; default 0.5"}},
-                 ("target", "laps", "direction"), self.orbit, moves=True),
+                 ("target", "laps", "direction"), self.orbit, skill=Skill.NAVIGATING),
             Tool("follow", "Follow a person or something that moves (a pet, a toy car), staying about a metre "
                            "away, until the user says stop (or for `seconds`).",
                  {"target": {"type": "string", "description": "\"user\", an id, or a description like \"the cat\""},
                   "seconds": {"type": "number", "minimum": 1, "maximum": 3600}},
-                 ("target",), self.follow, moves=True),
-            Tool("face", "Turn once to face a target.", {"target": target}, ("target",), self.face, moves=True),
+                 ("target",), self.follow, skill=Skill.FOLLOWING),
+            Tool("face", "Turn once to face a target.", {"target": target}, ("target",), self.face,
+                 skill=Skill.NAVIGATING),
             Tool("keep_facing", "Keep turning to face a target as it moves, until the user says stop.",
-                 {"target": target}, ("target",), self.keep_facing, moves=True),
+                 {"target": target}, ("target",), self.keep_facing, skill=Skill.FOLLOWING),
             Tool("search", "Find an unlisted object: check memory, then drive to inspect unseen floor if needed.",
                  {"what": {"type": "string", "description": "a visual name, like \"red ball\" or \"keys\", "
                                                            "without a distance comparison"},
@@ -552,7 +580,7 @@ class Tools:
                   "near": {"type": "string", "description": "Known or visible landmark/area to approach first."},
                   "toward": {"type": "string", "enum": list(BEARINGS),
                              "description": "Camera direction to head first."}},
-                 ("what",), self.search, moves=True),
+                 ("what",), self.search, skill=Skill.SEARCHING),
             Tool("look", "Inspect fresh camera pictures without driving. To label what you see, supply its visual name.",
                  {"direction": {"type": "string", "enum": list(CAMERAS)},
                   "what": {"type": "string", "description": "Optional object name to detect and mark, e.g. 'bag'."}},
@@ -563,7 +591,7 @@ class Tools:
             Tool("wait", "Stay still for some seconds, or until something matching `until` comes into view.",
                  {"seconds": {"type": "number", "minimum": 0.5, "maximum": 600},
                   "until": {"type": "string", "description": "optional: what to wait for, like \"person\""}},
-                 ("seconds",), self.wait),
+                 ("seconds",), self.wait, skill=Skill.WAITING),
             Tool("ask", "Ask one specific question out loud when a missing detail affects your next action. "
                         "Wait for the answer and read it before acting.",
                  {"question": {"type": "string"}}, ("question",), self.ask),
