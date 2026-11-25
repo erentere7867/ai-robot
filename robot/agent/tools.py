@@ -496,19 +496,13 @@ class Tools:
 
     # ---- the tools ----------------------------------------------------------------------------------------------
     def _define(self) -> list[Tool]:
-        target = {"type": "string", "description": "an object ID, \"user\", a room or place, or a visual name "
-                                                   "like \"red ball\". Compare returned distances, not object names."}
+        target = {"type": "string", "description": "Object ID, \"user\", room, saved place, or visual name."}
         side = {"type": "string", "enum": ["left", "right"]}
         return [
-            Tool("go_to", "Go to a target and face it. Use an ID, or any visible thing, area or place by name even if "
-                          "not in the Objects list yet (it will be located or searched for automatically). For a "
-                          "requested side or gap use go_to_side or stop_near. Parking beside something does not go "
-                          "underneath.",
+            Tool("go_to", "Go to and face a named target, searching if needed. For a requested side or gap use "
+                          "go_to_side or stop_near.",
                  {"target": target}, ("target",), self.go_to, moves=True),
-            Tool("go_toward", "Drive about some metres in a direction, around obstacles, only when no named thing, "
-                              "surface or area can be given to go_to (such as an unnamed gap or a plain direction). "
-                              "The front picture shows what is in front of you; rear-left shows behind you on the "
-                              "left; rear-right behind you on the right.",
+            Tool("go_toward", "Drive roughly the given distance toward an unnamed spot, avoiding obstacles.",
                  {"direction": {"type": "string", "enum": list(BEARINGS)},
                   "metres": {"type": "number", "minimum": 0.3, "maximum": 6}},
                  ("direction", "metres"), self.go_toward, moves=True),
@@ -552,19 +546,14 @@ class Tools:
             Tool("face", "Turn once to face a target.", {"target": target}, ("target",), self.face, moves=True),
             Tool("keep_facing", "Keep turning to face a target as it moves, until the user says stop.",
                  {"target": target}, ("target",), self.keep_facing, moves=True),
-            Tool("search", "Find something not in the object list: checks memory, optionally starts beside a likely "
-                           "landmark/area (`near`) or heads a promising camera direction first (`toward`), then "
-                           "sweeps unseen floor until the cameras see it.",
+            Tool("search", "Find an unlisted object: check memory, then drive to inspect unseen floor if needed.",
                  {"what": {"type": "string", "description": "a visual name, like \"red ball\" or \"keys\", "
                                                            "without a distance comparison"},
                   "area": {"type": "string", "description": "\"here\" (this room), a room name, or \"everywhere\", not "
                                                            "a direction."},
-                  "near": {"type": "string", "description": "optional: a known or visible landmark/area to go beside "
-                                                           "first, where the thing likely is (e.g. \"sofa 4\", "
-                                                           "\"kitchen\", \"stairs\")"},
+                  "near": {"type": "string", "description": "Known or visible landmark/area to approach first."},
                   "toward": {"type": "string", "enum": list(BEARINGS),
-                             "description": "optional: camera direction to head first when a doorway or likely area "
-                                            "lies that way"}},
+                             "description": "Camera direction to head first."}},
                  ("what",), self.search, moves=True),
             Tool("look", "Inspect fresh camera pictures without driving. To label what you see, supply its visual name.",
                  {"direction": {"type": "string", "enum": list(CAMERAS)},
@@ -593,8 +582,7 @@ class Tools:
             Tool("todo_blocked", "Mark an unfinished step as blocked and record why; this does not finish it.",
                  {"step": {"type": "integer", "minimum": 1, "maximum": MAX_TODO_STEPS}, "reason": {"type": "string"}},
                  ("step", "reason"), self.todo_blocked),
-            Tool("say", "Speak mid-task ONLY when you still have more tool calls to make after speaking. Never call "
-                        "this for your final reply: end with plain text and no tool call instead.",
+            Tool("say", "Speak mid-task only when more tool calls are needed.",
                  {"text": {"type": "string"}}, ("text",), self.say),
         ]
 
