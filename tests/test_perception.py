@@ -4,12 +4,14 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from robot.perception import colour
 from robot.perception.locate import locate
 from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import GONE_AFTER, Detection, Track, Tracker
 from robot.ros.perceive import SyntheticScanPublisher
+from tests.perception_fakes import make_detector, make_image_brain
 
 
 def test_a_pixel_and_its_depth_give_back_the_point():
@@ -371,14 +373,14 @@ def test_frontiers_are_open_edges_of_the_map_with_room_for_the_robot():
 
 
 def test_a_saved_map_becomes_the_planners_grid_in_the_house_frame(tmp_path):
-    from robot.ros.explore import load_grid
+    from robot.ros.explore import load_grid, read_map
 
     image = np.full((100, 140), 254, dtype=np.uint8)  # a 7 x 5 m map at 5 cm, all free...
     image[:, 70] = 0  # ...with a wall along x = 0 (the map starts at x = -3.5)
     image[:10, :] = 205  # and unknown along its top (largest y) edge
     (tmp_path / "m.pgm").write_bytes(b"P5\n140 100\n255\n" + image.tobytes())
     (tmp_path / "m.yaml").write_text("image: m.pgm\nresolution: 0.050\norigin: [-3.5, -2.5, 0.0]\n")
-    grid = load_grid(tmp_path / "m.yaml", (70, 50), (7.0, 5.0))  # 10 cm cells
+    grid = load_grid(read_map(tmp_path / "m.yaml"), (70, 50), (7.0, 5.0))  # 10 cm cells
     assert grid[35, 25] and not grid[20, 25] and not grid[50, 25]  # the wall at x = 0, floor either side
     assert grid[20, 48] and not grid[20, 40]  # unknown counts as blocked
 
@@ -973,11 +975,72 @@ def test_locate_crop_ignores_side_edge_clutter_ranges_floor_and_falls_back_to_sc
     # Scan fallback when depth is missing
     ranges = np.full(360, 2.4, dtype=np.float32)
     via_scan = locate_crop(cam, (560, 100, 720, 400), depth=None, scan=(ranges, -math.pi, 2 * math.pi / 360))
-    assert via_scan is not None and via_scan.how == "lidar" and abs(math.hypot(via_scan.x, via_scan.y) - 2.4) < 0.1
+    assert via_scan is not None and via_scan.how == "lidar"
+    assert math.hypot(via_scan.x, via_scan.y) - via_scan.radius == pytest.approx(2.4)
 
     # Floor-ray fallback when both depth and scan are missing
     via_ray = locate_crop(cam, (560, int(0.45 * h), 720, h), depth=None, scan=None, on_floor=True)
     assert via_ray is not None and via_ray.how == "floor" and via_ray.radius == 0.0
+
+
+def test_locate_crop_places_the_lidar_surface_on_the_returning_beam():
+    from robot.perception.locate import locate_crop
+
+    ranges = np.full(360, np.inf, dtype=np.float32)
+    ranges[241:248] = [2.706, 2.709, 2.778, 1.235, 1.247, 1.241, 1.232]
+    place = locate_crop(RIG["rear_left_camera"], (894, 0, 1150, 432),
+                        scan=(ranges, -math.pi, math.tau / 360))
+    assert place is not None and place.how == "lidar"
+    assert math.degrees(math.atan2(place.y, place.x)) == pytest.approx(67)
+    assert math.hypot(place.x, place.y) - place.radius == pytest.approx(1.232)
+
+
+def test_locate_crop_ranks_returns_by_distance_from_the_photo_pose():
+    from robot.perception.locate import locate_crop
+
+    ranges = np.full(360, np.inf)
+    ranges[1], ranges[359] = 3.0, 1.0
+    place = locate_crop(RIG["front_camera"], (560, 100, 720, 400),
+                        scan=(ranges, -math.pi, math.tau / 360), scan_in_camera=(4.0, 0.0, 0.0))
+    assert place is not None and place.how == "lidar"
+    assert math.hypot(place.x - 4.0, place.y) - place.radius == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize("usable_range", [3.0, np.inf])
+def test_locate_crop_ignores_unplaceable_returns(usable_range):
+    from robot.perception.locate import locate_crop
+
+    cam = RIG["front_camera"]
+    box = (560, 550, 720, 700)
+    ranges = np.full(360, np.inf)
+    ranges[1], ranges[359] = 7.0, usable_range
+    place = locate_crop(cam, box, scan=(ranges, -math.pi, math.tau / 360), scan_in_camera=(8.0, 0.0, 0.0))
+    assert place is not None
+    if np.isfinite(usable_range):
+        assert place.how == "lidar"
+        assert math.hypot(place.x - 8.0, place.y) - place.radius == pytest.approx(usable_range)
+    else:
+        assert place.how == "floor"
+        assert place == locate_crop(cam, box)
+
+
+def test_locate_in_picture_refines_the_strongest_third_when_every_third_is_positive():
+    from robot.ros.perceive import locate_in_picture
+
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    scores = iter([0.6792, 0.8221, 0.9941, 0.9999, 0.9759, 0.9919, 0.7078])
+    hit = locate_in_picture(SimpleNamespace(yes_probability=lambda _: next(scores)), rgb, "table")
+    assert hit == ((894, 0, 1150, 432), False)
+
+
+@pytest.mark.parametrize("refinement", [[0.1, 0.1], [0.9, 0.9, 0.1, 0.1]])
+def test_locate_in_picture_recovers_a_wide_rug_when_the_refined_crop_is_not_recognized(refinement):
+    from robot.ros.perceive import locate_in_picture
+
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    scores = iter([0.9, 0.9, 0.9, *refinement, 0.1, 0.9])
+    hit = locate_in_picture(SimpleNamespace(yes_probability=lambda _: next(scores)), rgb, "rug")
+    assert hit == ((512, 324, 768, 720), True)
 
 
 def test_locate_in_picture_localises_by_crops_centres_straddling_objects_and_rejects_false_positives():
@@ -987,21 +1050,8 @@ def test_locate_in_picture_localises_by_crops_centres_straddling_objects_and_rej
     rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
     rgb[50:250, 150:350] = 255
 
-    def make_brain(predicate):
-        import base64
-
-        import cv2
-
-        def yes_prob(messages):
-            url = messages[0]["content"][0]["image_url"]["url"]
-            raw = base64.b64decode(url.split(",", 1)[1])
-            arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-            return predicate(arr)
-
-        return SimpleNamespace(yes_probability=yes_prob)
-
     # Object straddles the boundary between [0, 0.2] and [0.2, 0.4] -> weighted centre near x=250, upper half wins
-    brain = make_brain(lambda arr: 0.95 if (arr > 200).mean() > 0.05 else 0.05)
+    brain = make_image_brain(lambda arr: 0.95 if (arr > 200).mean() > 0.05 else 0.05)
     hit = locate_in_picture(brain, rgb, "computer monitor")
     assert hit is not None
     (x0, y0, x1, y1), on_floor = hit
@@ -1017,7 +1067,7 @@ def test_locate_in_picture_localises_by_crops_centres_straddling_objects_and_rej
     # Narrow standing object centred at u=0.50 (both overlapping halves see it whole; non-overlapping would slice it)
     tall_rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
     tall_rgb[180:640, 615:665] = 255
-    tall_brain = make_brain(lambda arr: 0.95 if (arr > 200).any(axis=2).any(axis=0).sum() >= 20 else 0.05)
+    tall_brain = make_image_brain(lambda arr: 0.95 if (arr > 200).any(axis=2).any(axis=0).sum() >= 20 else 0.05)
     hit_tall = locate_in_picture(tall_brain, tall_rgb, "umbrella")
     assert hit_tall is not None and hit_tall[1] is False and 580 <= (hit_tall[0][0] + hit_tall[0][2]) / 2 <= 700
 
@@ -1070,7 +1120,7 @@ def test_visual_tracks_are_not_evicted_by_detector_misses():
 
 
 def test_badge_deoverlap_and_detector_max_asked():
-    from robot.perception.detector import MAX_ASKED, Detector
+    from robot.perception.detector import MAX_ASKED
     from robot.perception.overlay import _place_badge, draw_set_of_mark
 
     placed: list[tuple[int, int, int, int]] = []
@@ -1087,12 +1137,10 @@ def test_badge_deoverlap_and_detector_max_asked():
     assert out.shape == rgb.shape and (out > 0).any()
 
     # Even with plenty of GPU prompt slots, Detector keeps only MAX_ASKED recent asked words so stale tasks don't leak.
-    fake_server = SimpleNamespace(slots=12)
-    det = Detector(server=fake_server, always=("person",))
-    for w in ("umbrella", "shoes", "stool", "mug", "bicycle"):
+    words = ("umbrella", "shoes", "stool", "mug", "bicycle")
+    det = make_detector(SimpleNamespace(slots=12), words)
+    for w in words:
         det.watch(w)
     assert len(det.asked) == MAX_ASKED == 3
     assert det.asked == ["stool", "mug", "bicycle"]
     assert det.vocabulary == ["person", "stool", "mug", "bicycle"]
-
-

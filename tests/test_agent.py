@@ -419,7 +419,7 @@ def test_each_motion_says_what_the_request_has_done_so_far():
 
 @pytest.mark.parametrize(("name", "args", "progress"), [
     ("turn", {"degrees": "90 degrees", "direction": "left"}, "turned 90 degrees left; 90 degrees of turning in all"),
-    ("move", {"metres": "0.3 m", "direction": "forward"}, "moved 0.3 m forward"),
+    ("move", {"metres": "0.3 m", "direction": "forward"}, "moved 0.29 m forward"),
     ("turn", {"degrees": 90, "direction": "Left"}, "turned 90 degrees left; 90 degrees of turning in all"),
 ], ids=["turn-with-unit", "move-with-unit", "mixed-case-direction"])
 def test_motion_progress_uses_validated_arguments(name, args, progress):
@@ -575,6 +575,19 @@ def test_open_todo_steps_mark_task_failed() -> None:
     assert any("turn around" in p for p in record.problems)
 
 
+def test_plan_revision_defers_tick_when_same_title_steps_change_numbers():
+    batch = Reply("", tool_calls=[
+        ToolCall("revise", "todo", {"steps": ["Inspect the door"] * 2}),
+        ToolCall("tick", "todo_done", {"step": 2}),
+    ])
+    brain = Scripted(call("todo", steps=["Inspect the door"] * 3),
+                     call("todo_done", step=3), batch, call("todo", steps=[]), say("Done."))
+    record = Agent(brain, cameras="none").do("Inspect the doors.", SimRobot(living_room()))
+    revised, tick = record.steps[2].calls
+    assert revised[3] and "1. [x] Inspect the door\n2. [ ] Inspect the door" in revised[2]
+    assert not tick[3] and "updated step numbers" in tick[2]
+
+
 def test_restart_recalls_corrected_fact_on_first_prompt_and_fails_without_memory(tmp_path) -> None:
     from robot.mind.memory import CirculatingMemory
 
@@ -704,7 +717,7 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
     assert len(recall_prompts) == 1 and "Recent conversation:" not in recall_prompts[0]
 
     r1r = next(t for t in home3d.TASKS if t.id == "R1R")
-    assert r1r.check(None, {"said_by_turn": ["", "", "", "your spare keys are on the dining table."]})
-    assert r1r.check(None, {"said_by_turn": ["", "", "", "not on the couch; they're on the dining table."]})
-    assert not r1r.check(None, {"said_by_turn": ["", "", "", "i don't know whether they're on the table."]})
-    assert not r1r.check(None, {"said_by_turn": ["", "", "", "they aren't on the table; they're on the couch."]})
+    assert r1r.criterion(None, {"said_by_turn": ["", "", "", "your spare keys are on the dining table."]})
+    assert r1r.criterion(None, {"said_by_turn": ["", "", "", "not on the couch; they're on the dining table."]})
+    assert not r1r.criterion(None, {"said_by_turn": ["", "", "", "i don't know whether they're on the table."]})
+    assert not r1r.criterion(None, {"said_by_turn": ["", "", "", "they aren't on the table; they're on the couch."]})
