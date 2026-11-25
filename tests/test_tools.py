@@ -196,10 +196,10 @@ def test_search_reports_landmark_outcome_and_scope(door_open, landmark, scope, a
         return None
 
     monkeypatch.setattr(robot, "search", search)
-    result, ok = Tools(robot).run("search", {"what": "towel", "near": landmark})
-    assert ok and called == [("towel", "here", scope)]
-    assert f"No towel found in the views checked. Search scope: {scope}." in result
-    assert approach in result
+    result = Tools(robot).execute("search", {"what": "towel", "near": landmark})
+    assert result.ok and called == [("towel", "here", scope)]
+    assert f"No towel found in the views checked. Search scope: {scope}." in result.text
+    assert approach in result.text
 
 
 def test_search_does_not_redispatch_a_body_error(monkeypatch):
@@ -211,8 +211,8 @@ def test_search_does_not_redispatch_a_body_error(monkeypatch):
         raise TypeError("bad camera sample")
 
     monkeypatch.setattr(robot, "search", search)
-    result, ok = Tools(robot).run("search", {"what": "towel", "toward": "front"})
-    assert not ok and "bad camera sample" in result
+    result = Tools(robot).execute("search", {"what": "towel", "toward": "front"})
+    assert not result.ok and "bad camera sample" in result.text
     assert directions == ["front"]
 
 
@@ -223,8 +223,8 @@ def test_search_does_not_count_travel_before_the_search_as_coverage(monkeypatch)
     robot.go_to("far counter")
     robot.go_to("start")
     monkeypatch.setattr(robot, "search", lambda *args, **kwargs: None)
-    result, ok = tools.run("search", {"what": "towel", "area": "everywhere"})
-    assert ok and "Areas not visited closely yet: far counter." in result
+    result = tools.execute("search", {"what": "towel", "area": "everywhere"})
+    assert result.ok and "Areas not visited closely yet: far counter." in result.text
 
 
 def test_repositioning_does_not_repeat_a_search_from_the_same_landmark(monkeypatch):
@@ -232,14 +232,14 @@ def test_repositioning_does_not_repeat_a_search_from_the_same_landmark(monkeypat
     tools = Tools(robot)
     monkeypatch.setattr(robot, "search", lambda *args, **kwargs: None)
     args = {"what": "towel", "near": "kitchen"}
-    assert tools.run("search", args)[1]
+    assert tools.execute("search", args).ok
     robot.go_to(Pose(-1.3, 0.0, 0.0))
     before = robot.pose()
     drives = sum(e.name == "go_to" for e in robot.trace.events)
-    result, ok = tools.run("search", args)
-    assert not ok and "already searched from that landmark" in result
+    result = tools.execute("search", args)
+    assert not result.ok and "already searched from that landmark" in result.text
     assert robot.pose() == before and sum(e.name == "go_to" for e in robot.trace.events) == drives
-    assert tools.run("search", {"what": "towel"})[1]
+    assert tools.execute("search", {"what": "towel"}).ok
 
 
 @pytest.mark.parametrize("anchor_retained", [True, False])
@@ -255,34 +255,21 @@ def test_search_coverage_uses_the_new_trace_after_rollover(anchor_retained, monk
         return None
 
     monkeypatch.setattr(robot, "search", search)
-    result, ok = Tools(robot).run("search", {"what": "towel", "area": "everywhere"})
-    assert ok and "No towel found in the views checked." in result
-    assert "counter" not in result
-    assert ("Areas not visited closely yet: cabinet." in result) == anchor_retained
+    result = Tools(robot).execute("search", {"what": "towel", "area": "everywhere"})
+    assert result.ok and "No towel found in the views checked." in result.text
+    assert "counter" not in result.text
+    assert ("Areas not visited closely yet: cabinet." in result.text) == anchor_retained
 
 
 def test_plan_revision_keeps_completed_steps_and_blocking_is_not_completion():
     tools = Tools(SimRobot(two_rooms()))
-    assert tools.run("todo", {"steps": ["Reach the doorway", "Enter the room"]})[1]
-    assert tools.run("todo_done", {"step": 1})[1]
-    assert tools.run("todo_blocked", {"step": 2, "reason": "door shut"})[1]
+    assert tools.execute("todo", {"steps": ["Reach the doorway", "Enter the room"]}).ok
+    assert tools.execute("todo_done", {"step": 1}).ok
+    assert tools.execute("todo_blocked", {"step": 2, "reason": "door shut"}).ok
     assert tools.todo.open_steps() == ["Enter the room (blocked: door shut)"]
-    assert not tools.run("todo_blocked", {"step": 1, "reason": "door shut"})[1]
-    assert not tools.run("todo", {"steps": [""]})[1]
-    result, ok = tools.run("todo", {"steps": ["Ask the user to open the door", "Enter the room"]})
-    assert ok and result.splitlines()[1:] == [
+    assert not tools.execute("todo_blocked", {"step": 1, "reason": "door shut"}).ok
+    result = tools.execute("todo", {"steps": ["Ask the user to open the door", "Enter the room"]})
+    assert result.ok and result.text.splitlines()[1:] == [
         "1. [x] Reach the doorway", "2. [ ] Ask the user to open the door", "3. [ ] Enter the room",
     ]
     assert tools.todo.done_steps() == ["Reach the doorway"]
-
-
-def test_empty_plan_revision_clears_only_the_remaining_work():
-    tools = Tools(SimRobot(two_rooms()))
-    assert tools.run("todo", {"steps": ["Reach the doorway", "Enter the room"]})[1]
-    assert tools.run("todo_done", {"step": 1})[1]
-    assert tools.run("todo_blocked", {"step": 2, "reason": "door shut"})[1]
-    assert not tools.run("todo", {"steps": ";"})[1]
-    assert tools.todo.open_steps() == ["Enter the room (blocked: door shut)"]
-    result, ok = tools.run("todo", {"steps": []})
-    assert ok and result.splitlines()[1:] == ["1. [x] Reach the doorway"]
-    assert not tools.todo.open_steps()

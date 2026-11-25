@@ -392,14 +392,14 @@ class Agent:
                     else:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
                         self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
-                        prior_steps = tools.todo.steps if call.name == "todo" else None
+                        prior_titles = [step.title for step in tools.todo.steps] if call.name == "todo" else []
                         try:
                             res = self._run(robot, tools, call.name, call.args, record)
                         except Preempted:
                             step.calls.append((call.name, call.args, "Interrupted before returning a result.", False))
                             raise
                         result, ok = res.text, res.ok
-                        if prior_steps and tools.todo.steps[:len(prior_steps)] != prior_steps:
+                        if prior_titles and [step.title for step in tools.todo.steps[:len(prior_titles)]] != prior_titles:
                             plan_renumbered = True
                         if res.status == "partial":
                             barrier = ("Not run: an earlier call in this turn ended short; inspect the result before "
@@ -426,8 +426,6 @@ class Agent:
                         barrier = barrier or "Skipped: an earlier call in this turn failed."
                     elif call.name == "ask":
                         barrier = "Not run: read the result of asking the user before deciding the next action."
-                    elif call.name == "search":
-                        barrier = "Not run: read the search result before deciding the next action."
                     cameras = list(dict.fromkeys([*move_cams, *tools.looked]))
                     if cameras or tools.pictures:
                         recorded = len(tools.pictures)
@@ -444,6 +442,8 @@ class Agent:
                                 "Not run: no recent camera pictures were available after the previous action."
                             )
                             result += " No recent camera pictures are available."
+                    if ok and call.name == "search":
+                        barrier = barrier or "Not run: read the search result before deciding the next action."
                     step.calls.append((call.name, call.args, result, ok))
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
                     if visual_parts:

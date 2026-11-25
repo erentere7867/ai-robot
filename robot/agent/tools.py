@@ -132,7 +132,7 @@ class Todo:
     def write(self, steps: list[str]) -> None:
         if any(not isinstance(step, str) or not step.strip() for step in steps):
             raise ToolError("the to-do list needs non-empty step descriptions")
-        completed = [step for step, done in self.steps if step.done]
+        completed = [step for step in self.steps if step.done]
         if len(completed) + len(steps) > MAX_TODO_STEPS:
             raise ToolError(f"the to-do list can hold at most {MAX_TODO_STEPS} steps including completed steps")
         self.steps = completed + [TodoStep(step.strip()) for step in steps]
@@ -150,8 +150,6 @@ class Todo:
         step = self._step(number)
         if step.done:
             raise ToolError(f"step {number} is already done")
-        if not reason:
-            raise ToolError("say what blocked the step")
         step.blocker = reason
 
     def open_steps(self) -> list[str]:

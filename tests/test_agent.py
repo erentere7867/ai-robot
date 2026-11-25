@@ -335,7 +335,8 @@ def test_review_shows_completed_and_blocked_steps_after_revising_a_plan():
                      call("todo", steps=["Ask for the door to be opened", "Enter the room"]),
                      call("todo_blocked", step=3, reason="door shut"),
                      say("All done."), say("I turned left but couldn't enter."))
-    Agent(brain, cameras="none").do("Turn left and enter the room.", sim)
+    record = Agent(brain, cameras="none").do("Turn left and enter the room.", sim)
+    assert record.outcome == "failed"
     assert "[x] Turn left" in tool_results(brain.seen[4])[-1]
     assert "Step 3 blocked: door shut. It is not finished." in tool_results(brain.seen[5])[-1]
     review = brain.seen[6][-1]["content"]
@@ -356,19 +357,21 @@ def test_speech_deferred_by_a_search_miss_is_not_counted_as_spoken(monkeypatch):
     assert [text for _, text in sim.trace.said] == ["No towel in this room."]
 
 
-def test_plan_step_updates_wait_for_the_model_to_see_revised_step_numbers():
+def test_plan_block_waits_for_the_model_to_see_revised_step_numbers():
     sim = SimRobot(living_room())
     plan = call("todo", steps=["Inspect the door", "Enter the room"])
-    block_old = call("todo_blocked", step=2, reason="door shut")
+    old_update = call("todo_blocked", step=2, reason="door shut")
+    turn = call("turn", degrees=90, direction="left")
     brain = Scripted(call("todo", steps=["Inspect the door", "Enter the room", "Turn left"]),
                      call("todo_done", step=3),
-                     Reply("", tool_calls=plan.tool_calls + block_old.tool_calls),
+                     Reply("", tool_calls=plan.tool_calls + old_update.tool_calls + turn.tool_calls),
                      call("todo_blocked", step=3, reason="door shut"),
                      say("I couldn't enter."), say("The door was shut."))
     Agent(brain, cameras="none").do("Inspect the door, enter the room, and turn left.", sim)
-    plan_result, skipped = tool_results(brain.seen[3])[-2:]
+    plan_result, skipped, turned = tool_results(brain.seen[3])[-3:]
     assert "3. [ ] Enter the room" in plan_result
-    assert skipped == "Not run: read the revised plan for the current step numbers."
+    assert skipped == "Not run: read the updated step numbers before updating a step."
+    assert "Turned 90 degrees left." in turned
     assert "Open to-do steps: Inspect the door; Enter the room (blocked: door shut)." in brain.seen[5][-1]["content"]
 
 
