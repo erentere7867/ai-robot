@@ -117,6 +117,8 @@ def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):
     (["There is a bike outside."], False),
     (["There is a bike in another apartment."], False),
     (["There is a bike. There is no bicycle."], False),
+    (["There are zero bikes in the apartment."], False),
+    (["There is a bike. There are 0 bicycles."], False),
     (["There is a bike. The bicycle is outside."], False),
     (["There is a bike, but not in this apartment."], False),
     (["I don't think there's a bike in the apartment.", "Yes."], False),
