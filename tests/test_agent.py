@@ -452,6 +452,9 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
     from robot.mind import brain as brain_mod
     from robot.perception import detector as det_mod
 
+    seen_stores: list[object] = []
+    shutdowns: list[int] = []
+
     class FakeHome:
         def __init__(self, scene: str, rtf: float = 1.0) -> None:
             self.scene, self.bumps = scene, 0
@@ -471,12 +474,15 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
             pass
 
         def robot(self, detector: object, brain: object, store: object = None) -> SimRobot:
+            seen_stores.append(store)
             sim = SimRobot(living_room())
             sim.store = store  # type: ignore[attr-defined]
             sim.perception = SimpleNamespace(stop=lambda: None)  # type: ignore[attr-defined]
             sim._perceive_objects = lambda: None  # type: ignore[attr-defined]
-            sim.shutdown = lambda: None  # type: ignore[attr-defined]
+            sim.shutdown = lambda: shutdowns.append(1)  # type: ignore[attr-defined]
             return sim
+
+    recall_histories: list[int] = []
 
     class PromptAwareBrain:
         def __init__(self, url: str) -> None:
@@ -499,6 +505,7 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
                 return call("turn", degrees=90, direction="left")
             if self.turn == 6:
                 return say("Turned left.")
+            recall_histories.append(len(messages))
             prompt = _text(messages[1]["content"])
             if "dining table (most recent)" in prompt:
                 return say("Your backup key is on the dining table.")
@@ -513,8 +520,17 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
 
     with_mem = home3d.run("mem", ["R1R"], ["apt_0"], "http://fake", "front", "off", 1.0, use_memory=True)
     assert len(with_mem) == 1 and with_mem[0]["passed"] is True
+    assert len(seen_stores) == 2 and seen_stores[0] is not seen_stores[1]
+    assert len(shutdowns) == 2
+    assert recall_histories == [2]  # fresh Agent after restart has only system + user messages
 
+    seen_stores.clear()
+    shutdowns.clear()
+    recall_histories.clear()
     without_mem = home3d.run("nomem", ["R1R"], ["apt_0"], "http://fake", "front", "off", 1.0, use_memory=False)
     assert len(without_mem) == 1 and without_mem[0]["passed"] is False
+    assert seen_stores == [None, None]
+    assert len(shutdowns) == 2
+    assert recall_histories == [2]
 
 
