@@ -63,3 +63,11 @@ class Habitat:
 
     def close(self) -> None:
         self.conn.close()
+
+
+def free_mask(info: dict) -> Any:
+    """Decode the packed free-floor mask from a Habitat `info` reply as an [x, y] uint8 array."""
+    import numpy as np
+
+    nx, ny = info["shape"]
+    return np.unpackbits(np.frombuffer(info["free"], np.uint8))[: nx * ny].reshape(nx, ny)

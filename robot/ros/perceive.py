@@ -32,6 +32,7 @@ from robot.perception.pose import estimate_pose_from_keypoints
 from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import GONE_AFTER, Detection, Track, Tracker, canonical, look, pixels
 from robot.ros.model import BODY_R, TOF
+from robot.ros.motion import WHEELS
 
 TOPICS = {name: f"/{name}/image" for name in RIG}  # the camera drivers' colour pictures
 DEPTH_TOPICS = {name: f"/{name}/depth" for name in RIG}  # the depth node's estimates, at a smaller size
@@ -336,7 +337,7 @@ class SyntheticScanPublisher:
                 self.odom_at = _odometry_lookup(node)
                 self._clock = node.get_clock
                 now = lambda: _seconds(node.get_clock().now().to_msg())  # noqa: E731
-                node.create_subscription(TwistStamped, "/cmd_vel",  # what reaches the motors, after every check
+                node.create_subscription(TwistStamped, WHEELS,
                                          lambda m: self.drive(now(), m.twist.linear.x), 10)
                 node.create_subscription(Odometry, "/odom", lambda m: self.wheels(now(), m.twist.twist.linear.x),
                                          qos_profile_sensor_data)
