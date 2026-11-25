@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from robot.agent.api import NotFound, Object, PathBlocked, Pose, TargetLost, Timeout, geom, wrap
@@ -261,7 +261,6 @@ class Tools:
         self.looked: list[str] = []  # cameras the model asked to see since the last observation
         self.moved = False  # the robot moved since the last observation
         self.found: Object | None = None
-        self.last_result: ActionResult | None = None
         self.pictures: list[tuple[str, Any]] = []  # sensor evidence with its provenance, not a new live view
         self._tools = {t.name: t for t in self._define()}
         self.began = robot.pose()  # where this request began
@@ -276,16 +275,14 @@ class Tools:
         """Run one call and return its structured outcome. Stops and preemptions propagate."""
         tool = self._tools.get(name)
         if tool is None:
-            res = ActionResult(f"There is no tool {name!r}. Tools: {', '.join(self._tools)}.", False, "error")
-            self.last_result = res
-            return res
+            return ActionResult(f"There is no tool {name!r}. Tools: {', '.join(self._tools)}.", False, "error")
         self.found = None  # what this call found by searching
         before = self.robot.pose() if tool.moves else None
         moved_m = 0.0
 
         def motion_note() -> str:
             nonlocal moved_m
-            if not tool.moves or before is None:
+            if before is None:
                 return ""
             now = self.robot.pose()
             moved_m = math.dist((now.x, now.y), (before.x, before.y))
@@ -294,56 +291,38 @@ class Tools:
         try:
             checked = _check(tool, args)
             raw = tool.run(**checked)
-            res = raw if isinstance(raw, ActionResult) else ActionResult(raw, True, "reached" if tool.moves else "ok")
-            if self.found is not None and name != "search":
-                res = ActionResult(
-                    f"Searched for it: found {self.found.label} {self.found.id}. {res.text}",
-                    res.ok, res.status, res.moved_m, res.turned_deg,
-                )
-            if tool.moves:
-                self.moved = True
         except ToolError as exc:
-            res = ActionResult(f"Error: {exc}.{motion_note()}", False, "error", moved_m)
-            self.last_result = res
-            return res
+            return ActionResult(f"Error: {exc}.{motion_note()}", False, "error", moved_m)
         except NotFound as exc:
-            res = ActionResult(f"Not found: {exc}. Use search() to look for it, or ask the user.", False, "not_found")
-            self.last_result = res
-            return res
+            return ActionResult(f"Not found: {exc}. Use search() to look for it, or ask the user.", False, "not_found")
         except PathBlocked as exc:
-            res = ActionResult(
+            return ActionResult(
                 f"Blocked: {exc}{motion_note()}. Try another way, a different target, or ask the user for help.",
                 False, "blocked", moved_m,
             )
-            self.last_result = res
-            return res
         except TargetLost as exc:
             self.looked.extend(CAMERAS["around"])
-            res = ActionResult(
+            return ActionResult(
                 f"Target lost: {exc}{motion_note()}. Inspect the current views before choosing another ID.",
                 False, "target_lost", moved_m,
             )
-            self.last_result = res
-            return res
         except Timeout as exc:
-            res = ActionResult(f"Timed out: {exc}{motion_note()}.", False, "timeout", moved_m)
-            self.last_result = res
-            return res
+            return ActionResult(f"Timed out: {exc}{motion_note()}.", False, "timeout", moved_m)
         except (ValueError, TypeError) as exc:
-            res = ActionResult(f"Error: {exc}.", False, "error")
-            self.last_result = res
-            return res
+            return ActionResult(f"Error: {exc}.", False, "error")
+        else:
+            self.moved |= tool.moves
         finally:
-            if tool.moves and not self.moved and before is not None:
+            if before is not None and not self.moved:
                 now = self.robot.pose()
                 if (math.dist((now.x, now.y), (before.x, before.y)) > 0.02
                         or abs((now.yaw - before.yaw + 180) % 360 - 180) > 2.0):
                     self.moved = True
-        if tool.moves:
-            progress = self._progress(name, checked, res)
-            if progress:
-                res = ActionResult(res.text + "\n" + progress, res.ok, res.status, res.moved_m, res.turned_deg)
-        self.last_result = res
+        res = raw if isinstance(raw, ActionResult) else ActionResult(raw, True, "reached" if tool.moves else "ok")
+        if self.found is not None and name != "search":
+            res = replace(res, text=f"Searched for it: found {self.found.label} {self.found.id}. {res.text}")
+        if tool.moves and (progress := self._progress(name, checked, res)):
+            res = replace(res, text=f"{res.text}\n{progress}")
         return res
 
     def run(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
