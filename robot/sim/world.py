@@ -35,7 +35,7 @@ from robot.agent.api import (
     wrap,
     xy,
 )
-from robot.body.controller import BodyController
+from robot.body.controller import BodyController, Progress
 from robot.perception.tracker import canonical
 
 RES = 0.05  # occupancy cell, m
@@ -559,7 +559,8 @@ class SimRobot:
         reach: float = 0.0,
     ) -> None:
         """Drive through points in order using BodyController.step_pursuit (non-stop waypoint spline pursuit)."""
-        best, since, idx = math.inf, self.t, 0
+        progress = Progress((self.x, self.y), self.t, 0.05, STALL_S)
+        idx = 0
         waypoints = [(float(p[0]), float(p[1])) for p in points]
         while idx < len(waypoints):
             self._interrupts()
@@ -610,10 +611,7 @@ class SimRobot:
             if arrived:
                 break
 
-            remaining = d + sum(math.dist(waypoints[k], waypoints[k + 1]) for k in range(idx, len(waypoints) - 1))
-            if remaining < best - 0.05:
-                best, since = remaining, self.t
-            elif self.t - since > STALL_S:
+            if progress.stalled((self.x, self.y), self.t):
                 self._halt()
                 raise PathBlocked(f"no progress toward ({tx:.1f}, {ty:.1f}) for {STALL_S:.0f} s")
 

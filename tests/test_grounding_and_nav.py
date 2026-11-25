@@ -30,6 +30,26 @@ def _make_scene(things: list[Thing] | None = None) -> Scene:
     )
 
 
+@pytest.mark.parametrize("detour", [False, True])
+def test_sim_pursuit_only_credits_new_ground(monkeypatch, detour):
+    sim = SimRobot(_make_scene())
+    start = sim.t
+
+    def step(*_):
+        elapsed = sim.t - start
+        sim.x = 3.0 if elapsed >= 12.0 else (-0.1 * elapsed if detour else 0.0)
+        sim.t += 1.0
+
+    monkeypatch.setattr(sim, "_step", step)
+    monkeypatch.setattr(sim.body, "step_pursuit", lambda *_, **kw: (0.1, 0.0, 0, False))
+    if detour:
+        sim._pursue([(3.0, 0.0)], 0.1, goal=(3.0, 0.0))
+        assert sim.x == 3.0
+    else:
+        with pytest.raises(PathBlocked, match="no progress .* for 10 s"):
+            sim._pursue([(3.0, 0.0)], 0.1, goal=(3.0, 0.0))
+
+
 # ---------------------------------------------------------------------------
 # 1. SimRobot._named & synonym fallback
 # ---------------------------------------------------------------------------

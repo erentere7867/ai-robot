@@ -25,6 +25,7 @@ from robot.agent.api import (
     wrap,
     xy,
 )
+from robot.body.controller import Progress
 from robot.interfaces.voice import chime as synth_chime
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
@@ -237,23 +238,15 @@ class RosRobot(SimRobot):
             raise PathBlocked(f"{name} refused the goal")
         self._goal, result = handle, handle.get_result_async()
         next_check = 0.0
-        visited = [(self.x, self.y)]
-        since = self.t
+        progress = Progress((self.x, self.y), self.t, PROGRESS_M, PROGRESS_S)
         try:
             while not result.done():
                 self._step(0.0, 0.0)
                 if watch is not None and time.monotonic() >= next_check:
                     self._check_goal(watch)
                     next_check = time.monotonic() + 0.2
-                if name == "navigate_to_pose" and not result.done():
-                    # Replanning can change path length without motion, and repeated recovery can retrace the same
-                    # stretch. Only reaching new ground counts, including a detour that leads away from the goal.
-                    here = (self.x, self.y)
-                    if all(math.dist(here, point) >= PROGRESS_M for point in reversed(visited)):
-                        visited.append(here)
-                        since = self.t
-                    if self.t - since > PROGRESS_S:
-                        raise PathBlocked(f"no navigation progress for {PROGRESS_S:g} s")
+                if name == "navigate_to_pose" and not result.done() and progress.stalled((self.x, self.y), self.t):
+                    raise PathBlocked(f"no navigation progress for {PROGRESS_S:g} s")
         except BaseException as exc:
             handle.cancel_goal_async()
             self._publish(0.0, 0.0)
