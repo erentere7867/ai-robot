@@ -501,13 +501,13 @@ class RosRobot(SimRobot):
                 self.cancel()
             if goal is not None:
                 confirmed = goal.wait_terminal(CANCEL_WAIT_S)
+        if hasattr(self, "_action_executor"):
+            self._action_executor.shutdown()
         for client in getattr(self, "actions", {}).values():
             try:
                 client.destroy()
             except Exception:  # noqa: BLE001
                 pass
-        if hasattr(self, "_action_executor"):
-            self._action_executor.shutdown()
         if hasattr(self, "_action_node"):
             self._action_node.destroy_node()
         if hasattr(self, "_executor"):

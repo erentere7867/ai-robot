@@ -330,10 +330,15 @@ def test_ros_robot_shutdown_cleans_up_action_node_and_executor():
     robot.node = FakeNode()
     robot._executor = FakeExecutor()
 
+    stopped_at_destroy = []
+    robot.actions = {"navigate_to_pose": SimpleNamespace(
+        destroy=lambda: stopped_at_destroy.append(robot._action_executor.shutdown_called),
+    )}
     robot.shutdown()
 
     assert robot._action_node.destroyed
     assert robot._action_executor.shutdown_called
+    assert stopped_at_destroy == [True]
     assert robot.node.destroyed
     assert robot._executor.shutdown_called
 
