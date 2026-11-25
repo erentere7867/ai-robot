@@ -6,6 +6,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from robot.agent.agent import Step, TaskRecord
 from robot.eval import report
@@ -32,6 +33,21 @@ def test_nearest_table_task_uses_the_footprint_instead_of_its_longest_half_side(
     for (x, y), passed in [((1.1, 0.0), False), ((0.9, 0.0), True), ((1.0, 1.3), False), ((0.0, 0.0), True)]:
         home.path[1:] = [(5.0, x, y, 0.0)]
         assert task.check(Referee(home), {"xy": (2.0, 0.0)}) is passed
+
+
+@pytest.mark.parametrize(("task_id", "label"), [("T1", "table"), ("N3", "chair")])
+def test_nearest_object_tasks_choose_the_closest_edge_not_the_closest_centre(task_id, label):
+    task = next(task for task in TASKS if task.id == task_id)
+    objects = [
+        {"id": 1, "label": label, "x": 0.0, "y": 1.0, "radius": 0.1,
+         "footprint": ((-0.1, 0.9), (0.1, 0.9), (0.1, 1.1), (-0.1, 1.1))},
+        {"id": 2, "label": label, "x": 1.5, "y": 0.0, "radius": 1.3,
+         "footprint": ((0.2, -0.2), (2.8, -0.2), (2.8, 0.2), (0.2, 0.2))},
+    ]
+    home = SimpleNamespace(truth={"objects": objects}, path=[(0.0, 0.0, 0.0, 0.0)])
+    for (x, y), passed in [((0.0, 1.0), False), ((1.0, 0.0), True)]:
+        home.path[1:] = [(5.0, x, y, 0.0)]
+        assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
 
 
 def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):

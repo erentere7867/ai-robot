@@ -141,8 +141,8 @@ def ends_near(sim: Referee, ts: list[Any] | Any, margin: float = 0.75) -> bool:
     return any(gap((x, y), t) <= margin for t in (ts if isinstance(ts, list) else [ts]))
 
 
-def nearest(ts: list[Any], xy: tuple[float, float]) -> Any:
-    return min(ts, key=lambda t: math.dist((t.x, t.y), xy))
+def nearest(ts: list[TruthThing], xy: tuple[float, float]) -> TruthThing:
+    return min(ts, key=lambda t: gap(xy, t))
 
 
 def visited_in_order(sim: Referee, targets: list[Any], margin: float = 0.75) -> bool:
