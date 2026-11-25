@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from robot.agent.api import (
@@ -31,6 +32,7 @@ from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 PROGRESS_S, PROGRESS_M = 30.0, 0.25
 CANCEL_WAIT_S = 2.0
 DIRECT = "direct"
+PLAN_TIMEOUT_S, PLAN_ENDPOINT_M = 2.0, 0.10
 
 
 class RosRobot(SimRobot):
@@ -38,7 +40,7 @@ class RosRobot(SimRobot):
                  synthetic_scan: bool = True) -> None:
         import rclpy
         from geometry_msgs.msg import TwistStamped
-        from nav2_msgs.action import DriveOnHeading, FollowPath, NavigateToPose, Spin
+        from nav2_msgs.action import ComputePathToPose, DriveOnHeading, FollowPath, NavigateToPose, Spin
         from rclpy.action import ActionClient
         from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
         from rclpy.executors import MultiThreadedExecutor
@@ -58,7 +60,7 @@ class RosRobot(SimRobot):
         self.tf = Buffer()
         self._tf_listener = TransformListener(self.tf, self.node)
         self.kinds = {"navigate_to_pose": NavigateToPose, "follow_path": FollowPath, "spin": Spin,
-                      "drive_on_heading": DriveOnHeading}
+                      "drive_on_heading": DriveOnHeading, "compute_path_to_pose": ComputePathToPose}
         self.actions: dict[str, Any] = {}
         self._twist = TwistStamped
         self.cmd = self.node.create_publisher(TwistStamped, motion.WHEELS, 1)
@@ -351,23 +353,75 @@ class RosRobot(SimRobot):
             yaws = [p[3] for p in self.trace.poses if p[0] >= t_start]
             done += sum(wrap(b - a) for a, b in zip(yaws, yaws[1:], strict=False))
 
+    def _nav_reaches(self, end: Point, yaw: float = 0.0) -> bool:
+        """Check the live costmap without arming motion. Nav2 can report success for a path 0.20 m short."""
+        name = "compute_path_to_pose"
+        client = self.actions[name]
+        self._interrupts()
+        if not client.wait_for_server(timeout_sec=PLAN_TIMEOUT_S):
+            raise PathBlocked("Nav2's planner is unavailable")
+        goal = self.kinds[name].Goal()
+        goal.goal = self._pose_msg(*end, yaw)
+        deadline = time.monotonic() + PLAN_TIMEOUT_S
+
+        def wait(future: Any) -> Any:
+            while not future.done():
+                self._interrupts()
+                if time.monotonic() >= deadline:
+                    raise PathBlocked("Nav2's planner did not answer in time")
+                time.sleep(0.02)
+            return future.result()
+
+        def cancel(future: Any) -> None:
+            handle = future.result()
+            if handle and handle.accepted:
+                handle.cancel_goal_async()
+
+        sent = client.send_goal_async(goal)
+        try:
+            handle = wait(sent)
+            if not handle.accepted:
+                return False
+            outcome = wait(handle.get_result_async())
+        except BaseException:
+            sent.add_done_callback(cancel)
+            raise
+        path = outcome.result.path.poses
+        if outcome.status != DONE or not path:
+            return False
+        last = path[-1].pose.position
+        return math.dist(end, (last.x, last.y)) <= PLAN_ENDPOINT_M
+
     def _goal_point(self, target: Point | Pose | Object, distance: float) -> tuple[Point, float] | None:
+        checked: set[Point] = set()
+        for end, yaw in self._goal_candidates(target, distance):
+            if end not in checked:
+                checked.add(end)
+                if self._nav_reaches(end, yaw):
+                    return end, yaw
+        if checked:
+            raise PathBlocked("Nav2 found no path to a usable goal on its live costmap")
+        return None
+
+    def _goal_candidates(self, target: Point | Pose | Object,
+                         distance: float) -> Iterator[tuple[Point, float]]:
         """A free spot on the static map within reach of the target, and the heading to arrive with."""
         goal, reach = self._reach(target, distance)
         if math.dist(goal, (self.x, self.y)) <= reach:
-            return None
+            return
         path = self._route(target, goal, reach)
         if path is None:
             raise PathBlocked(f"no free path to ({goal[0]:.1f}, {goal[1]:.1f})")
         if not path:  # already on the nearest floor there is
-            return None
+            return
         end = path[-1] if isinstance(target, Object) or self._occ(*goal, self.inflated) else goal
         if isinstance(target, Pose):
-            return end, math.radians(target.yaw)
-        if isinstance(target, Object) and distance > 0 and math.dist(end, goal) > 0.05:
-            return end, math.atan2(goal[1] - end[1], goal[0] - end[0])
-        before = path[-2] if len(path) > 1 else (self.x, self.y)
-        return end, math.atan2(end[1] - before[1], end[0] - before[0])
+            yield end, math.radians(target.yaw)
+        elif isinstance(target, Object) and distance > 0 and math.dist(end, goal) > 0.05:
+            yield end, math.atan2(goal[1] - end[1], goal[0] - end[0])
+        else:
+            before = path[-2] if len(path) > 1 else (self.x, self.y)
+            yield end, math.atan2(end[1] - before[1], end[0] - before[0])
 
     # ---- motion: the 2D world's skills call these, so every skill drives through Nav2 ---------------------------
     def _face_goal(self, goal: Point) -> None:

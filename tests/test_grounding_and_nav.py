@@ -164,6 +164,36 @@ class MockRosRobot(RosRobot):
     def _pose_msg(self, x: float, y: float, yaw: float) -> Any:
         return {"x": x, "y": y, "yaw": yaw}
 
+    def _nav_reaches(self, end, yaw=0.0):
+        return True
+
+
+def test_frontier_tries_next_candidate_when_nav2_success_ends_short():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    robot._plan = lambda end, _: [end]
+    robot._pose_msg = lambda x, y, yaw: (x, y)
+    requested = []
+
+    def completed(value):
+        future = Future()
+        future.set_result(value)
+        return future
+
+    def send(goal):
+        x, y = goal.goal
+        requested.append((x, y))
+        position = SimpleNamespace(x=x - 0.20 if x else x, y=y)
+        path = SimpleNamespace(poses=[SimpleNamespace(pose=SimpleNamespace(position=position))])
+        response = SimpleNamespace(status=4, result=SimpleNamespace(path=path))
+        return completed(SimpleNamespace(accepted=True, get_result_async=lambda: completed(response)))
+
+    name = "compute_path_to_pose"
+    robot.actions = {name: SimpleNamespace(wait_for_server=lambda **_: True, send_goal_async=send)}
+    robot.kinds = {name: SimpleNamespace(Goal=SimpleNamespace)}
+    assert robot._frontier_step([Pose(1.0, 0.0, 0.0), Pose(0.0, 1.5, 0.0)]) == (0.0, 1.5)
+    assert requested == [(1.0, 0.0), (0.0, 1.5)]
+
 
 def test_ros_robot_goal_point_heading_faces_object():
     scene = _make_scene()
@@ -894,6 +924,7 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
     assert passed is not None and passed.label == "umbrella" and passed.x > 2.5
 
     # Visible-side approach: when spotted from (1.0, 0.0) and now around the side at (2.8, 1.0), return toward spotted
+    real._nav_reaches = lambda *_: True
     umb = Object(passed.id, "umbrella", (passed.x, passed.y), 1.0, 0.0, "ahead", 0.2, "", 0.0)
     tracker.tracks[passed.id].spotted_from = (passed.x - 0.8, passed.y)
     real.x, real.y, real.yaw = passed.x, passed.y - 1.0, 0.0
@@ -916,6 +947,7 @@ def test_search_uses_unseen_map_frontiers_instead_of_zigzagging_when_no_camera_h
     scene = Scene(12.0, 6.0, [], {}, walls=[((0.0, -3.0), (0.0, 1.0))], start=Pose(-3.0, 0.0, 0.0))
     real = object.__new__(RealRobot)
     SimRobot.__init__(real, scene)
+    real._nav_reaches = lambda *_: True
     real.search_log, real._stepped_back, real._searching = [], False, True
     real.coverage = np.zeros_like(real.occupied)
     real._cover()
@@ -1026,6 +1058,7 @@ def test_floor_sees_now_and_spotted_standpoint_pull_in():
     moved: list[float] = []
     real._rotate = lambda a: setattr(real, "yaw", real.yaw + a)
     real._move = lambda d: (moved.append(d), setattr(real, "x", real.x + d * math.cos(real.yaw)))[0]
+    real._nav_reaches = lambda *_: True
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(RosRobot, "_go", lambda self, *a, **kw: None)
         real._go(umb, 0.0)

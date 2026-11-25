@@ -14,6 +14,7 @@ import re
 import threading
 import time
 from collections import Counter, deque
+from collections.abc import Iterator
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -593,42 +594,53 @@ class RealRobot(RosRobot):
                 return cand
         return None
 
-    def _goal_point(self, target: Point | Pose | Object, distance: float) -> tuple[Point, float] | None:
+    def _goal_candidates(self, target: Point | Pose | Object,
+                         distance: float) -> Iterator[tuple[Point, float]]:
         """For a standing/elevated visual track (e.g. an umbrella tucked behind a wall corner), approach from the
         visible `spotted_from` side rather than stopping on the occluded side of a corner."""
-        where = super()._goal_point(target, distance)
+        where = next(super()._goal_candidates(target, distance), None)
         if not isinstance(target, Object):
-            return where
+            if where is not None:
+                yield where
+            return
         goal, reach = self._reach(target, distance)
         cand = self._spotted_standpoint(target, distance)
         if cand is not None:
             if math.dist((self.x, self.y), cand) <= 0.25:
-                return where
+                if where is not None:
+                    yield where
+                return
             if self._plan(cand, 0.15) is not None:
-                return cand, math.atan2(goal[1] - cand[1], goal[0] - cand[0])
+                yield cand, math.atan2(goal[1] - cand[1], goal[0] - cand[0])
+        if where is None:
+            return
         tracker = getattr(self.perception, "tracker", None)
         if tracker is None:
-            return where
+            yield where
+            return
         with self.perception.lock:
             track = tracker.tracks.get(tracker.current(target.id))
-            if track is None or not track.visual or not track.present or track.radius <= 0.0:
-                return where
-            spotted = track.spotted_from
+            spotted = track.spotted_from if track and track.visual and track.present and track.radius > 0.0 else None
+        if spotted is None:
+            yield where
+            return
         ds = math.dist(spotted, goal)
-        if ds < 0.2 or where is None or self._occ(*spotted, self.inflated):
-            return where
+        if ds < 0.2 or self._occ(*spotted, self.inflated):
+            yield where
+            return
         end, _ = where
         # If A* stopped >60 deg off the side the robot actually saw it from, step onto the spotted_from ray.
         a_end = math.atan2(end[1] - goal[1], end[0] - goal[0])
         a_spot = math.atan2(spotted[1] - goal[1], spotted[0] - goal[0])
         if abs(math.atan2(math.sin(a_end - a_spot), math.cos(a_end - a_spot))) <= math.radians(60):
-            return where
+            yield where
+            return
         ux, uy = (spotted[0] - goal[0]) / ds, (spotted[1] - goal[1]) / ds
         for r in (reach, reach + 0.15, reach + 0.3, ds):
             cand = (goal[0] + min(r, ds) * ux, goal[1] + min(r, ds) * uy)
             if not self._occ(*cand, self.inflated) and self._plan(cand, 0.15) is not None:
-                return cand, math.atan2(goal[1] - cand[1], goal[0] - cand[0])
-        return where
+                yield cand, math.atan2(goal[1] - cand[1], goal[0] - cand[0])
+        yield where
 
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
         if isinstance(target, Object) and hasattr(getattr(self, "perception", None), "detector"):
@@ -645,8 +657,9 @@ class RealRobot(RosRobot):
             # Nav2's xy_goal_tolerance (0.25 m) can stop just off a narrow corner sightline (E2 umbrella: ~18 cm off
             # hid it behind the wall corner); step straight onto the spotting standpoint via drive_on_heading.
             try:
-                self._rotate(wrap(math.atan2(cand[1] - self.y, cand[0] - self.x) - self.yaw))
-                self._move(d)
+                if self._nav_reaches(cand):
+                    self._rotate(wrap(math.atan2(cand[1] - self.y, cand[0] - self.x) - self.yaw))
+                    self._move(d)
             except PathBlocked:
                 pass
 
@@ -846,27 +859,23 @@ class RealRobot(RosRobot):
     def _frontier_step(self, frontiers: list[Pose], max_leg: float = 3.2) -> Point | None:
         """Nearest frontier by A* path length (not Euclidean through walls), capped to `max_leg` m so cameras and
         mid-leg trail snapshots (4 m window) inspect every corridor along the way instead of driving 12 m blind."""
-        best: tuple[float, list[Point]] | None = None
+        candidates: list[tuple[float, Point]] = []
         for v in frontiers[:6]:
             path = self._plan((v.x, v.y), 0.25)
             if not path:
                 continue
             pts = [(self.x, self.y), *path]
-            total = sum(math.dist(a, b) for a, b in zip(pts, pts[1:], strict=False))
-            if best is None or total < best[0]:
-                best = (total, pts)
-        if best is None:
-            return None
-        dist, pts = 0.0, best[1]
-        for a, b in zip(pts, pts[1:], strict=False):
-            seg = math.dist(a, b)
-            if dist + seg >= max_leg and seg > 1e-6:
-                f = (max_leg - dist) / seg
-                cand = (a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]))
-                if not self._occ(*cand, self.inflated):
-                    return cand
-            dist += seg
-        return pts[-1]
+            dist, end = 0.0, path[-1]
+            for a, b in zip(pts, pts[1:], strict=False):
+                seg = math.dist(a, b)
+                if dist < max_leg <= dist + seg:
+                    f = (max_leg - dist) / seg
+                    cand = (a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]))
+                    if not self._occ(*cand, self.inflated):
+                        end = cand
+                dist += seg
+            candidates.append((dist, end))
+        return next((end for _, end in sorted(candidates, key=lambda item: item[0]) if self._nav_reaches(end)), None)
 
     def _next_stop(self, description: str, region: str | None, tried: list[Point]) -> Point | None:
         """Where a search looks next, judged by the vision model from what each camera shows: for each direction with
