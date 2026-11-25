@@ -22,7 +22,7 @@ def test_nearest_table_task_requires_ending_near_the_table_nearest_the_start():
     home = SimpleNamespace(truth=truth, path=[(0.0, 0.0, 0.0, 0.0)])
     for x, passed in [(0.0, False), (1.5, True), (3.5, False)]:
         home.path[1:] = [(5.0, x, 0.0, 0.0)]
-        assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
+        assert (not task.problem(Referee(home), {"xy": (0.0, 0.0)})) is passed
 
 
 def test_nearest_table_task_uses_the_footprint_instead_of_its_longest_half_side():
@@ -32,7 +32,7 @@ def test_nearest_table_task_uses_the_footprint_instead_of_its_longest_half_side(
     home = SimpleNamespace(truth={"objects": [table]}, path=[(0.0, 2.0, 0.0, 0.0)])
     for (x, y), passed in [((1.1, 0.0), False), ((0.9, 0.0), True), ((1.0, 1.3), False), ((0.0, 0.0), True)]:
         home.path[1:] = [(5.0, x, y, 0.0)]
-        assert task.check(Referee(home), {"xy": (2.0, 0.0)}) is passed
+        assert (not task.problem(Referee(home), {"xy": (2.0, 0.0)})) is passed
 
 
 @pytest.mark.parametrize(("task_id", "label"), [("T1", "table"), ("N3", "chair")])
@@ -47,7 +47,7 @@ def test_nearest_object_tasks_choose_the_closest_edge_not_the_closest_centre(tas
     home = SimpleNamespace(truth={"objects": objects}, path=[(0.0, 0.0, 0.0, 0.0)])
     for (x, y), passed in [((0.0, 1.0), False), ((1.0, 0.0), True)]:
         home.path[1:] = [(5.0, x, y, 0.0)]
-        assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
+        assert (not task.problem(Referee(home), {"xy": (0.0, 0.0)})) is passed
 
 
 def _rect(i, label, x, y, half_x, half_y):
@@ -64,7 +64,7 @@ def test_nearest_table_to_sofa_uses_both_footprints(task_id):
     home = SimpleNamespace(truth={"objects": objects}, path=[(0.0, 0.0, 0.0, 0.0)])
     for (x, y), passed in [((0.0, 0.8), False), ((2.2, 0.0), True)]:
         home.path[1:] = [(5.0, x, y, 0.0)]
-        assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
+        assert (not task.problem(Referee(home), {"xy": (0.0, 0.0)})) is passed
 
 
 @pytest.mark.parametrize("task_id", ["Q4", "C2"])
@@ -75,7 +75,7 @@ def test_sofa_vs_tv_uses_footprints_not_centres(task_id):
     for label, (x, y), passed in [("TV", (0.0, 1.0), False), ("sofa", (2.3, 0.0), True)]:
         home.path[1:] = [(5.0, x, y, 0.0)]
         referee = Referee(home, SimpleNamespace(trace=Trace(said=[(5.0, f"The {label} is closer.")])))
-        assert task.check(referee, {"xy": (0.0, 0.0)}) is passed
+        assert (not task.problem(referee, {"xy": (0.0, 0.0)})) is passed
 
 
 def test_closer_tv_task_accepts_arrival_at_tv_when_stand_is_closest_at_start():
@@ -85,7 +85,7 @@ def test_closer_tv_task_accepts_arrival_at_tv_when_stand_is_closest_at_start():
     home = SimpleNamespace(truth={"objects": objects}, path=[(0.0, 0.0, 0.0, 0.0)])
     for x, passed in [(1.0, True), (2.0, True), (4.0, False)]:
         home.path[1:] = [(5.0, x, 0.0, 0.0)]
-        assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
+        assert (not task.problem(Referee(home), {"xy": (0.0, 0.0)})) is passed
 
 
 def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):
