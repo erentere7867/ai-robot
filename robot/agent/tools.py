@@ -598,7 +598,8 @@ class Tools:
             dest = places.get(str(t).lower())
             if dest is not None and hasattr(dest, "x"):
                 left = math.dist((after.x, after.y), (dest.x, dest.y))
-                if left > 0.5:
+                requested = distance if distance is not None else (0.2 if side else 0.0)
+                if left > requested + 0.5:
                     return ActionResult(
                         f"Ended {left:.1f} m short of {self._name(t)} (moved {moved:.1f} m).",
                         False, "partial", moved,
