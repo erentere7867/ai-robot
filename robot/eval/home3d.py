@@ -122,7 +122,7 @@ def things(sim: Referee, label: str) -> list[TruthThing]:
 
 
 def gap(source: tuple[float, float] | TruthThing, t: TruthThing) -> float:
-    """Distance to the projected footprint from a point or another footprint; zero when they overlap."""
+    """Gap to a convex simulator hull; segments need a lengthwise axis to detect collinear separation."""
     if isinstance(source, TruthThing):
         a, b = source.footprint, t.footprint
         if len(a) < 2:
