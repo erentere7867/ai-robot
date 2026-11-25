@@ -330,14 +330,14 @@ class Agent:
                         messages.append({"role": "user", "content": self._review(instruction, record, tools)})
                         think = self._budget(news=False)
                         continue
-                    if reply.text and speak and not spoke_since_action:
-                        robot.say(speakable(reply.text))
-                    step.said = reply.text if not spoke_since_action else ""  # avoid duplicate speech after say()
-                    last_said = (reply.text if not spoke_since_action else "") or last_said
                     open_steps = tools.todo.open_steps()
                     if open_steps:
                         record.problems.append(f"open to-do steps left unfinished: {'; '.join(open_steps)}")
                         return self._finish(robot, record, "failed", last_said)
+                    if reply.text and speak and not spoke_since_action:
+                        robot.say(speakable(reply.text))
+                    step.said = reply.text if not spoke_since_action else ""  # avoid duplicate speech after say()
+                    last_said = (reply.text if not spoke_since_action else "") or last_said
                     return self._finish(robot, record, "done", last_said)
 
                 failed = False
