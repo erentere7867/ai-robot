@@ -29,8 +29,7 @@ from robot.interfaces.voice import chime as synth_chime
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
 DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
-# A Nav2 goal that has not brought the robot PROGRESS_M nearer in PROGRESS_S simulated seconds is given up: a search
-# stop Nav2 could not reach kept it backing up, spinning and replanning along one 2 m stretch for 490 s.
+# A search stop Nav2 could not reach kept it backing up, spinning and replanning along one 2 m stretch for 490 s.
 PROGRESS_S, PROGRESS_M = 30.0, 0.25
 
 
@@ -222,7 +221,15 @@ class RosRobot(SimRobot):
             setattr(goal, key, value)
         if watch is not None:
             self._check_goal(watch)
-        sent = client.send_goal_async(goal)
+        pose = fields.get("pose") if name == "navigate_to_pose" else None
+        to = (pose.pose.position.x, pose.pose.position.y) if pose is not None else None
+        remaining = 0.0
+
+        def feedback(msg: Any) -> None:
+            nonlocal remaining
+            remaining = msg.feedback.distance_remaining
+
+        sent = client.send_goal_async(goal, feedback_callback=feedback) if to is not None else client.send_goal_async(goal)
         try:
             while not sent.done():
                 self._step(0.0, 0.0)
@@ -238,19 +245,28 @@ class RosRobot(SimRobot):
             raise PathBlocked(f"{name} refused the goal")
         self._goal, result = handle, handle.get_result_async()
         next_check = 0.0
-        to = (fields["pose"].pose.position.x, fields["pose"].pose.position.y) if "pose" in fields else None
-        best, since = math.inf, self.t
+        best_gap, best_route, since = math.inf, math.inf, self.t
+        route_at = (self.x, self.y)
         try:
             while not result.done():
                 self._step(0.0, 0.0)
                 if watch is not None and time.monotonic() >= next_check:
                     self._check_goal(watch)
                     next_check = time.monotonic() + 0.2
-                if to is not None:  # Nav2 retries and recovers for as long as it likes; a goal that gets no nearer ends
-                    gap = math.dist(to, (self.x, self.y))
-                    if gap < best - PROGRESS_M:
-                        best, since = gap, self.t
-                    elif self.t - since > PROGRESS_S:
+                if to is not None and not result.done():
+                    here = (self.x, self.y)
+                    gap = math.dist(to, here)
+                    if gap < best_gap - PROGRESS_M:
+                        best_gap, since = gap, self.t
+                    # An apartment route measured 13.12 m for a 7.23 m straight line. Count progress along detours,
+                    # but not a shorter replan while stationary or Nav2's zero feedback when no path is available.
+                    left = remaining
+                    if math.isfinite(left) and left > 0:
+                        if best_route == math.inf:
+                            best_route, route_at = left, here
+                        elif left < best_route - PROGRESS_M and math.dist(here, route_at) >= PROGRESS_M:
+                            best_route, route_at, since = left, here, self.t
+                    if self.t - since > PROGRESS_S:
                         raise PathBlocked(f"no nearer to ({to[0]:.1f}, {to[1]:.1f}) in {PROGRESS_S:g} s")
         except BaseException as exc:
             handle.cancel_goal_async()

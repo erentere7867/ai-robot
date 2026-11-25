@@ -218,7 +218,8 @@ def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
     assert cancelled == [True]
 
 
-def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled():
+@pytest.mark.parametrize("feedback_mode", ["missing", "oscillating", "stationary replans", "empty path"])
+def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled(feedback_mode):
     from robot.ros.robot import PROGRESS_S
 
     robot = MockRosRobot(_make_scene())
@@ -229,20 +230,83 @@ def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled():
         result.set_result(SimpleNamespace(status=5))
 
     sent.set_result(SimpleNamespace(accepted=True, cancel_goal_async=cancel, get_result_async=lambda: result))
-    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True,
-                                                        send_goal_async=lambda goal: sent)}
+    report = None
+
+    def send(goal, *, feedback_callback=None):
+        nonlocal report
+        report = feedback_callback
+        return sent
+
+    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True, send_goal_async=send)}
     robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
     robot._publish = lambda v, w: None
 
     def step(v, w):  # Nav2 backs up, spins and replans: a second passes and the robot is no nearer
         robot.t += 1.0
-        robot.x = 0.3 * math.sin(robot.t)
+        if feedback_mode != "stationary replans":
+            robot.x = 0.3 * math.sin(robot.t)
+        if feedback_mode == "oscillating":
+            report(SimpleNamespace(feedback=SimpleNamespace(distance_remaining=4.0 - robot.x)))
+        elif feedback_mode == "stationary replans":
+            report(SimpleNamespace(feedback=SimpleNamespace(distance_remaining=8.0 - 0.1 * robot.t)))
+        elif feedback_mode == "empty path":
+            report(SimpleNamespace(feedback=SimpleNamespace(distance_remaining=0.0)))
 
     robot._step = step
     goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
     with pytest.raises(PathBlocked, match="no nearer"):
         RosRobot._act(robot, "navigate_to_pose", pose=goal)
     assert len(cancelled) == 1 and PROGRESS_S < cancelled[0] <= PROGRESS_S + 2
+
+
+def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_goal():
+    from robot.ros.robot import PROGRESS_S
+
+    robot = MockRosRobot(_make_scene())
+    sent, result = Future(), Future()
+    cancelled = []
+
+    def cancel():
+        cancelled.append(robot.t)
+        result.set_result(SimpleNamespace(status=5))
+
+    sent.set_result(SimpleNamespace(accepted=True, cancel_goal_async=cancel, get_result_async=lambda: result))
+    report = None
+
+    def send(goal, *, feedback_callback=None):
+        nonlocal report
+        report = feedback_callback
+        return sent
+
+    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True, send_goal_async=send)}
+    robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
+    robot._publish = lambda v, w: None
+    route = [(0.0, 0.0), (-4.0, 0.0), (-4.0, 3.0), (3.0, 3.0), (3.0, 0.0)]
+    legs = [(a, b, math.dist(a, b)) for a, b in zip(route, route[1:], strict=False)]
+    total = sum(length for _, _, length in legs)
+
+    def step(v, w):
+        robot.t += 1.0
+        travelled = robot.t * 0.2
+        if travelled >= total:
+            robot.x, robot.y = route[-1]
+            result.set_result(SimpleNamespace(status=4))
+            return
+        offset = travelled
+        for a, b, length in legs:
+            if offset <= length:
+                robot.x, robot.y = (start + (end - start) * offset / length for start, end in zip(a, b, strict=True))
+                break
+            offset -= length
+        if robot.t == PROGRESS_S + 2:
+            assert math.dist((robot.x, robot.y), route[-1]) > math.dist(route[0], route[-1])
+        if report is not None:
+            report(SimpleNamespace(feedback=SimpleNamespace(distance_remaining=total - travelled)))
+
+    robot._step = step
+    goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
+    RosRobot._act(robot, "navigate_to_pose", pose=goal)
+    assert (robot.x, robot.y) == route[-1] and not cancelled
 
 
 def test_ros_robot_go_arrival_tolerance_absorbs_nav2_abort():
