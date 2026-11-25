@@ -169,6 +169,7 @@ def test_depth_is_normalised_into_the_kept_buffer_as_before():
     for picture in pictures:
         models.run_depth(picture)
     for picture, fed in zip(pictures, seen, strict=True):
-        assert np.allclose(fed, (picture * server._DEPTH_SCALE + server._DEPTH_BIAS).transpose(2, 0, 1)[None], atol=1e-5)
+        normalised = (picture * server._DEPTH_SCALE + server._DEPTH_BIAS).transpose(2, 0, 1)[None]
+        assert np.allclose(fed, normalised, atol=1e-5)
     with pytest.raises(ValueError):
         models.run_depth(pictures[0, :1])
