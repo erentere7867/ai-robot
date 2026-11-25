@@ -237,6 +237,7 @@ def _expected_tof_floor(grid: np.ndarray, pitch_rad: float = 0.0, roll_rad: floa
 
 
 SECTOR_AGE = 1.0  # seconds: a camera's sector older than this is left out of /scan
+MEASURED_SCAN_TOPIC = "/scan_measured"
 # Touching what no sensor saw (a table's tube frame, a chair leg): the motors are driven and the wheels do not turn.
 STALL_V = 0.05  # m/s: a drive command at least this fast...
 STALL_S = 0.3  # ...while the wheels turn at under a quarter of it for this long: something holds the body
@@ -314,6 +315,7 @@ class SyntheticScanPublisher:
         self._external_scan: bool = False
         self._lock = threading.Lock()
         self._pub: Any = None
+        self._measured_pub: Any = None
         self._laser_scan_cls: Any = None
         self._last_pub_s: float = -1.0
         self._drive = (-1e9, 0.0)  # when, and the forward speed the motors were last told
@@ -330,6 +332,7 @@ class SyntheticScanPublisher:
             if self.publish and publish_topic:
                 self._laser_scan_cls = LaserScan
                 self._pub = node.create_publisher(LaserScan, publish_topic, 10)
+                self._measured_pub = node.create_publisher(LaserScan, MEASURED_SCAN_TOPIC, 10)
                 self.odom_at = _odometry_lookup(node)
                 self._clock = node.get_clock
                 now = lambda: _seconds(node.get_clock().now().to_msg())  # noqa: E731
@@ -381,7 +384,7 @@ class SyntheticScanPublisher:
                 parts = [p for p in self.parts.values() if t - p[0] <= SECTOR_AGE]
                 scan = combine([*parts, self._contact_part(t, pose)], pose)
                 self._last_pub_s = max(self._last_pub_s, t)
-            self._publish_scan(stamp, scan)
+            self._publish_scan(self._pub, stamp, scan)
         return True
 
     def _contact_part(self, t: float, pose: tuple[float, float, float],
@@ -461,17 +464,22 @@ class SyntheticScanPublisher:
         with self._lock:
             self.parts[name] = (t, pose, part)
             parts = [p for p in self.parts.values() if t - p[0] <= SECTOR_AGE]
-            scan = combine([*parts, self._contact_part(t, pose)], pose)
+            measured = combine(parts, pose)
+            scan = measured
+            if self.contacts:
+                contacts, _, _ = combine([self._contact_part(t, pose)], pose)
+                scan = np.fmin(measured[0], contacts), measured[1], measured[2]
             self.scan = scan
             self.scans.append((t, scan))
             should_pub = self._pub is not None and t > self._last_pub_s
             if should_pub:
                 self._last_pub_s = t
         if should_pub:
-            self._publish_scan(stamp, scan)
+            self._publish_scan(self._pub, stamp, scan)
+            self._publish_scan(self._measured_pub, stamp, measured)
         return scan
 
-    def _publish_scan(self, stamp: Any, scan: tuple[np.ndarray, float, float]) -> None:
+    def _publish_scan(self, publisher: Any, stamp: Any, scan: tuple[np.ndarray, float, float]) -> None:
         ranges, angle_min, step = scan
         msg = self._laser_scan_cls()
         msg.header.stamp = stamp
@@ -482,7 +490,7 @@ class SyntheticScanPublisher:
         msg.range_min = 0.12
         msg.range_max = 8.0
         msg.ranges = array.array("f", np.asarray(ranges, np.float32).tobytes())  # inf: clear floor; nan: unseen
-        self._pub.publish(msg)
+        publisher.publish(msg)
 
 
 class Perception:
@@ -519,8 +527,12 @@ class Perception:
         for name, topic in TOPICS.items():
             node.create_subscription(Image, topic, lambda m, n=name: self._frame(n, m), qos_profile_sensor_data)
         node.create_subscription(LaserScan, "/scan", self._scan, qos_profile_sensor_data)
+        self.measured_scan: Any = None
+        node.create_subscription(LaserScan, MEASURED_SCAN_TOPIC, lambda m: setattr(self, "measured_scan", m),
+                                 qos_profile_sensor_data)
 
-        self.pose_sigma = (0.05, math.radians(2.0))  # how unsure localisation is: metres, radians (from AMCL)
+        self.pose_sigma = (0.05, math.radians(2.0))
+        self.amcl_sigma: tuple[float, float] | None = None
         node.create_subscription(PoseWithCovarianceStamped, "/amcl_pose", self._amcl, 10)
         self._stop = False
         threading.Thread(target=self._loop, daemon=True).start()
@@ -573,6 +585,7 @@ class Perception:
     def _amcl(self, msg: Any) -> None:
         c = msg.pose.covariance
         self.pose_sigma = (math.sqrt(max(0.0, (c[0] + c[7]) / 2)), math.sqrt(max(0.0, c[35])))
+        self.amcl_sigma = self.pose_sigma if all(math.isfinite(v) and v >= 0 for v in (c[0], c[7], c[35])) else None
 
     def _imu(self, msg: Any) -> None:
         self.scan_bridge._imu(msg)
@@ -752,17 +765,23 @@ class Perception:
                         self.doubts.setdefault(track.id, (track.label, where))
 
     def render_annotated_view(self, camera: str, width: int, height: int, min_stamp: float) -> np.ndarray | None:
+        view = self.annotated_observation(camera, width, height, min_stamp)
+        return view[0] if view is not None else None
+
+    def annotated_observation(self, camera: str, width: int, height: int,
+                              min_stamp: float) -> tuple[np.ndarray, frozenset[int], float] | None:
         """Show badges only on their own recent exposure. If detection stalls, show current unmarked RGB instead."""
         with self.lock:
             frame = self.detected.get(camera)
             if frame is not None and frame[0] >= min_stamp:
-                rgb = frame[1]
+                stamp, rgb = frame
                 raw_boxes = list(self.boxes.get(camera, ()))
             else:
                 frame = self.frames.get(camera)
                 if frame is None or _seconds(frame[0]) < min_stamp:
                     return None
                 rgb, raw_boxes = frame[1], []
+                stamp = _seconds(frame[0])
             labels_by_id = {t.id: t.label for t in self.tracker.tracks.values()}
             hidden = {t.id for t in self.tracker.tracks.values() if t.rejected or not t.present}
             raw_boxes = [(b, self.tracker.current(tid)) for b, tid in raw_boxes]
@@ -796,7 +815,8 @@ class Perception:
         if cam is not None and (target_w != orig_w or target_h != orig_h):
             cam = replace(cam, width=target_w, height=target_h)
 
-        return draw_set_of_mark(img, boxes_with_labels, cam=cam)
+        marks = frozenset(tid for _, tid, _ in boxes_with_labels)
+        return draw_set_of_mark(img, boxes_with_labels, cam=cam), marks, stamp
 
     def objects(self) -> list[Track]:
         with self.lock:

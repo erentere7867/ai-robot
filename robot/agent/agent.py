@@ -140,35 +140,68 @@ class Agent:
             self._robot.cancel()
 
     # ---- what the model sees -----------------------------------------------------------------------------------
-    def _scene_text(self, robot: Any) -> str:
-        snap = robot.snapshot()
+    def _scene_text(self, robot: Any, marked_ages: dict[int, float] | None, full: bool) -> tuple[str, set[int]]:
+        snap, lines = robot.snapshot(), []
+        if full:
+            rooms = [r for r in snap.get("rooms", []) if r]
+            lines.append(f"You are in the {snap.get('room') or 'room'}"
+                         + (f" (rooms you know: {', '.join(rooms)})" if len(rooms) > 1 else "")
+                         + f". Battery {snap.get('battery', 1.0):.0%}.")
+        objects, listed_marks = self._objects_text(snap, marked_ages, full)
+        lines.extend([objects, *self._spatial_lines(robot, snap)])
+        if full and (places := self._places_text(robot, snap.get("pose"))):
+            lines.append(places)
+        return "\n".join(lines), listed_marks
+
+    @staticmethod
+    def _objects_text(snap: dict[str, Any], marked_ages: dict[int, float] | None, full: bool) -> tuple[str, set[int]]:
         user_id = snap.get("user")
-        rooms = [r for r in snap.get("rooms", []) if r]
-        lines = [f"You are in the {snap.get('room') or 'room'}"
-                 + (f" (rooms you know: {', '.join(rooms)})" if len(rooms) > 1 else "")
-                 + f". Battery {snap.get('battery', 1.0):.0%}."]
-        everything = sorted(snap.get("objects", []), key=lambda o: o.distance)
+        marks = marked_ages or {}
+        everything = sorted(snap.get("objects", []), key=lambda o: (o.id not in marks, o.distance))
         objects = everything[:MAX_OBJECTS]
         if user_id is not None and not any(o.id == user_id for o in objects):
             user_obj = next((o for o in everything if o.id == user_id), None)
             if user_obj is not None:
                 objects = [*objects[:MAX_OBJECTS - 1], user_obj]
         rest = len(everything) - len(objects)
-        if objects:
-            lines.append("Objects (id, what, colour, how far, which way):")
-            for o in objects:
-                who = "person (the user)" if o.id == user_id else o.label
-                tint = f", {o.color}" if o.color and o.id != user_id else ""
-                seen = "" if o.last_seen < 2 else f", seen {o.last_seen:.0f} s ago"
-                lines.append(f"  {o.id} {who}{tint}, {o.distance:.1f} m {o.side}{seen}")
-            if rest > 0:
-                lines.append(f"  (+{rest} farther; use look, search, or recall to inspect others)")
-        else:
-            lines.append("Objects: none seen yet.")
-        places = self._places_text(robot, snap.get("pose"))
-        if places:
-            lines.append(places)
-        return "\n".join(lines)
+        if not objects:
+            return "Objects: none seen yet.", set()
+        groups: dict[str, list[str]] = {}
+        for o in objects:
+            who = "person (the user)" if o.id == user_id else o.label
+            row = f"{o.id} {who}"
+            if full:
+                if o.color and o.id != user_id:
+                    row += f", {o.color}"
+                row += f", {o.distance:.1f} m {o.side}"
+            age = marks.get(o.id, o.last_seen)
+            if marked_ages is not None or age >= 2:
+                row += ", seen <1 s ago" if age < 1 else f", seen {age:.0f} s ago"
+            group = ("Objects" if marked_ages is None else "Marked at capture" if o.id in marks
+                     else "Last known (not marked at capture)")
+            groups.setdefault(group, []).append(row)
+        sep = "\n  " if full else "; "
+        lines = [f"{group}:{sep}{sep.join(rows)}" for group, rows in groups.items()]
+        if rest > 0:
+            lines.append(f"(+{rest} more)")
+        return "\n".join(lines), {o.id for o in objects if o.id in marks}
+
+    @staticmethod
+    def _spatial_lines(robot: Any, snap: dict[str, Any]) -> list[str]:
+        lines = []
+        if (pose := snap.get("pose")) is not None:
+            lines.append(f"Map pose: ({pose.x:.1f}, {pose.y:.1f}) m, heading {pose.yaw:.0f}°.")
+        if spatial := getattr(robot, "spatial_observation", None):
+            sigma, scan = spatial()
+            if sigma is not None:
+                lines.append(f"AMCL uncertainty (1 sigma): {sigma[0]:.2f} m, {math.degrees(sigma[1]):.0f}° heading.")
+            if isinstance(scan, str):
+                lines.append(f"Scan: {scan}.")
+            else:
+                sectors = "; ".join(f"{name} {r:.1f} m" if r is not None else f"{name} unknown"
+                                    for name, r in scan.items())
+                lines.append(f"Scan (nearest sensor return): {sectors}.")
+        return lines
 
     @staticmethod
     def _places_text(robot: Any, pose: Any) -> str:
@@ -199,34 +232,47 @@ class Agent:
 
     def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str, *,
                      include_scene: bool = True, camera_limit: int | None = None) -> dict[str, Any]:
-        parts: list[dict[str, Any]] = []
-        if include_scene:
-            text = f"{header}\n{self._scene_text(robot)}"
-            if tools.todo.steps:
-                text += f"\nTo-do list:\n{tools.todo.text()}"
-            parts.append({"type": "text", "text": text})
+        observe = getattr(robot, "camera_observation", None)
         view_fn = getattr(robot, "camera_view", None)
-        shown = []
         width, height = self.image_width, round(self.image_width * 9 / 16)
+        views = []
         for cam in cameras:
-            frame = view_fn(cam, width, height) if view_fn else None
-            if frame is None or getattr(frame, "size", 0) == 0:
-                continue
-            url = data_url(frame, max_width=width)
-            name = CAMERA_NAMES.get(cam, cam)
-            parts += [{"type": "text", "text": f"{name} camera:"}, _image_part(url)]
-            shown.append(name)
-            if len(shown) == camera_limit:
+            if len(views) == camera_limit:
                 break
-        for caption, rgb in tools.pictures:
-            parts += [{"type": "text", "text": caption}, _image_part(data_url(rgb, max_width=width))]
-            shown.append(caption)
+            if observe:
+                view = observe(cam, width, height)
+                frame, ids = view if view is not None else (None, None)
+            else:
+                frame, ids = (view_fn(cam, width, height) if view_fn else None), None
+            if frame is not None and getattr(frame, "size", 0):
+                views.append((f"{CAMERA_NAMES.get(cam, cam)} camera:", frame, ids))
+        recorded = len(tools.pictures)
+        views.extend((caption, rgb, None) for caption, rgb in tools.pictures)
         tools.pictures.clear()
-        if include_scene:
-            if not shown and cameras:
-                parts[0]["text"] += "\n(No camera pictures right now.)"
-            elif not shown:
-                parts[0]["text"] += "\n(No pictures with this message: call look to see.)"
+        views = views[-MAX_IMAGES:]
+        marked_ages = {}
+        for _, _, ages in views:
+            for track_id, age in (ages or {}).items():
+                marked_ages[track_id] = min(age, marked_ages.get(track_id, age))
+        parts: list[dict[str, Any]] = []
+        listed_marks: set[int] = set()
+        text = ""
+        if include_scene or observe:
+            text, listed_marks = self._scene_text(robot, marked_ages if observe else None, include_scene)
+            if include_scene:
+                text = f"{header}\n{text}"
+                if tools.todo.steps:
+                    text += f"\nTo-do list:\n{tools.todo.text()}"
+                if not views and not cameras:
+                    text += "\n(No pictures with this message: call look to see.)"
+        if cameras and len(views) <= recorded:
+            text = "\n".join(filter(None, (text, "No recent camera pictures attached.")))
+        if text:
+            parts.append({"type": "text", "text": text})
+        for caption, rgb, ages in views:
+            if ages and (ids := sorted(listed_marks.intersection(ages))):
+                caption = f"{caption[:-1]} (badges {', '.join(map(str, ids))}):"
+            parts += [{"type": "text", "text": caption}, _image_part(data_url(rgb, max_width=width))]
         return {"role": "user", "content": parts}
 
     @staticmethod
@@ -434,8 +480,8 @@ class Agent:
                         recorded = len(tools.pictures)
                         seen = self._observation(robot, tools, cameras, "What you sense now:",
                                                  include_scene=self.see_after_moves is True and tools.moved)
-                        if any(part["type"] == "image_url" for part in seen["content"]):
-                            visual_parts = seen["content"]
+                        visual_parts = seen["content"]
+                        if any(part["type"] == "image_url" for part in visual_parts):
                             barrier = barrier or (
                                 "Not run: inspect the returned pictures before deciding the next action."
                             )
@@ -444,7 +490,6 @@ class Agent:
                             barrier = barrier or (
                                 "Not run: no recent camera pictures were available after the previous action."
                             )
-                            result += " No recent camera pictures are available."
                     step.calls.append((call.name, call.args, result, ok))
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
                     if visual_parts:

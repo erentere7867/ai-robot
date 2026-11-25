@@ -74,6 +74,19 @@ def test_same_mission_keeps_each_layout_report_and_photos(tmp_path):
         assert f"{scene}" in index.split(f"{scene}/M1/report.html'>", 1)[1].split("</a>", 1)[0]
 
 
+def test_keep_pictures_records_the_same_exposure_without_dropping_its_badge_ids(tmp_path):
+    frame = np.full((8, 8, 3), 71, dtype=np.uint8)
+    exposure = frame, {7: 0.25}
+    robot = SimpleNamespace(t=1.0, camera_view=lambda *_: None,
+                            camera_observation=lambda camera, *_: exposure if camera == "front_camera" else None)
+    kept = keep_pictures(robot, tmp_path)
+
+    assert robot.camera_observation("front_camera", 8, 8) is exposure
+    assert robot.camera_observation("rear_left_camera", 8, 8) is None
+    assert kept == [(1.0, "001_front_camera.jpg")]
+    assert (tmp_path / kept[0][1]).is_file()
+
+
 def test_views_score_counts_found_and_false_against_the_truth(tmp_path, capsys):
     from robot.eval.views import score
 

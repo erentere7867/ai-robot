@@ -29,6 +29,7 @@ from robot.perception.rig import RIG, to_map, to_robot
 from robot.perception.tracker import Track, canonical, pixels
 from robot.ros.explore import MAX_PLACES, PLACE_GAP, describe_place, load_places, unique_place_name
 from robot.ros.perceive import (
+    SECTOR_AGE,
     Perception,
     _nanoseconds,
     _seconds,
@@ -38,8 +39,8 @@ from robot.ros.perceive import (
     see_probability,
     taken_with,
 )
-from robot.ros.robot import RosRobot
-from robot.sim.world import COLORS, RES, Scene, SimRobot, Thing, visual_name
+from robot.ros.robot import RosRobot, nearest_scan_return
+from robot.sim.world import BEARINGS, COLORS, RES, Scene, SimRobot, Thing, visual_name
 
 SEEN_NOW = 1.5  # seconds: a track seen this recently is "in view now"
 LOOKS = 3  # frames each camera looks with a word before what it names counts as not in view: a thing takes two sightings
@@ -343,6 +344,25 @@ class RealRobot(RosRobot):
     def camera_view(self, camera: str = "front_camera", width: int = 512, height: int = 288) -> np.ndarray | None:
         """The latest real frame from one camera with the tracker's ids marked, as the vision model sees it."""
         return self.perception.render_annotated_view(camera, width, height, self._now() - SEEN_NOW)
+
+    def camera_observation(self, camera: str, width: int, height: int) -> tuple[np.ndarray, dict[int, float]] | None:
+        now = self._now()
+        if view := self.perception.annotated_observation(camera, width, height, now - SEEN_NOW):
+            frame, ids, stamp = view
+            return frame, dict.fromkeys(ids, max(0.0, now - stamp))
+        return None
+
+    def spatial_observation(self) -> tuple[tuple[float, float] | None, dict[str, float | None] | str]:
+        return self.perception.amcl_sigma, self._scan_observation()
+
+    def _scan_observation(self) -> dict[str, float | None] | str:
+        scan = self.perception.measured_scan
+        if scan is None or scan.header.frame_id != "base_link":
+            return "unavailable"
+        if not 0 <= self._now() - _seconds(scan.header.stamp) <= SECTOR_AGE:
+            return "stale"
+        return {name: nearest_scan_return(scan, math.radians(BEARINGS[name]))
+                for name in ("front", "left", "right", "behind")}
 
     def marked_cameras(self, ids: set[int]) -> list[str]:
         """Fewest current views covering the visible choices. At a seam one camera showed only the farther chair."""

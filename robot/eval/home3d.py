@@ -83,7 +83,16 @@ def keep_pictures(robot: Any, folder: Path, kept: list[tuple[float, str]] | None
             kept.append((round(robot.t, 1), name))
         return frame
 
-    robot.camera_view = lambda camera="front_camera", width=512, height=288: save(camera, view(camera, width, height))
+    if observe := getattr(robot, "camera_observation", None):
+        def observation(camera: str, width: int, height: int) -> Any:
+            view = observe(camera, width, height)
+            if view is not None:
+                save(camera, view[0])
+            return view
+
+        robot.camera_observation = observation
+    else:
+        robot.camera_view = lambda camera="front_camera", width=512, height=288: save(camera, view(camera, width, height))
     if crop := getattr(robot, "target_crop", None):
         robot.target_crop = lambda i: save(f"candidate_{i}", crop(i))
     return kept

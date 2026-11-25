@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from robot.agent.agent import Agent
-from robot.agent.api import NotFound, Pose, Preempted
+from robot.agent.api import NotFound, Object, Pose, Preempted
 from robot.agent.tools import Tools
 from robot.eval.suite import living_room, office
 from robot.mind.brain import Reply, ToolCall
@@ -148,6 +148,86 @@ def test_the_same_call_again_and_again_is_refused_with_a_note():
     assert tool_results(brain.seen[3])[-1].startswith("Not run: you made this exact call 2 times")
 
 
+def test_observation_marks_only_tracks_from_attached_exposures_and_bounds_the_list(monkeypatch):
+    sim = SimRobot(living_room())
+    frame = np.zeros((20, 20, 3), dtype=np.uint8)
+    objects = [Object(i, f"track {i}", (i, 0), i, 0, "ahead", 0.2, "", 9 if i in (2, 9) else 0.5)
+               for i in range(1, 11)]
+    monkeypatch.setattr(sim, "snapshot", lambda: {"objects": objects, "user": 10})
+    marks = {"front_camera": {9: 0.25}, "rear_left_camera": {9: 1.25, 2: 0.5}, "rear_right_camera": {}}
+    monkeypatch.setattr(sim, "camera_observation", lambda camera, *_: (frame, marks[camera]), raising=False)
+
+    brain = Scripted(call("look", direction="rear-right"), call("look", direction="around"), say("Done."))
+    Agent(brain, cameras="front").do("What can you see?", sim)
+    first = _text(brain.seen[0][1]["content"])
+    marked, known = first.split("Last known")
+    assert "Marked at capture:\n  9 track 9, 9.0 m ahead, seen <1 s ago" in marked
+    assert "2 track 2, 2.0 m ahead, seen 9 s ago" in known
+    assert "10 person (the user)" in known and "(+2 more)" in known
+    assert len([line for line in first.splitlines() if line.strip()[:1].isdigit()]) == 8
+    latest = tool_results(brain.seen[1])[-1]
+    assert "2 track 2, seen 9 s ago" in latest[1]["text"]
+    assert "Last known" in latest[1]["text"] and "Marked at capture" not in latest[1]["text"]
+    older = brain.seen[2][1]["content"]
+    assert not any(p["type"] == "image_url" for p in older)
+    assert "Marked at capture:\n  9 track 9" in _text(older)
+    assert not any("(badges " in p.get("text", "") for p in older)
+    assert "9 track 9, seen <1 s ago" in tool_results(brain.seen[2])[-1][1]["text"]
+
+    tools = Tools(sim)
+    tools.pictures.extend([("Recorded crop:", frame)] * 2)
+    observation = Agent(brain)._observation(sim, tools, list(marks), "Now:")
+    assert "Marked at capture" not in _text(observation["content"])
+    assert sum(p["type"] == "image_url" for p in observation["content"]) == 3
+
+    limited = Agent(brain)._observation(sim, tools, list(marks), "Correction:", camera_limit=1)
+    marked, known = _text(limited["content"]).split("Last known")
+    assert "9 track 9, 9.0 m ahead, seen <1 s ago" in marked
+    assert "2 track 2, 2.0 m ahead, seen 9 s ago" in known
+    assert limited["content"][1]["text"] == "front camera (badges 9):"
+    assert sum(p["type"] == "image_url" for p in limited["content"]) == 1
+
+
+def test_trimming_one_picture_keeps_the_badges_of_the_other_pictures(monkeypatch):
+    sim = SimRobot(living_room())
+    frame = np.zeros((20, 20, 3), dtype=np.uint8)
+    objects = [Object(i, f"track {i}", (i, 0), i, 0, "ahead", 0.2, "", 0.5) for i in (1, 2, 3)]
+    monkeypatch.setattr(sim, "snapshot", lambda: {"objects": objects})
+    marks = {"front_camera": {1: 0.5}, "rear_left_camera": {2: 0.5}, "rear_right_camera": {1: 0.5, 3: 0.5}}
+    monkeypatch.setattr(sim, "camera_observation", lambda camera, *_: (frame, marks[camera]), raising=False)
+
+    brain = Scripted(call("look", direction="front"), say("Done."))
+    Agent(brain).do("What can you see?", sim)
+    first = brain.seen[0][1]["content"]
+    assert first[1]["text"] == "front camera (badges 1):"
+    older = brain.seen[1][1]["content"]
+    captions = [p.get("text") for p in older if "(badges " in p.get("text", "")]
+    assert captions == ["rear-left camera (badges 2):", "rear-right camera (badges 1, 3):"]
+    assert sum(p["type"] == "image_url" for p in older) == 2
+
+
+def test_spatial_context_reaches_the_model_without_extra_images(monkeypatch):
+    sim = SimRobot(living_room())
+    brain = Scripted(call("look", direction="front"), say("Done."))
+    monkeypatch.setattr(sim, "snapshot", lambda: {"pose": Pose(1.25, -1.0, 90)})
+    monkeypatch.setattr(sim, "spatial_observation",
+                        lambda: ((0.12, math.radians(7)), {"front": 1.2, "left": None}), raising=False)
+    monkeypatch.setattr(sim, "camera_observation", lambda *_: None, raising=False)
+    Agent(brain, cameras="none").do("How far is the wall?", sim)
+    text = _text(brain.seen[0][1]["content"])
+    assert "Map pose: (1.2, -1.0) m, heading 90°." in text
+    assert "AMCL uncertainty (1 sigma): 0.12 m, 7° heading." in text
+    assert "Scan (nearest sensor return): front 1.2 m; left unknown." in text
+    assert not any(p["type"] == "image_url" for p in brain.seen[0][1]["content"])
+    follow_up = tool_results(brain.seen[1])[-1]
+    assert "Map pose: (1.2, -1.0) m, heading 90°." in follow_up[1]["text"]
+    assert "AMCL uncertainty (1 sigma): 0.12 m, 7° heading." in follow_up[1]["text"]
+    assert "Scan (nearest sensor return):" in follow_up[1]["text"]
+    assert "No recent camera pictures attached." in follow_up[1]["text"]
+    assert sum(p.get("text", "").count("No recent camera pictures") for p in follow_up) == 1
+    assert not any(p["type"] == "image_url" for p in follow_up)
+
+
 def test_repeated_look_samples_the_requested_camera_again_while_stationary(monkeypatch):
     sim = SimRobot(living_room())
     reads = []
@@ -252,8 +332,9 @@ def test_unavailable_post_turn_picture_is_reported_without_executing_the_rest_of
     brain = Scripted(batch, say("I turned but can't see whether the way is clear."))
     Agent(brain, think_when="news").do("Turn left and move if the way is clear.", sim)
     turned, skipped = tool_results(brain.seen[1])
-    assert "Turned 90 degrees left." in turned
-    assert "No recent camera pictures are available." in turned
+    assert "Turned 90 degrees left." in _text(turned)
+    assert turned[1]["text"] == "No recent camera pictures attached."
+    assert sum(p.get("text", "").count("No recent camera pictures") for p in turned) == 1
     assert "no recent camera pictures were available" in skipped
     assert brain.thinks[1] == 128
     assert [e.name for e in sim.trace.events if e.name in {"turn", "move"}] == ["turn"]
