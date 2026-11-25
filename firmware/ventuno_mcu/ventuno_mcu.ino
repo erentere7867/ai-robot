@@ -131,14 +131,16 @@ bool rangeFresh(uint32_t now) {
   return rangeValid && now - lastRangeMs < RANGE_TIMEOUT_MS;
 }
 
-void checkSafety(uint32_t now) {
+int checkSafety(uint32_t now) {
+  int rangeFault = rangeFresh(now) ? 0 : 256;
   latchedFlags |= physicalFlags();
   if (estopCmd) latchedFlags |= 4;
   if (motorsEnabled) {
-    if (!rangeFresh(now)) latchedFlags |= 256;
+    latchedFlags |= rangeFault;
     if (now - lastCmdMs >= WATCHDOG_MS || now - lastDriveMs >= CONTROL_WATCHDOG_MS) latchedFlags |= 2048;
     if (latchedFlags) setMotorGate(false);
   }
+  return latchedFlags | rangeFault;
 }
 
 void safetyTick(struct k_timer *) {
@@ -148,9 +150,8 @@ void safetyTick(struct k_timer *) {
 }
 K_TIMER_DEFINE(safetyTimer, safetyTick, nullptr);
 
-bool motionBlocked(uint32_t now) {
-  checkSafety(now);
-  return latchedFlags || !rangeFresh(now) || now - lastCmdMs >= WATCHDOG_MS;
+bool motionBlocked(uint32_t now, bool freshCommand = false) {
+  return checkSafety(now) || (!freshCommand && now - lastCmdMs >= WATCHDOG_MS);
 }
 
 void setMotor(int pwmPin, int in1, int in2, float duty) {
@@ -178,8 +179,7 @@ void haltAll() {
 void onCmdVel(int v, int wMdeg) {
   auto key = k_spin_lock(&safetyLock);
   uint32_t now = k_uptime_get_32();
-  checkSafety(now);
-  if (latchedFlags || !rangeFresh(now)) {
+  if (motionBlocked(now, true)) {
     k_spin_unlock(&safetyLock, key);
     return;
   }
@@ -213,10 +213,8 @@ void onResetOdom() { odomX = odomY = odomTh = 0; }
 // ---- sensing ----------------------------------------------------------------------------------------
 int readFlags() {
   auto key = k_spin_lock(&safetyLock);
-  int f = physicalFlags() | latchedFlags;
+  int f = checkSafety(k_uptime_get_32());
   k_spin_unlock(&safetyLock, key);
-  if (cliffDetected) f |= 2;
-  if (!rangeFresh(k_uptime_get_32())) f |= 256;
   if (digitalRead(PIN_CHARGE)) f |= 16;
   if (targetV > 0 && rangeValid && minRangeMm <= STOP_MM) f |= 32;
   if (torqueBoostActive) f |= 1024;
@@ -285,7 +283,7 @@ void control(float dt) {
   }
 
   auto key = k_spin_lock(&safetyLock);
-  latchedFlags |= (cliffDetected ? 2 : 0) | (faults & 64);
+  latchedFlags |= faults & 64;
   bool blocked = motionBlocked(k_uptime_get_32());
   k_spin_unlock(&safetyLock, key);
   if (blocked) {
