@@ -198,7 +198,7 @@ class Agent:
         return prefix + "; ".join(here) if here else ""
 
     def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str, *,
-                     include_scene: bool = True) -> dict[str, Any]:
+                     include_scene: bool = True, camera_limit: int | None = None) -> dict[str, Any]:
         parts: list[dict[str, Any]] = []
         if include_scene:
             text = f"{header}\n{self._scene_text(robot)}"
@@ -216,6 +216,8 @@ class Agent:
             name = CAMERA_NAMES.get(cam, cam)
             parts += [{"type": "text", "text": f"{name} camera:"}, _image_part(url)]
             shown.append(name)
+            if len(shown) == camera_limit:
+                break
         for caption, rgb in tools.pictures:
             parts += [{"type": "text", "text": caption}, _image_part(data_url(rgb, max_width=width))]
             shown.append(caption)
@@ -502,8 +504,9 @@ class Agent:
 
     def _correction(self, robot: Any, tools: Tools, heard: list[str], *, recorded: int = 0) -> dict[str, Any]:
         words = "".join(f'The user says: "{h}"\n' for h in heard)
-        cameras = list(self.cameras[:max(0, MAX_IMAGES - recorded)])
-        return self._observation(robot, tools, cameras, words + "What you sense now:")
+        # Leave room for recorded evidence, but never let it crowd out what the user is asking about now.
+        return self._observation(robot, tools, list(self.cameras), words + "What you sense now:",
+                                 camera_limit=max(1, MAX_IMAGES - recorded))
 
     @staticmethod
     def _review(instruction: str, record: TaskRecord, tools: Tools) -> str:

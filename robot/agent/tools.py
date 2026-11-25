@@ -803,7 +803,7 @@ class Tools:
         if not past:
             return "No pictures from before yet."
         self.pictures.extend((f"front camera {ago:.0f} s ago:", rgb) for ago, rgb in past)
-        return f"The front camera over the last {seconds:g} s: {len(past)} pictures follow, oldest first."
+        return f"Recorded front-camera views from the last {seconds:g} s, oldest first."
 
     def look(self, direction: str, what: str = "") -> str:
         matches = ""

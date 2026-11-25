@@ -181,24 +181,31 @@ def test_search_returns_its_crop_before_a_queued_drive(monkeypatch):
     assert not any(e.name == "go_to" for e in sim.trace.events)
 
 
-def test_correction_keeps_look_back_frames_under_the_tool_result(monkeypatch):
+@pytest.mark.parametrize("history_count", [2, 4])
+def test_correction_keeps_look_back_frames_beside_a_live_view(monkeypatch, history_count):
     sim = SimRobot(living_room())
-    frames = [(ago, np.full((18, 15, 3), color, dtype=np.uint8)) for ago, color in [(3, 42), (1, 67)]]
+    frames = [(ago, np.full((18, 15, 3), ago * 20, dtype=np.uint8)) for ago in range(history_count, 0, -1)]
+    current = np.full((18, 15, 3), 200, dtype=np.uint8)
     brain = Scripted(call("look_back", seconds=5), say("It moved left."))
     agent = Agent(brain)
 
     def past_views(seconds):
-        agent.interject("Actually, tell me which way it moved.")
+        agent.interject("Actually, where is it now?")
         return frames
 
     monkeypatch.setattr(sim, "past_views", past_views, raising=False)
-    agent.do("What happened in the last five seconds?", sim)
+    monkeypatch.setattr(sim, "camera_view", lambda camera, *_: None if camera == "front_camera" else current)
+    agent.do("What happened in the last five seconds?", sim, speak=False)
     result, = tool_results(brain.seen[1])
     actual = [(part["text"], image["image_url"]["url"]) for part, image in zip(result[1::2], result[2::2], strict=True)]
-    assert actual == [(f"front camera {ago} s ago:", data_url(rgb)) for ago, rgb in frames]
+    assert actual == [(f"front camera {ago} s ago:", data_url(rgb)) for ago, rgb in frames[-2:]]
     correction = brain.seen[1][-1]
-    assert correction["role"] == "user" and "Actually, tell me which way it moved." in _text(correction["content"])
-    assert sum(p["type"] == "image_url" for p in correction["content"]) == 1
+    assert correction["role"] == "user" and "Actually, where is it now?" in _text(correction["content"])
+    assert "What you sense now:" in _text(correction["content"])
+    assert correction["content"][1:] == [
+        {"type": "text", "text": "rear-left camera:"},
+        {"type": "image_url", "image_url": {"url": data_url(current)}},
+    ]
 
 
 @pytest.mark.parametrize(("see_after_moves", "pictures"), [("front", 1), (True, 3)])
