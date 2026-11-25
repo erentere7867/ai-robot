@@ -273,7 +273,9 @@ TASKS = [
          lambda s, st: ends_near(s, things(s, "sofa")) if "sofa" in st["seen"] else abs(abs(turned(s)) - math.pi)
          < 0.35, ("sofa",)),
     Task("C2", ("If the TV is closer to you than the sofa, go to the TV. Otherwise go to the sofa.",),
-         lambda s, st: ends_near(s, nearest(things(s, "sofa") + things(s, "tv"), st["xy"])), ("sofa", "tv")),
+         lambda s, st: ends_near(s, things(s, "sofa"
+                                          if nearest(things(s, "sofa") + things(s, "tv"), st["xy"]).label == "sofa"
+                                          else "tv")), ("sofa", "tv")),
     # two requests in a row: context and memory
     Task("R1", ("Remember that my keys are on the sofa.", "Where are my keys?"),
          lambda s, st: mentions(said(s, last_only=True), "sofa")),

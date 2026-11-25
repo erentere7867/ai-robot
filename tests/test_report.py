@@ -78,6 +78,16 @@ def test_sofa_vs_tv_uses_footprints_not_centres(task_id):
         assert task.check(referee, {"xy": (0.0, 0.0)}) is passed
 
 
+def test_closer_tv_task_accepts_arrival_at_tv_when_stand_is_closest_at_start():
+    task = next(task for task in TASKS if task.id == "C2")
+    objects = [_rect(1, "tv stand", 1.0, 0.0, 0.1, 0.1), _rect(2, "tv", 2.0, 0.0, 0.1, 0.1),
+               _rect(3, "sofa", 4.0, 0.0, 0.1, 0.1)]
+    home = SimpleNamespace(truth={"objects": objects}, path=[(0.0, 0.0, 0.0, 0.0)])
+    for x, passed in [(1.0, True), (2.0, True), (4.0, False)]:
+        home.path[1:] = [(5.0, x, 0.0, 0.0)]
+        assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
+
+
 def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):
     nx, ny = 40, 20  # 4 x 2 m at 0.1 m
     truth = {"width": 4.0, "height": 2.0, "res": 0.1, "shape": (nx, ny),
