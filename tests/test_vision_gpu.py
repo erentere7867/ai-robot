@@ -165,10 +165,10 @@ def test_depth_is_normalised_into_the_kept_buffer_as_before():
     models._depth_buf = np.empty((1, 3, 364, 644), np.float32)
     seen = []
     models.depth = Mock(run=lambda _, feeds: seen.append(feeds["pixel_values"].copy()) or [np.zeros((1, 364, 644))])
-    picture = np.random.default_rng(0).integers(0, 256, (364, 644, 3), dtype=np.uint8)
-    models.run_depth(picture)
-    models.run_depth(picture)
-    old = (picture * server._DEPTH_SCALE + server._DEPTH_BIAS).transpose(2, 0, 1)[None]
-    assert np.allclose(seen[0], old, atol=1e-5) and np.array_equal(seen[0], seen[1])
+    pictures = np.random.default_rng(0).integers(0, 256, (2, 364, 644, 3), dtype=np.uint8)
+    for picture in pictures:
+        models.run_depth(picture)
+    for picture, fed in zip(pictures, seen, strict=True):
+        assert np.allclose(fed, (picture * server._DEPTH_SCALE + server._DEPTH_BIAS).transpose(2, 0, 1)[None], atol=1e-5)
     with pytest.raises(ValueError):
-        models.run_depth(picture[:1])
+        models.run_depth(pictures[0, :1])

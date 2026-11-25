@@ -35,6 +35,7 @@ ROWS, COLS, PAD = 736, 1280, 8  # the model's input; a 720-row frame sits on row
 IOU, MAX_DET = 0.7, 100         # pads it
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)  # Depth Anything's input normalisation (ImageNet)
 STD = np.array([0.229, 0.224, 0.225], np.float32)
+DEPTH_INPUT = (1, 3, 364, 644)
 _DEPTH_SCALE = (1.0 / (255.0 * STD)).astype(np.float32)
 _DEPTH_BIAS = (-MEAN / STD).astype(np.float32)
 _BOX_MAX = np.array([COLS, ROWS - 2 * PAD, COLS, ROWS - 2 * PAD], np.float32)
@@ -107,13 +108,13 @@ def decode(pred: np.ndarray, protos: np.ndarray, n: int, conf: float) -> dict[st
 class Models:
     def __init__(self, folder: Path, provider: str, yoloe: str, depth: str) -> None:
         self.yoloe = session(folder / yoloe, provider)
-        self.depth = session(folder / depth, provider, (1, 3, 364, 644))
+        self.depth = session(folder / depth, provider, DEPTH_INPUT)
         self.depth_input = self.depth.get_inputs()[0].name
         self.slots = self.yoloe.get_inputs()[1].shape[1]
         self.gpu = threading.Lock()  # one run on the GPU at a time: in the 3D run, YOLOE and depth at once beside the
         # simulator's rendering and the language model failed once in DirectML ("Unspecified error") and stalled 20 s
         self._detect_buf = np.full((1, 3, ROWS, COLS), 114.0 / 255.0, np.float32)
-        self._depth_buf = np.empty((1, 3, 364, 644), np.float32)
+        self._depth_buf = np.empty(DEPTH_INPUT, np.float32)
         self.times: dict[str, list[float]] = {"detect": [], "depth": []}
 
     def detect(self, picture: np.ndarray, words: np.ndarray, n: int, conf: float) -> dict[str, np.ndarray]:
@@ -132,8 +133,9 @@ class Models:
         """A picture already at the network's size (uint8, 364x644x3 RGB): normalised here, so a quarter of the
         bytes cross over, and the answer goes back in half precision. Normalised into one kept buffer: building it
         anew took 5.7 MB and 5.2 ms a frame, the kept one 0.6 ms."""
-        if picture.shape != (364, 644, 3):
-            raise ValueError(f"want picture (364, 644, 3), got {picture.shape}")
+        want = (*self._depth_buf.shape[2:], 3)
+        if picture.shape != want:
+            raise ValueError(f"want picture {want}, got {picture.shape}")
         with self.gpu:
             np.multiply(picture.transpose(2, 0, 1), _DEPTH_SCALE[:, None, None], out=self._depth_buf[0])
             np.add(self._depth_buf[0], _DEPTH_BIAS[:, None, None], out=self._depth_buf[0])
