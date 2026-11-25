@@ -172,7 +172,7 @@ in view at all ("false"); YOLOE at the robot's threshold, 0.22:
 - **Picking numbered dots does not work with the 2B model.** Asked which of 20-odd dots across the three pictures to
   search towards, it took the last number nearly every time ("dot 23 of 23", "dot 4 of 4"), with reasons like
   "most likely at Dot July". A yes/no per camera ("would going this way lead to a plant?") gives real choices
-  (front 22%, rear-left 90%, rear-right 11%), and the search now drives the likeliest way.
+  (front 22%, rear-left 90%, rear-right 11%). That version drove the likeliest way before frontier-first search.
 - **YOLOE fires on the asked word too easily** (black panels and the black ceiling as "tv"): three TVs were known in
   a flat with one, and the robot drove to a false one. The vision model's no on the crop now drops a detection, and
   the robot waits for that check before driving to something newly found; the next run knew one TV and passed.
@@ -395,7 +395,8 @@ and run again. What made the robot look dumb, in the order found:
   queue, the bike YOLOE called an umbrella was driven to before it was checked; the model's yes to that crop is 0%
   (real beanbags 100%, a beanbag called an umbrella 3%). New things are now named first.
 - **Step backs that cannot help.** The search stepped back on a 17% yes, and backed away from "kitchen" again and
-  again (90-100% yes ahead, nothing YOLOE can name). It now steps back only on a yes of at least half, once a search.
+  again (90-100% yes ahead, nothing YOLOE can name). At the time the step back was limited to once per search
+  and required at least 50% confidence. Frontier-first search later removed this heuristic.
 - **"area" taken for a direction** (`search(area="rear-right")`, in two tasks): its description now says the
   search looks every way itself.
 - **"Turn to face the sofa" drove off.** The search for a name not in view, added to `go_to` above, ran for every
@@ -619,6 +620,14 @@ Measured 3D verification (`apt_0`, `think=low`, 0.33x):
   being driven to. A rejected candidate falls through to the next ranked candidate, without a cap. In a
   VLM-free Habitat body run, adding a synthetic scan obstacle rejected the first frontier; the robot went to
   the next and returned with no contact. Later review changes were checked by pytest, not rerun in Habitat.
+
+### Frontier-first search ([#48](https://github.com/erentere7867/ai-robot/pull/48))
+
+SLAM exploration and task-time search now share the frontier extractor. In a mapped home, search uses its
+coverage and the live costmap to find frontier candidates before asking the model to rerank directions.
+Candidate ordering still falls back to shortest A* path when there is no confident rerank, and all ranked
+candidates stay eligible for a Nav2 path check. This replaces the directional guesses and step-back
+heuristic in the earlier experiments above; those runs do not measure frontier-first search.
 
 ## Hazards found
 

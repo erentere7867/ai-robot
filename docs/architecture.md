@@ -66,6 +66,13 @@ reaching ground at least 0.25 m from earlier credited positions and stops after 
 without progress. Detours count; stationary replans and oscillation do not. Following
 commands zero if there is no route and retries at most twice per simulated second.
 
+**Frontier selection.** Initial SLAM mapping and task-time search share a grid-based frontier extractor:
+it groups free cells at the edge of unknown or unseen space. For search in a mapped home, `RealRobot`
+also masks inscribed and lethal cells from Nav2's global costmap, plans short A* hops and ranks them by
+path length. The model only reranks those candidates, scoring cameras that face them when candidates span
+two or more camera directions. If no score reaches 0.5, search keeps shortest-path-first order. Reranking
+does not discard any candidates; Nav2 still checks reachability.
+
 **Mapping.** For an unmapped layout, `Home` starts slam_toolbox and `Explorer.explore` drives to frontiers,
 waits for refreshed maps before declaring completion, and moves on from unreachable goals. The saved map is
 used for AMCL localization on later runs. This initial mapping loop is separate from task-time search.
