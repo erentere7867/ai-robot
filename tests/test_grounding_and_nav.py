@@ -218,15 +218,8 @@ def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
     assert cancelled == [True]
 
 
-def _nav_feedback(robot, distance_remaining):
-    pose = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=robot.x, y=robot.y)))
-    return SimpleNamespace(feedback=SimpleNamespace(distance_remaining=distance_remaining, current_pose=pose))
-
-
-@pytest.mark.parametrize("feedback_mode", [
-    "missing", "oscillating", "stationary replans", "empty path", "backup then shorter replan", "repeated retry",
-])
-def test_a_nav2_goal_that_makes_no_progress_is_given_up_and_cancelled(feedback_mode):
+@pytest.mark.parametrize("motion, settle", [("stationary", 1), ("oscillating", 6), ("backup", 4), ("repeated retry", 8)])
+def test_a_nav2_goal_that_makes_no_progress_is_given_up_and_cancelled(motion, settle):
     from robot.ros.robot import PROGRESS_S
 
     robot = MockRosRobot(_make_scene())
@@ -237,50 +230,33 @@ def test_a_nav2_goal_that_makes_no_progress_is_given_up_and_cancelled(feedback_m
         result.set_result(SimpleNamespace(status=5))
 
     sent.set_result(SimpleNamespace(accepted=True, cancel_goal_async=cancel, get_result_async=lambda: result))
-    report = None
-
-    def send(goal, *, feedback_callback=None):
-        nonlocal report
-        report = feedback_callback
-        return sent
-
-    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True, send_goal_async=send)}
+    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True,
+                                                        send_goal_async=lambda goal: sent)}
     robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
     robot._publish = lambda v, w: None
 
-    def step(v, w):  # Nav2 backs up, spins and replans: a second passes and the robot is no nearer
+    def step(v, w):
         robot.t += 1.0
         if robot.t > 2 * PROGRESS_S:
             pytest.fail("the same recovery stretch kept the goal alive")
-        left = None
-        if feedback_mode == "repeated retry":
+        if motion == "repeated retry":
             phase = (robot.t - 1) % 12
             robot.x = -0.18 * min(phase, 12 - phase)
-            left = 15.0 - 0.17 * phase
-        elif feedback_mode == "backup then shorter replan":
+        elif motion == "backup":
             robot.x = -min(0.4, (robot.t - 1) * 0.2)
-            left = 6.0 - robot.x if robot.t < PROGRESS_S - 2 else 5.5
-        elif feedback_mode == "oscillating":
+        elif motion == "oscillating":
             robot.x = 0.3 * math.sin(robot.t)
-            left = 4.0 - robot.x
-        elif feedback_mode == "stationary replans":
-            left = 8.0 - 0.1 * robot.t
-        elif feedback_mode == "empty path":
-            left = 0.0
-        if report is not None and left is not None and robot.t % 2 == 1:
-            report(_nav_feedback(robot, left + (0.08 * math.sin(robot.t) if left else 0.0)))
+        robot.y = 0.04 * math.sin(robot.t)  # small map-frame localization jitter
 
     robot._step = step
     goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
     with pytest.raises(PathBlocked, match="no navigation progress"):
         RosRobot._act(robot, "navigate_to_pose", pose=goal)
     # A first visit to the recovery stretch can count; returning to it over and over cannot.
-    settle = {"backup then shorter replan": 4, "oscillating": 6, "repeated retry": 8}.get(feedback_mode, 2)
     assert len(cancelled) == 1 and PROGRESS_S < cancelled[0] <= PROGRESS_S + settle
 
 
-@pytest.mark.parametrize("replanned", [False, True], ids=["initial route", "longer replan"])
-def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_goal(replanned):
+def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_goal():
     from robot.ros.robot import PROGRESS_S
 
     robot = MockRosRobot(_make_scene())
@@ -292,14 +268,8 @@ def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_g
         result.set_result(SimpleNamespace(status=5))
 
     sent.set_result(SimpleNamespace(accepted=True, cancel_goal_async=cancel, get_result_async=lambda: result))
-    report = None
-
-    def send(goal, *, feedback_callback=None):
-        nonlocal report
-        report = feedback_callback
-        return sent
-
-    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True, send_goal_async=send)}
+    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True,
+                                                        send_goal_async=lambda goal: sent)}
     robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
     robot._publish = lambda v, w: None
     route = [(0.0, 0.0), (-4.0, 0.0), (-4.0, 3.0), (3.0, 3.0), (3.0, 0.0)]
@@ -308,11 +278,7 @@ def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_g
 
     def step(v, w):
         robot.t += 1.0
-        if replanned and robot.t <= 2.0:
-            if report is not None:
-                report(_nav_feedback(robot, 3.0 if robot.t == 1 else total))
-            return
-        travelled = (robot.t - (2.0 if replanned else 0.0)) * 0.2
+        travelled = robot.t * 0.2
         if travelled >= total:
             robot.x, robot.y = route[-1]
             result.set_result(SimpleNamespace(status=4))
@@ -323,10 +289,9 @@ def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_g
                 robot.x, robot.y = (start + (end - start) * offset / length for start, end in zip(a, b, strict=True))
                 break
             offset -= length
+        robot.y += 0.04 * math.sin(robot.t)
         if robot.t == PROGRESS_S + 2:
             assert math.dist((robot.x, robot.y), route[-1]) > math.dist(route[0], route[-1])
-        if report is not None and robot.t % 3 == 0:
-            report(_nav_feedback(robot, total - travelled + 0.22 * math.sin(robot.t)))
 
     robot._step = step
     goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
