@@ -401,9 +401,9 @@ def test_nav_planner_outage_is_not_a_blocked_goal(monkeypatch, ready):
     monkeypatch.setattr("robot.ros.robot.PLAN_TIMEOUT_S", 0.0)
     tools = Tools(robot)
     monkeypatch.setattr(tools, "_resolve", lambda _: (2.0, 0.0))
-    result, ok = tools.run("go_to", {"target": "lounge"})
-    assert not ok
-    assert result.startswith("Timed out: navigation planner unavailable")
+    res = tools.execute("go_to", {"target": "lounge"})
+    assert not res.ok
+    assert res.text.startswith("Timed out: navigation planner unavailable")
     if ready:
         cancels = []
         sent.set_result(SimpleNamespace(accepted=True, get_result_async=Future,
