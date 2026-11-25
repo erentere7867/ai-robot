@@ -226,6 +226,11 @@ def between(sim: Referee, a: str, b: str, margin: float = 1.0) -> bool:
     return False
 
 
+def sofa_tv_order(sim: Referee, xy: tuple[float, float]) -> tuple[str, str]:
+    closest = nearest(things(sim, "sofa") + things(sim, "tv"), xy)
+    return ("sofa", "tv") if closest.label == "sofa" else ("tv", "sofa")
+
+
 TASKS = [
     # moving relative to itself
     Task("M1", ("Turn left 90 degrees.",),
@@ -260,9 +265,7 @@ TASKS = [
              sum(st["pixels"].get(k, 0) >= CLEAR for k in st["ids"]["chair"]),  # counts either way
              st["seen"].count("chair") + 1)), ("chair",)),
     Task("Q4", ("Which is closer to you, the sofa or the TV?",),
-         lambda s, st: first_named(said(s, last_only=True), *(
-             ("sofa", "tv") if nearest(things(s, "sofa") + things(s, "tv"), st["xy"]).label == "sofa"
-             else ("tv", "sofa"))), ("sofa", "tv")),
+         lambda s, st: first_named(said(s, last_only=True), *sofa_tv_order(s, st["xy"])), ("sofa", "tv")),
     Task("Q5", ("Is there a bike in the apartment?",), lambda s, st: bool(re.search(r"\byes\b", said(s))), ("bike",)),
     # finding things
     Task("S1", ("Find a plant and go to it.",), lambda s, st: ends_near(s, things(s, "plant")), ("plant",)),
@@ -273,9 +276,7 @@ TASKS = [
          lambda s, st: ends_near(s, things(s, "sofa")) if "sofa" in st["seen"] else abs(abs(turned(s)) - math.pi)
          < 0.35, ("sofa",)),
     Task("C2", ("If the TV is closer to you than the sofa, go to the TV. Otherwise go to the sofa.",),
-         lambda s, st: ends_near(s, things(s, "sofa"
-                                          if nearest(things(s, "sofa") + things(s, "tv"), st["xy"]).label == "sofa"
-                                          else "tv")), ("sofa", "tv")),
+         lambda s, st: ends_near(s, things(s, sofa_tv_order(s, st["xy"])[0])), ("sofa", "tv")),
     # two requests in a row: context and memory
     Task("R1", ("Remember that my keys are on the sofa.", "Where are my keys?"),
          lambda s, st: mentions(said(s, last_only=True), "sofa")),
