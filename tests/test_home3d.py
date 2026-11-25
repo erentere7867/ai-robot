@@ -70,6 +70,7 @@ def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):
     (["Yes, there is one."], True),
     (["I can see a blue bicycle by the desk."], True),
     (["There is a bike parked inside the apartment."], True),
+    (["Yes, there is a bike, parked by the desk."], True),
     (["Yes, the bike is in the living room."], True),
     (["A bike is present."], True),
     (["Yes, a bike is here."], True),

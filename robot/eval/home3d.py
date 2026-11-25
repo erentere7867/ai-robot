@@ -253,7 +253,7 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
     location = r"(?:here|(?:parked |standing |sitting )?(?:in|inside|by|near|at|on|under|beside|behind|next to)\s+.+)"
     scope = re.escape(place)
     offsite = rf"\b(?:outside|outdoors|elsewhere|(?:another|a different|the other)\s+{scope})\b"
-    presence = rf"(?:{claim}\s+{noun}(?:\s+{location})?|{noun}\s+(?:is|are)\s+(?:present|{location}))"
+    presence = rf"(?:{claim}\s+{noun}(?:,?\s+{location})?|{noun}\s+(?:is|are)\s+(?:present|{location}))"
     scope_denial = rf"not\s+(?:here|(?:in|inside)\s+(?:(?:this|the)\s+)?{scope})"
     belief = r"i (?:don't|do not) think (?:that )?"
     assertion = (rf"(?:(?:{belief})?there\b|{noun}\s+(?:is|are)"
