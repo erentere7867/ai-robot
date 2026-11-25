@@ -271,15 +271,17 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
         return failure
     affirmative = re.match(r"^(?:yes|yeah|yep)\b[\s,.!:-]*", answers[-1])
     answer = answers[-1][affirmative.end():] if affirmative else answers[-1]
-    claim = r"(?:there (?:is|are)|there's|i (?:(?:can )?see|found|spotted))"
+    exists = r"(?:there (?:is|are)|there's)"
+    claim = rf"(?:{exists}|i (?:(?:can )?see|found|spotted))"
     target = rf"(?:{'|'.join(map(re.escape, WORDS.get(label, (label,))))})s?\b"
     noun = rf"(?:(?:a|an|the|one)\s+)?(?:(?!(?:a|an|the|of|for|with)\b)[\w-]+\s+){{0,2}}{target}"
     subject = rf"{noun}\s+(?:is|are)"
     location = r"(?:here|(?:parked |standing |sitting )?(?:in|inside|by|near|at|on|under|beside|behind|next to)\s+.+)"
+    at_location = rf"(?:,?\s+{location})?"
     scope = re.escape(place)
     offsite = rf"\b(?:outside|outdoors|elsewhere|(?:another|a different|the other)\s+{scope})\b"
     absence = rf"\b(?:no|not|never|cannot|unable|none)\b|n't\b|\b(?:zero|0)\s+{noun}|{offsite}"
-    presence = rf"(?:{claim}\s+{noun}(?:,?\s+{location})?|{subject}\s+(?:present|{location}))"
+    presence = rf"(?:{claim}\s+{noun}{at_location}|{subject}\s+(?:present|{location}))"
     scope_denial = rf"not\s+(?:here|(?:in|inside)\s+(?:(?:this|the)\s+)?{scope})"
     belief = r"i (?:don't|do not) think (?:that )?"
     assertion = (rf"(?:(?:{belief})?there\b|{subject}"
@@ -302,8 +304,9 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
     if any(re.fullmatch(presence, clause) and not re.search(offsite, clause) and "?" not in clause for clause in final):
         return True
     # An elliptical answer has no subject to disambiguate it after a denial.
-    elliptical = (affirmative and not answer) or re.fullmatch(r"(?:there (?:is|are) one|there's one)[.! ]*", answer)
-    if elliptical and not any(denies(clause) for text in answers[:-1] for clause in clauses(text)):
+    elliptical = (affirmative and not answer) or re.fullmatch(rf"{exists}\s+one{at_location}", answer.rstrip(" .!;"))
+    if (elliptical and "?" not in answer and not re.search(offsite, answer)
+            and not any(denies(clause) for text in answers[:-1] for clause in clauses(text))):
         return True
     return failure
 
