@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import threading
+from collections import deque
 from contextlib import closing
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -14,9 +15,13 @@ import numpy as np
 import pytest
 
 from robot.agent.agent import Agent
+from robot.agent.api import Pose
+from robot.agent.tools import Tools
 from robot.eval.suite import living_room
 from robot.perception.detector import _box_mask, _foot
 from robot.perception.gpu import VisionServer
+from robot.ros.perceive import Perception
+from robot.ros.real import RealRobot
 from robot.sim.world import SimRobot
 from tests.perception_fakes import make_detector
 from tests.test_agent import Scripted, call, say, tool_results
@@ -121,6 +126,41 @@ def test_look_back_shows_the_pictures_from_before_with_how_long_ago():
     Agent(brain, cameras="none").do("Did the cat just leave?", sim)
     texts = [p.get("text", "") for p in brain.seen[1][-1]["content"]]
     assert "front camera 4 s ago:" in texts and "front camera 0 s ago:" in texts
+
+
+def _real_with_past(times: list[float]) -> RealRobot:
+    """A RealRobot without ROS whose perception kept front pictures at `times`, each filled with its index to tell
+    them apart."""
+    perception = object.__new__(Perception)
+    perception.past = deque((t, np.full((4, 6, 3), k, np.uint8)) for k, t in enumerate(times))
+    real = object.__new__(RealRobot)
+    real.perception = perception
+    return real
+
+
+def _picked(views: list[tuple[float, np.ndarray]]) -> list[int]:
+    return [int(rgb[0, 0, 0]) for _, rgb in views]
+
+
+def test_past_views_spreads_the_kept_pictures_over_the_window_oldest_first():
+    assert _real_with_past([]).past_views(5) == []
+    one = _real_with_past([100.0]).past_views(5)
+    assert [ago for ago, _ in one] == [0.0] and _picked(one) == [0]
+    fewer = _real_with_past([100.0, 100.5, 101.0]).past_views(5)  # fewer than asked for: every one of them
+    assert _picked(fewer) == [0, 1, 2] and [ago for ago, _ in fewer] == [1.0, 0.5, 0.0]
+    times = [100.0 + 0.5 * k for k in range(21)]  # 10 s kept, 2 a second
+    many = _real_with_past(times).past_views(5)  # the last 5 s are pictures 10..20
+    assert _picked(many) == [10, 13, 17, 20] and [ago for ago, _ in many] == [5.0, 3.5, 1.5, 0.0]
+
+
+def test_look_back_on_the_real_robot_hands_its_pictures_to_the_model():
+    real = _real_with_past([100.0 + 0.5 * k for k in range(21)])
+    real.pose = lambda: Pose(0.0, 0.0, 0.0)  # Tools notes where a request began; this robot has no ROS to ask
+    tools = Tools(real)
+    result, worked = tools.run("look_back", {"seconds": 5})
+    assert worked and result == "The front camera over the last 5 s: 4 pictures follow, oldest first."
+    assert [label for label, _ in tools.pictures] == [f"front camera {ago} s ago:" for ago in (5, 4, 2, 0)]
+    assert [int(rgb[0, 0, 0]) for _, rgb in tools.pictures] == [10, 13, 17, 20]
 
 
 

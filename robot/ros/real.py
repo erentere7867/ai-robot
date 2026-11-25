@@ -967,7 +967,10 @@ class RealRobot(RosRobot):
                        for i in range(1, n + 1))
 
     def past_views(self, seconds: float, count: int = 4) -> list[tuple[float, np.ndarray]]:
-        """Up to `count` front pictures from the last `seconds`, oldest first, each with how long ago it was taken."""
+        """Up to `count` front pictures from the last `seconds`, oldest first, each with how long ago it was taken.
+
+        Spread evenly from the oldest to the newest so a few pictures show the whole of what happened; when fewer were
+        kept than asked for, all of them, since picking by position then repeats some and loses the newest."""
         past = list(self.perception.past)
         if not past:
             return []
