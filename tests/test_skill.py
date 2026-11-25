@@ -36,9 +36,27 @@ def test_tools_classify_running_skills_without_changing_schemas():
         "follow": Skill.FOLLOWING,
         "keep_facing": Skill.FOLLOWING,
         "wait": Skill.WAITING,
-        **dict.fromkeys(("look", "look_back", "ask", "remember", "recall", "todo", "todo_done", "todo_blocked", "say")),
+        "ask": Skill.WAITING,
+        **dict.fromkeys(("look", "look_back", "remember", "recall", "todo", "todo_done", "todo_blocked", "say")),
     }
     assert all("skill" not in schema["function"] for schema in tools.schemas())
+
+
+@pytest.mark.parametrize(("answer", "expected"), [("The black one.", 'The user answered: "The black one."'),
+                                                  (None, "No answer.")])
+def test_ask_is_waiting_and_its_result_is_unchanged(answer, expected, monkeypatch):
+    robot = SimRobot(living_room())
+    tools = Tools(robot)
+
+    def ask(question):
+        assert question == "Which bag?"
+        assert tools.machine.state is Skill.WAITING and tools.machine.busy
+        return answer
+
+    monkeypatch.setattr(robot, "ask", ask)
+    result = tools.execute("ask", {"question": "Which bag?"})
+    assert (result.text, result.ok, result.status) == (expected, True, "ok")
+    assert tools.machine.state is Skill.IDLE
 
 
 def test_validation_does_not_start_a_skill_and_failure_does_not_block_the_next_one(monkeypatch):

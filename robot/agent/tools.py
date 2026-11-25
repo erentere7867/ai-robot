@@ -594,7 +594,7 @@ class Tools:
                  ("seconds",), self.wait, skill=Skill.WAITING),
             Tool("ask", "Ask one specific question out loud when a missing detail affects your next action. "
                         "Wait for the answer and read it before acting.",
-                 {"question": {"type": "string"}}, ("question",), self.ask),
+                 {"question": {"type": "string"}}, ("question",), self.ask, skill=Skill.WAITING),
             Tool("remember", "Keep a fact in long-term memory.",
                  {"fact": {"type": "string"}}, ("fact",), self.remember),
             Tool("recall", "What you know about something: remembered facts and where it was last seen.",
