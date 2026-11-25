@@ -19,6 +19,7 @@ from robot.ros.perceive import Perception
 from robot.ros.real import RealRobot
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
+from tests.perception_fakes import make_detector, make_image_brain
 
 
 def _make_scene(things: list[Thing] | None = None) -> Scene:
@@ -29,6 +30,64 @@ def _make_scene(things: list[Thing] | None = None) -> Scene:
         rooms={"lounge": (-4.0, -4.0, 4.0, 4.0)},
         start=Pose(0.0, 0.0, 0.0),
     )
+
+
+@pytest.mark.parametrize("detour", [False, True])
+def test_sim_pursuit_only_credits_new_ground(monkeypatch, detour):
+    sim = SimRobot(_make_scene())
+    start = sim.t
+
+    def step(*_):
+        elapsed = sim.t - start
+        sim.x = 3.0 if elapsed >= 12.0 else (-0.1 * elapsed if detour else 0.0)
+        sim.t += 1.0
+
+    monkeypatch.setattr(sim, "_step", step)
+    monkeypatch.setattr(sim.body, "step_pursuit", lambda *_, **kw: (0.1, 0.0, 0, False))
+    if detour:
+        sim._pursue([(3.0, 0.0)], 0.1, goal=(3.0, 0.0))
+        assert sim.x == 3.0
+    else:
+        with pytest.raises(PathBlocked, match="no progress .* for 10 s"):
+            sim._pursue([(3.0, 0.0)], 0.1, goal=(3.0, 0.0))
+
+
+
+
+def test_follow_waits_for_the_next_plan_when_a_visible_person_is_across_a_narrow_gap():
+    person = Thing("person", 2.5, 0.0)
+    scene = _make_scene([person])
+    scene.walls = [((1.0, -5.0), (1.0, -0.15)), ((1.0, 0.15), (1.0, 5.0))]
+    sim = SimRobot(scene)
+    assert person in sim._visible()
+    assert sim._plan((person.x, person.y), 1.0) is None
+    sim._plan = Mock(wraps=sim._plan)
+    control, _ = sim._follower(person, 1.0)
+
+    assert control() == (0.0, 0.0)
+    sim.t += 0.25
+    assert control() == (0.0, 0.0)
+    assert sim._plan.call_count == 1
+    sim.t += 0.25
+    assert control() == (0.0, 0.0)
+    assert sim._plan.call_count == 2
+
+
+@pytest.mark.parametrize("gap, blocked", [(0.30, True), (1.20, False)])
+def test_timed_follow_reports_when_no_route_was_found(gap, blocked):
+    from robot.agent.tools import Tools
+
+    person = Thing("person", 2.5, 0.0, user=True)
+    scene = _make_scene([person])
+    scene.walls = [((1.0, -5.0), (1.0, -gap / 2)), ((1.0, gap / 2), (1.0, 5.0))]
+    sim = SimRobot(scene)
+    result, ok = Tools(sim).run("follow", {"target": "user", "seconds": 1.0})
+    assert ok is not blocked
+    if blocked:
+        assert "no route to the target was found; stayed put" in result
+        assert sim.pose() == scene.start
+    else:
+        assert "Followed for 1 s." in result
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +476,8 @@ def test_pending_and_active_nav_goals_are_cancelled_when_interrupted(when):
     assert cancelled == [True]
 
 
-def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled():
+@pytest.mark.parametrize("motion, settle", [("stationary", 1), ("oscillating", 6), ("backup", 4), ("repeated retry", 8)])
+def test_a_nav2_goal_that_makes_no_progress_is_given_up_and_cancelled(motion, settle):
     from robot.ros.robot import PROGRESS_S
 
     robot = MockRosRobot(_make_scene())
@@ -435,13 +495,66 @@ def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled():
 
     def step(goal):  # Nav2 backs up, spins and replans: a second passes and the robot is no nearer
         robot.t += 1.0
-        robot.x = 0.3 * math.sin(robot.t)
+        if robot.t > 2 * PROGRESS_S:
+            pytest.fail("the same recovery stretch kept the goal alive")
+        if motion == "repeated retry":
+            phase = (robot.t - 1) % 12
+            robot.x = -0.18 * min(phase, 12 - phase)
+        elif motion == "backup":
+            robot.x = -min(0.4, (robot.t - 1) * 0.2)
+        elif motion == "oscillating":
+            robot.x = 0.3 * math.sin(robot.t)
+        robot.y = 0.04 * math.sin(robot.t)  # small map-frame localization jitter
 
     robot._nav_tick = step
     goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
-    with pytest.raises(PathBlocked, match="no nearer"):
+    with pytest.raises(PathBlocked, match="no navigation progress"):
         RosRobot._act(robot, "navigate_to_pose", pose=goal)
-    assert len(cancelled) == 1 and PROGRESS_S < cancelled[0] <= PROGRESS_S + 2
+    # A first visit to the recovery stretch can count; returning to it over and over cannot.
+    assert len(cancelled) == 1 and PROGRESS_S < cancelled[0] <= PROGRESS_S + settle
+
+
+def test_nav2_goal_keeps_following_a_detour_even_when_it_gets_farther_from_the_goal():
+    from robot.ros.robot import PROGRESS_S
+
+    robot = MockRosRobot(_make_scene())
+    sent, result = Future(), Future()
+    cancelled = []
+
+    def cancel():
+        cancelled.append(robot.t)
+        result.set_result(SimpleNamespace(status=5))
+
+    sent.set_result(SimpleNamespace(accepted=True, cancel_goal_async=cancel, get_result_async=lambda: result))
+    robot.actions = {"navigate_to_pose": SimpleNamespace(wait_for_server=lambda **_: True,
+                                                        send_goal_async=lambda goal: sent)}
+    robot.kinds = {"navigate_to_pose": SimpleNamespace(Goal=SimpleNamespace)}
+    robot._publish = lambda v, w: None
+    route = [(0.0, 0.0), (-4.0, 0.0), (-4.0, 3.0), (3.0, 3.0), (3.0, 0.0)]
+    legs = [(a, b, math.dist(a, b)) for a, b in zip(route, route[1:], strict=False)]
+    total = sum(length for _, _, length in legs)
+
+    def step(goal):
+        robot.t += 1.0
+        travelled = robot.t * 0.2
+        if travelled >= total:
+            robot.x, robot.y = route[-1]
+            result.set_result(SimpleNamespace(status=4))
+            return
+        offset = travelled
+        for a, b, length in legs:
+            if offset <= length:
+                robot.x, robot.y = (start + (end - start) * offset / length for start, end in zip(a, b, strict=True))
+                break
+            offset -= length
+        robot.y += 0.04 * math.sin(robot.t)
+        if robot.t == PROGRESS_S + 2:
+            assert math.dist((robot.x, robot.y), route[-1]) > math.dist(route[0], route[-1])
+
+    robot._nav_tick = step
+    goal = SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.0, y=0.0)))
+    RosRobot._act(robot, "navigate_to_pose", pose=goal)
+    assert (robot.x, robot.y) == route[-1] and not cancelled
 
 
 def test_ros_robot_go_arrival_tolerance_absorbs_nav2_abort():
@@ -638,7 +751,8 @@ def test_live_html_reply_banner_and_speech_toggle():
 # ---------------------------------------------------------------------------
 
 
-def test_orbit_around_furniture_no_false_cable_snag():
+@pytest.mark.parametrize("laps", [1.0, 2.0])
+def test_orbit_around_furniture_no_false_cable_snag(laps):
     desk = Thing("desk", 0.0, 0.0, radius=0.5)
     scene = Scene(
         width=10.0,
@@ -650,9 +764,11 @@ def test_orbit_around_furniture_no_false_cable_snag():
     )
     sim = SimRobot(scene)
     # Must orbit cleanly without raising PathBlocked: cable snag detected
-    sim.orbit("desk", laps=1.0, distance=0.5)
+    sim.orbit("desk", laps=laps, distance=0.5)
     assert sim.t > 1.0
     assert len(sim.trace.poses) > 20
+    bearings = np.unwrap([math.atan2(y, x) for _, x, y, _ in sim.trace.poses])
+    assert bearings[-1] - bearings[0] == pytest.approx(laps * math.tau, abs=0.1)
 
 
 def test_snag_detection_still_triggers_when_snag_at_present():
@@ -1037,16 +1153,7 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
 
     real._step = step
     # Vision model says yes wherever the white patch is present
-    import base64
-
-    import cv2
-
-    def yes_prob(messages):
-        url = messages[0]["content"][0]["image_url"]["url"]
-        arr = cv2.imdecode(np.frombuffer(base64.b64decode(url.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
-        return min(0.98, 0.05 + 12.0 * float((arr > 200).mean()))
-
-    real.brain = SimpleNamespace(yes_probability=yes_prob)
+    real.brain = make_image_brain(lambda arr: min(0.98, 0.05 + 12.0 * float((arr > 200).mean())))
     found = real.detect("computer monitor")
     assert len(found) == 1 and found[0].label == "computer monitor" and 1.7 <= found[0].distance <= 2.3
     tid = found[0].id
@@ -1409,7 +1516,6 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     from robot.agent.agent import Agent
     from robot.agent.tools import Tools
     from robot.mind.brain import Reply, ToolCall
-    from robot.perception.detector import Detector
 
     # 1. Location phrases ("chair in living room") and object IDs ("bike 7") never leak into YOLOE vocabulary
     sim = SimRobot(Scene(8.0, 6.0, [Thing("chair", 2.0, 0.0, 0.3)], {}, start=Pose(0.0, 0.0, 0.0)))
@@ -1441,8 +1547,7 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     assert not any("What you sense now:" in p.get("text", "") for p in tool_content)
 
     # 3. Detector.clear() drops previous request's asked words while preserving `always`
-    det = Detector(server=SimpleNamespace(slots=8), always=("person",))
-    det._features = {w: np.zeros(512, np.float32) for w in ("shoes", "umbrella")}
+    det = make_detector(SimpleNamespace(slots=8), ("shoes", "umbrella"))
     det.watch("shoes", "umbrella")
     assert det.vocabulary == ["person", "shoes", "umbrella"]
     det.clear()
