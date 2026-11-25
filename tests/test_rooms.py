@@ -55,3 +55,25 @@ def test_a_room_keeps_its_name_until_another_answer_clearly_leads():
     later = name(rooms, CELL, (10.0, 5.0), _votes(rooms, west=((-3.0, 1.5), {"living room": 1, "office": 3})), {},
                  before=list(first))
     assert "office" in later  # 3 against 1
+
+
+def test_segment_edge_cases_and_explore_coverage(tmp_path):
+    from types import SimpleNamespace
+
+    from robot.ros.explore import coverage
+
+    # All-free grid with no walls stays a single room; empty grid returns no rooms.
+    all_free = np.ones((20, 20), dtype=bool)
+    rooms = segment(all_free, CELL)
+    assert len(rooms) == 1 and rooms[0].all()
+    assert segment(np.zeros((20, 20), dtype=bool), CELL) == []
+
+    # coverage() reuses load_grid() and counts the share of truth-free floor marked free (>250) in the PGM.
+    pgm = tmp_path / "map.pgm"
+    img = np.full((10, 10), 254, dtype=np.uint8)
+    img[:, :5] = 0  # left half blocked, right half free
+    pgm.write_bytes(b"P5\n10 10\n255\n" + img.tobytes())
+    yaml = tmp_path / "map.yaml"
+    yaml.write_text("image: map.pgm\nresolution: 0.1\norigin: [-0.5, -0.5, 0.0]\n")
+    truth = SimpleNamespace(occupied=np.zeros((10, 10), dtype=bool), scene=SimpleNamespace(width=1.0, height=1.0))
+    assert abs(coverage(yaml, truth) - 0.5) < 1e-6

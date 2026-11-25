@@ -15,10 +15,17 @@ def name(pixels: np.ndarray) -> str:
     red bike's frame was 18% of its pixels and a blue one's 9%, the rest black tyres and grey spokes."""
     if pixels.size == 0:
         return ""
-    px = pixels.reshape(-1, 3).astype(float)
-    hi, lo = px.max(axis=1), px.min(axis=1)
-    colourful = ((hi - lo) / np.maximum(hi, 1e-6) > 0.35) & (hi > 50)
-    if colourful.mean() >= 0.08 and colourful.sum() >= 20:
+    px = pixels.reshape(-1, 3)
+    if px.dtype == np.uint8:
+        hi, lo = px.max(axis=1), px.min(axis=1)
+        # Integer equivalent of (hi - lo) / hi > 0.35 & hi > 50, avoiding a float64 copy of the whole crop.
+        colourful = (hi > 50) & ((hi - lo).astype(np.uint16) * 20 > hi.astype(np.uint16) * 7)
+    else:
+        px = px.astype(np.float32, copy=False)
+        hi, lo = px.max(axis=1), px.min(axis=1)
+        colourful = ((hi - lo) / np.maximum(hi, 1e-6) > 0.35) & (hi > 50)
+    n_col = int(np.count_nonzero(colourful))
+    if n_col >= 20 and n_col >= 0.08 * len(px):
         px = px[colourful]
     rgb = np.median(px, axis=0) / 255.0
     r, g, b = rgb
