@@ -784,7 +784,8 @@ class Tools:
         scope = self.robot.room() if area.casefold() == "here" else area
         context = f"Search scope: {scope}." + (f" {approach}" if approach else "")
         origin = self.robot.pose() if approach else before
-        poses = getattr(getattr(self.robot, "trace", None), "poses", ())
+        trace = getattr(self.robot, "trace", None)
+        poses = getattr(trace, "poses", ())
         trail_start = len(poses)
         try:
             self.found = found = self.robot.search(what, area=area, toward=toward)
@@ -795,6 +796,14 @@ class Tools:
         if approached:
             self._searched_landmarks.add(key)
         if found is None:
+            miss = f"No {what} found in the views checked. {context}"
+            latest = getattr(trace, "poses", ())
+            if latest is not poses:
+                anchor = poses[trail_start - 1] if trail_start else None
+                trail_start = next((i + 1 for i, sample in enumerate(latest) if sample is anchor), None)
+                if trail_start is None:
+                    return miss
+                poses = latest
             trail = [(origin.x, origin.y), *((x, y) for _, x, y, _ in poses[trail_start:]), (after.x, after.y)]
             unvisited = [
                 str(name) for name, place in getattr(self.robot, "places", {}).items()
@@ -802,7 +811,7 @@ class Tools:
                 and all(math.dist((place.x, place.y), point) > 2.2 for point in trail)
             ]
             hint = f" Areas not visited closely yet: {'; '.join(unvisited[:4])}." if unvisited else ""
-            return f"No {what} found in the views checked. {context}{hint}"
+            return miss + hint
         crop = getattr(self.robot, "target_crop", lambda _: None)(found.id)
         if crop is not None:
             self.pictures.append((f"Recorded detection crop for {found.label} ID {found.id} (not a live view):", crop))

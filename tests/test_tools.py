@@ -228,6 +228,25 @@ def test_repositioning_does_not_repeat_a_search_from_the_same_landmark(monkeypat
     assert tools.run("search", {"what": "towel"})[1]
 
 
+@pytest.mark.parametrize("anchor_retained", [True, False])
+def test_search_coverage_uses_the_new_trace_after_rollover(anchor_retained, monkeypatch):
+    robot = SimRobot(two_rooms())
+    robot.places.update(counter=Pose(4.0, 0.0, 0.0), cabinet=Pose(-2.5, 2.4, 0.0))
+    previous = [(0.0, -2.5, 0.0, 0.0), (1.0, -2.5, 0.0, 0.0)]
+    robot.trace.poses = previous
+
+    def search(*args, **kwargs):
+        robot.trace.poses = previous[-1:] if anchor_retained else []
+        robot.trace.poses.extend([(2.0, 4.0, 0.0, 0.0), (3.0, -2.5, 0.0, 0.0)])
+        return None
+
+    monkeypatch.setattr(robot, "search", search)
+    result, ok = Tools(robot).run("search", {"what": "towel", "area": "everywhere"})
+    assert ok and "No towel found in the views checked." in result
+    assert "counter" not in result
+    assert ("Areas not visited closely yet: cabinet." in result) == anchor_retained
+
+
 def test_plan_revision_keeps_completed_steps_and_blocking_is_not_completion():
     tools = Tools(SimRobot(two_rooms()))
     assert tools.run("todo", {"steps": ["Reach the doorway", "Enter the room"]})[1]
