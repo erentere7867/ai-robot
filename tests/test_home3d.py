@@ -143,6 +143,7 @@ def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):
     (["Yes, there is a bike, parked by the desk."], True),
     (["Yes, the bike is in the living room."], True),
     (["A bike is present."], True),
+    # The live Colab T4 Q5 reply that main's check rejected.
     (["Yes. A bicycle is present in the apartment – you can see a blue bike (frame and wheels) leaning near the black "
       "pole, visible in the front view and again in the rear-left/rear-right views. "
       "So there is indeed a bike in the room."], True),
