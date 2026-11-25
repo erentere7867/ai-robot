@@ -18,7 +18,7 @@ from typing import Any
 
 from robot.agent.api import Preempted, SafetyStop, side, wrap
 from robot.agent.instant import instant
-from robot.agent.tools import CAMERA_NAMES, Tools, speakable
+from robot.agent.tools import CAMERA_NAMES, ActionResult, Tools, recalled_facts, speakable
 from robot.perception.camera import data_url
 
 MAX_TURNS = 16  # model replies per task
@@ -271,6 +271,11 @@ class Agent:
             context.append("Earlier requests (oldest first):\n" + "\n".join(f"- {e}" for e in older))
         if self.last:
             context.append(f"The last request, step by step:\n{self.last}")
+        recalled = recalled_facts(tools.memory, instruction)
+        if recalled:
+            heading = ("Remembered facts (oldest to newest; later facts supersede earlier ones):"
+                       if len(recalled) > 1 else "Remembered facts:")
+            context.append(heading + "\n" + "\n".join(f"- {f}" for f in recalled))
         first = self._observation(robot, tools, list(self.cameras), "What you sense now:")
         if context:
             first["content"].insert(0, {"type": "text", "text": "\n".join(context) + "\n"})
@@ -325,6 +330,10 @@ class Agent:
                         messages.append({"role": "user", "content": self._review(instruction, record, tools)})
                         think = self._budget(news=False)
                         continue
+                    open_steps = tools.todo.open_steps()
+                    if open_steps:
+                        record.problems.append(f"open to-do steps left unfinished: {'; '.join(open_steps)}")
+                        return self._finish(robot, record, "failed", last_said)
                     if reply.text and speak and not spoke_since_action:
                         robot.say(speakable(reply.text))
                     step.said = reply.text if not spoke_since_action else ""  # avoid duplicate speech after say()
@@ -332,14 +341,26 @@ class Agent:
                     return self._finish(robot, record, "done", last_said)
 
                 failed = False
+                partial = False
                 visual_result = None
                 for call in reply.tool_calls:
+                    if self._stopped.is_set():
+                        return self._finish(robot, record, "preempted", last_said)
+                    if not self._heard.empty():
+                        result, ok = "Not run: the user spoke (their words follow).", False
+                        failed = True
+                        step.calls.append((call.name, call.args, result, ok))
+                        messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                        continue
                     key = ("say",) if call.name == "say" else (call.name, json.dumps(call.args, sort_keys=True))
                     repeats = repeats + 1 if key == last_call else 1
                     last_call = key
                     seen_calls[key] = seen_calls.get(key, 0) + 1
                     if failed:
-                        result, ok = "Skipped: an earlier call in this turn failed.", False
+                        result, ok = (
+                            "Not run: an earlier call in this turn ended short; inspect the result before deciding "
+                            "the next action." if partial else "Skipped: an earlier call in this turn failed."
+                        ), False
                     elif visual_result is not None:
                         result, ok = "Not run: inspect the returned pictures before deciding the next action.", False
                     elif call.name == "say" and repeats > 1:
@@ -365,11 +386,14 @@ class Agent:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
                         self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
                         try:
-                            result, ok = self._run(robot, tools, call.name, call.args, record)
+                            res = self._run(robot, tools, call.name, call.args, record)
                         except Preempted:
                             step.calls.append((call.name, call.args, "Interrupted before returning a result.", False))
                             raise
+                        result, ok = res.text, res.ok
                         failed = not ok
+                        if res.status == "partial":
+                            partial = True
                         if call.name == "say" and ok:
                             last_said = str(call.args.get("text", ""))
                             spoke_since_action = True
@@ -403,7 +427,8 @@ class Agent:
                 heard = self._drain()
                 think = self._budget(news=failed or bool(heard))
                 full_move = self.see_after_moves is True and tools.moved
-                open_loop = any(ok and name in ("go_toward", "drive", "move", "turn") for name, _, _, ok in step.calls)
+                open_loop = any((ok or tools.moved) and name in ("go_toward", "drive", "move", "turn")
+                                for name, _, _, ok in step.calls)
                 front_move = (self.see_after_moves == "front" and open_loop and bool(self.cameras)
                               and not tools.looked and not tools.pictures)
                 move_cams = self.cameras if full_move else ("front_camera",) if front_move else ()
@@ -458,24 +483,28 @@ class Agent:
                 "reply to the user, with no tool call.")
 
     def _run(self, robot: Any, tools: Tools, name: str, args: dict[str, Any],
-             record: TaskRecord) -> tuple[str, bool]:
+             record: TaskRecord) -> ActionResult:
         """One call. A user who speaks during it interrupts it; a plain stop ends the task (Preempted)."""
         self._acting.set()
         try:
-            result, ok = tools.run(name, args)
+            if not self._heard.empty():
+                if not self._stopped.is_set():
+                    robot.resume()
+                return ActionResult("Not run: the user spoke (their words follow).", False, "interrupted")
+            res = tools.execute(name, args)
         except Preempted:
             if self._stopped.is_set() or self._heard.empty():
                 raise
             robot.resume()
-            return "Interrupted: the user spoke (their words follow).", False
+            return ActionResult("Interrupted: the user spoke (their words follow).", False, "interrupted")
         finally:
             self._acting.clear()
-        if not ok:
-            record.problems.append(f"{name}: {result}")
+        if not res.ok:
+            record.problems.append(f"{name}: {res.text}")
             self._mood(robot, "uh_oh", "uh_oh")
         elif name == "search" and tools.found is not None:
             self._mood(robot, "happy", "happy")
-        return result, ok
+        return res
 
     def _finish(self, robot: Any, record: TaskRecord, outcome: str, said: str) -> TaskRecord:
         record.outcome = outcome

@@ -142,8 +142,19 @@ def _blob_to_vec(blob: bytes | None) -> np.ndarray | None:
     return np.frombuffer(blob, dtype=np.float32).copy()
 
 
+STOPWORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "am", "be", "been", "being",
+    "in", "on", "at", "to", "of", "for", "by", "with", "from", "into", "about",
+    "my", "your", "our", "his", "her", "their", "its", "i", "me", "you", "we", "they", "it",
+    "this", "that", "these", "those", "there", "here",
+    "where", "what", "who", "when", "which", "how",
+    "did", "do", "does", "have", "has", "had", "can", "could", "would", "should", "will",
+    "and", "or", "but", "so", "if", "then",
+})
+
+
 def embed_text(text: str, dim: int = 128) -> np.ndarray:
-    """Deterministic fast vector embedding: normalizes tokens, maps synonyms to canonical stems,
+    """Deterministic fast vector embedding: strips function words, maps synonyms to canonical stems,
 
     hashes word unigrams, bigrams, and character trigrams into a float32 unit-norm vector.
     """
@@ -151,7 +162,8 @@ def embed_text(text: str, dim: int = 128) -> np.ndarray:
     if not raw_tokens:
         return np.zeros(dim, dtype=np.float32)
 
-    tokens = [CANONICAL_SYNONYMS.get(t, t) for t in raw_tokens]
+    content = [t for t in raw_tokens if t not in STOPWORDS] or raw_tokens
+    tokens = [CANONICAL_SYNONYMS.get(t, t) for t in content]
     vec = np.zeros(dim, dtype=np.float32)
 
     def _hash_add(feature: str, weight: float) -> None:
@@ -220,12 +232,18 @@ class CirculatingMemory:
     def __init__(self, path: str | Path) -> None:
         path = Path(path).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.lock = threading.Lock()
 
         with self.lock, self.db:
             self.db.executescript(SCHEMA)
             self._migrate_schema()
+
+    def close(self) -> None:
+        """Close the SQLite connection (safe to call more than once)."""
+        with self.lock:
+            self.db.close()
 
     def _migrate_schema(self) -> None:
         """Add any missing columns to existing database tables if opened from earlier versions."""
@@ -332,9 +350,9 @@ class CirculatingMemory:
                     place_rows.append((name, float(px), float(py), float(pyaw)))
                 self.db.executemany("INSERT INTO places VALUES (?,?,?,?)", place_rows)
 
-        # Record facts avoiding exact duplicates
+        # Record facts avoiding exact duplicates without overwriting existing timestamps
         for n in (notes or ()):
-            self.remember_fact(n, now_wall=wall)
+            self.remember_fact(n, now_wall=wall, refresh=False)
 
         # Run routine circulation
         self.circulate(now_wall=wall)
@@ -576,7 +594,8 @@ class CirculatingMemory:
                 )
             return None
 
-    def remember_fact(self, text: str, room: str = "", now_wall: float | None = None) -> None:
+    def remember_fact(self, text: str, room: str = "", now_wall: float | None = None,
+                      *, refresh: bool = True) -> None:
         """Store a semantic fact with text embedding, avoiding exact duplicate entries."""
         text = text.strip()
         if not text:
@@ -591,6 +610,11 @@ class CirculatingMemory:
                     "INSERT INTO facts (text, room, vec, created_at) VALUES (?, ?, ?, ?)",
                     (text, room, _vec_to_blob(vec), now_wall),
                 )
+            elif refresh:
+                self.db.execute(
+                    "UPDATE facts SET created_at = ?, room = CASE WHEN ? != '' THEN ? ELSE room END WHERE text = ?",
+                    (now_wall, room, room, text),
+                )
 
     def notes(self) -> list[str]:
         """Return all remembered fact texts in chronological order."""
@@ -598,19 +622,19 @@ class CirculatingMemory:
             rows = self.db.execute("SELECT text FROM facts ORDER BY id").fetchall()
             return [r[0] for r in rows]
 
-    def query_facts(self, query: str, top_k: int = 3, min_score: float = 0.25) -> list[str]:
-        """Semantic vector similarity search over facts; returns top matching texts."""
+    def query_facts(self, query: str, top_k: int = 3, min_score: float = 0.25) -> list[tuple[str, float]]:
+        """Semantic vector similarity search over facts; returns (text, created_at), newest first on ties."""
         q_vec = embed_text(query)
         with self.lock:
-            rows = self.db.execute("SELECT text, vec FROM facts").fetchall()
+            rows = self.db.execute("SELECT id, text, vec, created_at FROM facts").fetchall()
         scored = []
-        for text, vec_blob in rows:
+        for row_id, text, vec_blob, created_at in rows:
             f_vec = _blob_to_vec(vec_blob)
             sim = cosine_similarity(q_vec, f_vec)
             if sim >= min_score:
-                scored.append((sim, text))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [text for _, text in scored[:top_k]]
+                scored.append((sim, float(created_at or 0.0), row_id, text))
+        scored.sort(key=lambda x: (round(x[0], 4), x[1], x[2]), reverse=True)
+        return [(text, created_at) for _, created_at, _, text in scored[:top_k]]
 
     def record_route_note(
         self,
