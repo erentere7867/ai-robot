@@ -119,34 +119,32 @@ def test_live_nav2_motion_handoff(tmp_path, monkeypatch):
             wait_for(lambda: moving in checked and moving in nav, "wheel command lost its original stamp")
             gate = robot._motion
             check = gate.checked
-            held, received = threading.Event(), threading.Event()
-            pending, ages = [], []
+            received = threading.Event()
+            pending = None
+            tail = age_at_delivery = 0
+            accepted = False
 
             def delay_reply(v, w, stamp):
+                nonlocal pending, tail, age_at_delivery, accepted
                 with gate.lock:
-                    age = gate._now() - stamp
-                    if not pending:
-                        if v > 0 and stamp in gate._in_flight and 0 <= age <= COMMAND_AGE_NS:
-                            # A distinct velocity identifies our delayed reply on the shared ROS topic.
-                            pending.append((v / 2, w, stamp))
-                            held.set()
-                        else:
-                            check(v, w, stamp)
-                    elif (v, w, stamp) == pending[0]:
-                        check(v, w, stamp)
-                        ages.append(age)
+                    if (pending is None and v > 0 and stamp in gate._in_flight and stamp > gate._checked
+                            and 0 <= gate._now() - stamp <= COMMAND_AGE_NS):
+                        # Stop before returning to the executor; all other replies still go straight to the gate.
+                        pending = (v / 2, w, stamp)
+                        tail = len(wheels)
+                        robot.stop()
+                        delayed.publish(robot._twist_msg(*pending))
+                        return
+                    check(v, w, stamp)
+                    if (v, w, stamp) == pending:
+                        age_at_delivery = gate._now() - stamp
+                        accepted = gate._checked >= stamp
                         received.set()
 
             monkeypatch.setattr(gate, "checked", delay_reply)
-            assert held.wait(2.0), "no pending Nav2 reply to delay"
-            with gate.lock:
-                assert pending[0][2] in gate._in_flight and pending[0][2] > gate._checked
-                tail = len(wheels)
-                robot.stop()
-            delayed.publish(robot._twist_msg(*pending[0]))
             assert received.wait(2.0), "the motion gate did not receive the delayed reply"
-            assert 0 <= ages[0] <= COMMAND_AGE_NS, "the delayed reply had already expired"
-            assert gate._checked < pending[0][2], "the gate accepted a reply from the stopped goal"
+            assert 0 <= age_at_delivery <= COMMAND_AGE_NS, "the delayed reply had already expired"
+            assert not accepted, "the gate accepted a reply from the stopped goal"
             monkeypatch.setattr(gate, "checked", check)
             wait_for(lambda: bool(errors), "Nav2 motion did not preempt")
             assert isinstance(errors[0], Preempted), errors
