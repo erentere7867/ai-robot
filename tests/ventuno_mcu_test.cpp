@@ -5,7 +5,7 @@
 #include <string_view>
 
 constexpr int LOW = 0, HIGH = 1, OUTPUT = 2, INPUT = 3, INPUT_PULLUP = 4, CHANGE = 5;
-constexpr int A0 = 20, A1 = 21, A2 = 22, A3 = 23, A4 = 24;
+constexpr int A0 = 14, A1 = 15, A2 = 16, A3 = 17, A4 = 18;
 int pins[32]{}, pwm[32]{};
 uint32_t nowMs = 0;
 uint32_t millis() { return nowMs; }
@@ -47,7 +47,7 @@ struct {
   void setClock(int) {}
 } Wire;
 struct Servo {
-  void attach(int) {}
+  void attach(int pin) { pinMode(pin, OUTPUT); }
   void write(int) {}
 };
 struct sensors_event_t {
@@ -133,7 +133,23 @@ int main(int argc, char **argv) {
   }
   assertDriving();
 
-  if (scenario == "e-stop" || scenario == "left bumper" || scenario == "right bumper") {
+  if (scenario == "independent safety pins") {
+    const int switches[] = {PIN_BUMP_L, PIN_BUMP_R, PIN_ESTOP, PIN_CHARGE};
+    for (int pin : PIN_CLIFF) {
+      for (int other : switches) assert(pin != other);
+      pins[pin] = HIGH;
+      advance(5);
+      assert(pins[PIN_STBY] == LOW && (readFlags() & 2));
+      assert(!(readFlags() & (1 | 4 | 16)));
+      assert(!onResetFaults());
+      pins[pin] = LOW;
+      assert(onResetFaults());
+      onCmdVel(60, 0);
+      advance(5);
+      loop();
+      assertDriving();
+    }
+  } else if (scenario == "e-stop" || scenario == "left bumper" || scenario == "right bumper") {
     int pin = scenario == "e-stop" ? PIN_ESTOP : scenario == "left bumper" ? PIN_BUMP_L : PIN_BUMP_R;
     pins[pin] = LOW;
     advance(5);

@@ -34,8 +34,8 @@ const int PIN_R_PWM = 6, PIN_R_IN1 = 7, PIN_R_IN2 = 8;
 const int PIN_STBY = 9;                               // active high; requires a hardware pull-down during reset
 const int PIN_ENC_LA = 2, PIN_ENC_LB = 10, PIN_ENC_RA = 11, PIN_ENC_RB = 12;
 const int PIN_BUMP_L = A0, PIN_BUMP_R = A1;            // microswitches to GND (active low)
-const int PIN_CLIFF[4] = {A2, A3, 13, 14};             // backup IR floor sensors, LOW = floor seen
-const int PIN_SERVO = 15;
+const int PIN_CLIFF[4] = {25, 26, 13, 27};             // LOW = floor seen; D25–D27 are JMISC pins 1–3
+const int PIN_SERVO = 28;                             // JMISC pin 4
 const int PIN_ESTOP = 16;                              // latching button to GND
 const int PIN_BATT = A4;                               // battery divider
 const int PIN_CHARGE = 17;                             // dock contacts sense, HIGH = charging
