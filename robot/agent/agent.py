@@ -357,7 +357,9 @@ class Agent:
                 failed = False
                 partial = False
                 visual_result = None
-                move_cams: tuple[str, ...] = ()
+                visual_parts = []
+                missing_view = False
+                recorded = 0
                 asked = False
                 for call in reply.tool_calls:
                     if self._stopped.is_set():
@@ -372,6 +374,8 @@ class Agent:
                         )
                     elif asked:
                         skipped = "Not run: read the result of asking the user before deciding the next action."
+                    elif missing_view:
+                        skipped = "Not run: no recent camera pictures were available after the previous action."
                     elif visual_result is not None:
                         skipped = "Not run: inspect the returned pictures before deciding the next action."
                     else:
@@ -384,6 +388,7 @@ class Agent:
                     repeats = repeats + 1 if key == last_call else 1
                     last_call = key
                     seen_calls[key] = seen_calls.get(key, 0) + 1
+                    move_cams: tuple[str, ...] = ()
                     if call.name == "say" and repeats > 1:
                         result, ok = ("Not run: you already spoke. If the request is finished, end with plain text "
                                       "and no tool call."), False
@@ -432,9 +437,19 @@ class Agent:
                             elif call.name != "look":
                                 blocked_tools.discard(call.name)
                     failed = not ok
+                    cameras = list(dict.fromkeys([*move_cams, *tools.looked]))
+                    if cameras or tools.pictures:
+                        recorded = len(tools.pictures)
+                        seen = self._observation(robot, tools, cameras, "What you sense now:",
+                                                 include_scene=self.see_after_moves is True and tools.moved)
+                        if any(part["type"] == "image_url" for part in seen["content"]):
+                            visual_parts = seen["content"]
+                        else:
+                            missing_view = True
+                            result += " No recent camera pictures are available."
                     step.calls.append((call.name, call.args, result, ok))
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
-                    if tools.looked or tools.pictures or move_cams:
+                    if visual_parts:
                         visual_result = messages[-1]
                 self._push(status="acting", steps=record.lines(thoughts=True), todo=tools.todo.text() if tools.todo.steps else "",
                            problems=list(record.problems))
@@ -451,15 +466,10 @@ class Agent:
                         messages[-1]["content"] += f"\nNow in the {snap.get('room') or 'room'}. {places}"
 
                 heard = self._drain()
-                think = self._budget(news=failed or asked or bool(heard))
-                recorded = len(tools.pictures)
+                think = self._budget(news=failed or asked or missing_view or bool(heard))
                 if visual_result is not None:  # pictures come back inside the requesting tool result, as trained: a
-                    # new user message would end its tool-use turn and drop the reasoning so far. Skip re-sending the
-                    # full scene list on stationary looks/crops and single-frame post-move snapshots.
-                    cameras = list(dict.fromkeys([*move_cams, *tools.looked]))
-                    seen = self._observation(robot, tools, cameras, "What you sense now:",
-                                             include_scene=self.see_after_moves is True and tools.moved)
-                    visual_result["content"] = [{"type": "text", "text": visual_result["content"]}, *seen["content"]]
+                    # new user message would end its tool-use turn and drop the reasoning so far.
+                    visual_result["content"] = [{"type": "text", "text": visual_result["content"]}, *visual_parts]
                 if heard:  # the user spoke mid-task: a new user turn with their words and what the robot senses now
                     messages.append(self._correction(robot, tools, heard, recorded=recorded))
                     reviewed = spoke_since_action = False

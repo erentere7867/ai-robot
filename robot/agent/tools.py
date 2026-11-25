@@ -813,7 +813,7 @@ class Tools:
             matches = (" Seen: " + "; ".join(f"{o.label} {o.id} ({_where_words(o)})" for o in found[:6]) + "."
                        if found else f" No {what} detected.")
         self.looked = list(dict.fromkeys([*self.looked, *CAMERAS[direction]]))
-        return f"Looking {direction}: the pictures follow.{matches}"
+        return f"Looking {direction}.{matches}"
 
     def wait(self, seconds: float, until: str = "") -> str:
         if until:

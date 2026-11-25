@@ -214,6 +214,28 @@ def test_post_move_pictures_are_seen_before_another_batched_action(see_after_mov
     assert [e.name for e in sim.trace.events if e.name in {"turn", "move"}] == ["turn"]
 
 
+def test_unavailable_post_turn_picture_is_reported_without_executing_the_rest_of_the_batch(monkeypatch):
+    sim = SimRobot(living_room())
+    camera_view = sim.camera_view
+
+    def view(*args):
+        if not any(event.name == "turn" for event in sim.trace.events):
+            return camera_view(*args)
+        return None
+
+    monkeypatch.setattr(sim, "camera_view", view)
+    batch = Reply("", tool_calls=[ToolCall("first", "turn", {"degrees": 90, "direction": "left"}),
+                                 ToolCall("second", "move", {"metres": 1, "direction": "forward"})])
+    brain = Scripted(batch, say("I turned but can't see whether the way is clear."))
+    Agent(brain, think_when="news").do("Turn left and move if the way is clear.", sim)
+    turned, skipped = tool_results(brain.seen[1])
+    assert "Turned 90 degrees left." in turned
+    assert "No recent camera pictures are available." in turned
+    assert "no recent camera pictures were available" in skipped
+    assert brain.thinks[1] == 128
+    assert [e.name for e in sim.trace.events if e.name in {"turn", "move"}] == ["turn"]
+
+
 @pytest.mark.parametrize("answer", ["right", None])
 def test_clarification_is_read_before_running_an_action(answer):
     sim = SimRobot(living_room())
