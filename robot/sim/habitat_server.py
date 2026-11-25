@@ -320,7 +320,7 @@ class Home:
     def camera(self, name: str) -> bytes:
         sensor = self.sim._sensors[name]
         sensor.draw_observation()
-        return np.ascontiguousarray(np.asarray(sensor.get_observation())[:, :, :3]).tobytes()
+        return np.asarray(sensor.get_observation())[:, :, :3].tobytes()  # one 2.8 MB copy of the 720p frame, not two
 
     def tof(self) -> dict:
         """Each 8x8 zone is the median of its patch (a zone reports one distance for the cone it covers); distances

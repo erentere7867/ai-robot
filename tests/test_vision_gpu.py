@@ -157,3 +157,18 @@ def test_a_flickering_thing_is_not_gone_until_unseen_for_a_while():
     # two cameras missing it for a few frames, a second after it was seen
     assert not any([tr.missed(plant, 11.0) for _ in range(GONE_AFTER + 2)])
     assert tr.missed(plant, 10.0 + GONE_S + 0.1)
+
+
+def test_depth_is_normalised_into_the_kept_buffer_as_before():
+    models = server.Models.__new__(server.Models)
+    models.gpu, models.times, models.depth_input = threading.Lock(), {"depth": []}, "pixel_values"
+    models._depth_buf = np.empty((1, 3, 364, 644), np.float32)
+    seen = []
+    models.depth = Mock(run=lambda _, feeds: seen.append(feeds["pixel_values"].copy()) or [np.zeros((1, 364, 644))])
+    picture = np.random.default_rng(0).integers(0, 256, (364, 644, 3), dtype=np.uint8)
+    models.run_depth(picture)
+    models.run_depth(picture)
+    old = (picture * server._DEPTH_SCALE + server._DEPTH_BIAS).transpose(2, 0, 1)[None]
+    assert np.allclose(seen[0], old, atol=1e-5) and np.array_equal(seen[0], seen[1])
+    with pytest.raises(ValueError):
+        models.run_depth(picture[:1])

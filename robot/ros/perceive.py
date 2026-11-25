@@ -889,7 +889,9 @@ class DepthNode:
         out.header = msg.header
         out.height, out.width = depth.shape
         out.encoding, out.step = "32FC1", depth.shape[1] * 4
-        out.data = array.array("B", depth.tobytes())
+        data = array.array("B")
+        data.frombytes(memoryview(np.ascontiguousarray(depth)).cast("B"))  # one copy of the frame, not two
+        out.data = data
         self.pubs[name].publish(out)
         self.scan.ingest_depth(name, msg.header.stamp, depth)
         return True
