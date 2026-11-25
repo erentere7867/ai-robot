@@ -7,6 +7,7 @@ from concurrent.futures import Future
 from threading import Lock
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -18,6 +19,7 @@ from robot.ros.perceive import Perception
 from robot.ros.real import RealRobot
 from robot.ros.robot import RosRobot
 from robot.sim.world import Scene, SimRobot, Thing
+from tests.perception_fakes import make_detector, make_image_brain
 
 
 def _make_scene(things: list[Thing] | None = None) -> Scene:
@@ -28,6 +30,42 @@ def _make_scene(things: list[Thing] | None = None) -> Scene:
         rooms={"lounge": (-4.0, -4.0, 4.0, 4.0)},
         start=Pose(0.0, 0.0, 0.0),
     )
+
+
+def test_follow_waits_for_the_next_plan_when_a_visible_person_is_across_a_narrow_gap():
+    person = Thing("person", 2.5, 0.0)
+    scene = _make_scene([person])
+    scene.walls = [((1.0, -5.0), (1.0, -0.15)), ((1.0, 0.15), (1.0, 5.0))]
+    sim = SimRobot(scene)
+    assert person in sim._visible()
+    assert sim._plan((person.x, person.y), 1.0) is None
+    sim._plan = Mock(wraps=sim._plan)
+    control, _ = sim._follower(person, 1.0)
+
+    assert control() == (0.0, 0.0)
+    sim.t += 0.25
+    assert control() == (0.0, 0.0)
+    assert sim._plan.call_count == 1
+    sim.t += 0.25
+    assert control() == (0.0, 0.0)
+    assert sim._plan.call_count == 2
+
+
+@pytest.mark.parametrize("gap, blocked", [(0.30, True), (1.20, False)])
+def test_timed_follow_reports_when_no_route_was_found(gap, blocked):
+    from robot.agent.tools import Tools
+
+    person = Thing("person", 2.5, 0.0, user=True)
+    scene = _make_scene([person])
+    scene.walls = [((1.0, -5.0), (1.0, -gap / 2)), ((1.0, gap / 2), (1.0, 5.0))]
+    sim = SimRobot(scene)
+    result = Tools(sim).execute("follow", {"target": "user", "seconds": 1.0})
+    assert result.ok is not blocked
+    if blocked:
+        assert "no route to the target was found; stayed put" in result.text
+        assert sim.pose() == scene.start
+    else:
+        assert "Followed for 1 s." in result.text
 
 
 # ---------------------------------------------------------------------------
@@ -849,16 +887,7 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
 
     real._step = step
     # Vision model says yes wherever the white patch is present
-    import base64
-
-    import cv2
-
-    def yes_prob(messages):
-        url = messages[0]["content"][0]["image_url"]["url"]
-        arr = cv2.imdecode(np.frombuffer(base64.b64decode(url.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
-        return min(0.98, 0.05 + 12.0 * float((arr > 200).mean()))
-
-    real.brain = SimpleNamespace(yes_probability=yes_prob)
+    real.brain = make_image_brain(lambda arr: min(0.98, 0.05 + 12.0 * float((arr > 200).mean())))
     found = real.detect("computer monitor")
     assert len(found) == 1 and found[0].label == "computer monitor" and 1.7 <= found[0].distance <= 2.3
     tid = found[0].id
@@ -1216,7 +1245,6 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     from robot.agent.agent import Agent
     from robot.agent.tools import Tools
     from robot.mind.brain import Reply, ToolCall
-    from robot.perception.detector import Detector
 
     # 1. Location phrases ("chair in living room") and object IDs ("bike 7") never leak into YOLOE vocabulary
     sim = SimRobot(Scene(8.0, 6.0, [Thing("chair", 2.0, 0.0, 0.3)], {}, start=Pose(0.0, 0.0, 0.0)))
@@ -1248,8 +1276,7 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     assert not any("What you sense now:" in p.get("text", "") for p in tool_content)
 
     # 3. Detector.clear() drops previous request's asked words while preserving `always`
-    det = Detector(server=SimpleNamespace(slots=8), always=("person",))
-    det._features = {w: np.zeros(512, np.float32) for w in ("shoes", "umbrella")}
+    det = make_detector(SimpleNamespace(slots=8), ("shoes", "umbrella"))
     det.watch("shoes", "umbrella")
     assert det.vocabulary == ["person", "shoes", "umbrella"]
     det.clear()

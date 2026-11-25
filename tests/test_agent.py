@@ -534,7 +534,7 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
     assert len(recall_prompts) == 1 and "Recent conversation:" not in recall_prompts[0]
 
     r1r = next(t for t in home3d.TASKS if t.id == "R1R")
-    assert r1r.check(None, {"said_by_turn": ["", "", "", "your spare keys are on the dining table."]})
-    assert r1r.check(None, {"said_by_turn": ["", "", "", "not on the couch; they're on the dining table."]})
-    assert not r1r.check(None, {"said_by_turn": ["", "", "", "i don't know whether they're on the table."]})
-    assert not r1r.check(None, {"said_by_turn": ["", "", "", "they aren't on the table; they're on the couch."]})
+    assert r1r.criterion(None, {"said_by_turn": ["", "", "", "your spare keys are on the dining table."]})
+    assert r1r.criterion(None, {"said_by_turn": ["", "", "", "not on the couch; they're on the dining table."]})
+    assert not r1r.criterion(None, {"said_by_turn": ["", "", "", "i don't know whether they're on the table."]})
+    assert not r1r.criterion(None, {"said_by_turn": ["", "", "", "they aren't on the table; they're on the couch."]})
