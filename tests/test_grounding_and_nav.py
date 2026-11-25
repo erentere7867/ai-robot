@@ -223,7 +223,9 @@ def _nav_feedback(robot, distance_remaining):
     return SimpleNamespace(feedback=SimpleNamespace(distance_remaining=distance_remaining, current_pose=pose))
 
 
-@pytest.mark.parametrize("feedback_mode", ["missing", "oscillating", "stationary replans", "empty path"])
+@pytest.mark.parametrize("feedback_mode", [
+    "missing", "oscillating", "stationary replans", "empty path", "backup then shorter replan",
+])
 def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled(feedback_mode):
     from robot.ros.robot import PROGRESS_S
 
@@ -248,7 +250,10 @@ def test_a_nav2_goal_that_gets_no_nearer_is_given_up_and_cancelled(feedback_mode
 
     def step(v, w):  # Nav2 backs up, spins and replans: a second passes and the robot is no nearer
         robot.t += 1.0
-        if feedback_mode != "stationary replans":
+        if feedback_mode == "backup then shorter replan":
+            robot.x = -min(0.4, (robot.t - 1) * 0.2)
+            report(_nav_feedback(robot, 6.0 - robot.x if robot.t < PROGRESS_S - 2 else 5.5))
+        elif feedback_mode != "stationary replans":
             robot.x = 0.3 * math.sin(robot.t)
         if feedback_mode == "oscillating":
             report(_nav_feedback(robot, 4.0 - robot.x))

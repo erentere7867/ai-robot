@@ -267,10 +267,18 @@ class RosRobot(SimRobot):
                     if sample is not None and sample != previous:
                         left, at = sample
                         if math.isfinite(left) and left > 0:
-                            if previous is None or left - previous[0] > math.dist(at, previous[1]) + PROGRESS_M:
+                            if previous is None:
                                 best_route, route_at = left, at
-                            elif left < best_route - PROGRESS_M and math.dist(at, route_at) >= PROGRESS_M:
-                                best_route, route_at, since = left, at, self.t
+                            else:
+                                change = left - previous[0]
+                                travelled = math.dist(at, previous[1])
+                                if change > travelled + PROGRESS_M:
+                                    best_route, route_at = left, at
+                                elif change < 0:
+                                    if travelled == 0 or -change > travelled + PROGRESS_M:
+                                        best_route, route_at = min(best_route, left), at
+                                    elif left < best_route - PROGRESS_M and math.dist(at, route_at) >= PROGRESS_M:
+                                        best_route, route_at, since = left, at, self.t
                             previous = sample
                     if self.t - since > PROGRESS_S:
                         raise PathBlocked(f"no nearer to ({to[0]:.1f}, {to[1]:.1f}) in {PROGRESS_S:g} s")
