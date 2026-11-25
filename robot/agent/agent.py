@@ -487,6 +487,8 @@ class Agent:
         self._acting.set()
         try:
             if not self._heard.empty():
+                if not self._stopped.is_set():
+                    robot.resume()
                 return "Not run: the user spoke (their words follow).", False
             result, ok = tools.run(name, args)
         except Preempted:
