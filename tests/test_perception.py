@@ -1003,6 +1003,16 @@ def test_locate_in_picture_refines_the_strongest_third_when_every_third_is_posit
     assert hit == ((894, 0, 1150, 432), False)
 
 
+@pytest.mark.parametrize("refinement", [[0.1, 0.1], [0.9, 0.9, 0.1, 0.1]])
+def test_locate_in_picture_recovers_a_wide_rug_when_the_refined_crop_is_not_recognized(refinement):
+    from robot.ros.perceive import locate_in_picture
+
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    scores = iter([0.9, 0.9, 0.9, *refinement, 0.1, 0.9])
+    hit = locate_in_picture(SimpleNamespace(yes_probability=lambda _: next(scores)), rgb, "rug")
+    assert hit == ((512, 324, 768, 720), True)
+
+
 def test_locate_in_picture_localises_by_crops_centres_straddling_objects_and_rejects_false_positives():
     from robot.ros.perceive import locate_in_picture
 
@@ -1117,5 +1127,4 @@ def test_badge_deoverlap_and_detector_max_asked():
     assert len(det.asked) == MAX_ASKED == 3
     assert det.asked == ["stool", "mug", "bicycle"]
     assert det.vocabulary == ["person", "stool", "mug", "bicycle"]
-
 

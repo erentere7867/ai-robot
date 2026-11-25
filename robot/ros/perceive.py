@@ -108,35 +108,39 @@ def locate_in_picture(brain: Any, rgb: np.ndarray, label: str) -> tuple[tuple[in
         return None
     best_i = max(pos, key=t_scores.__getitem__)
     # Merging three positives put no target pixels in the replay crop, 47° from the refined crop.
-    if len(pos) == 2 and pos[1] == pos[0] + 1:
-        span = 0.40
-        u_center = sum(t_scores[i] * 0.5 * (thirds[i][0] + thirds[i][1]) for i in pos) / sum(
-            t_scores[i] for i in pos
-        )
-    else:
-        a, b = thirds[best_i]
-        span = b - a
-        halves = ((a, a + 0.65 * span), (b - 0.65 * span, b))
-        h_scores = [see_probability(brain, rgb[:, int(x0 * w):max(int(x0 * w) + 1, int(x1 * w))], label, max_dim=384)
-                    for x0, x1 in halves]
-        if max(h_scores) < 0.5:
-            return None
-        total = h_scores[0] + h_scores[1]
-        u_center = (h_scores[0] * (a + 0.25 * span) + h_scores[1] * (b - 0.25 * span)) / total
-    sx0 = max(0, int(round((u_center - 0.30 * span) * w)))
-    sx1 = min(w, max(sx0 + 1, int(round((u_center + 0.30 * span) * w))))
-    strip = rgb[:, sx0:sx1]
-    top_end, bot_start = max(1, int(0.55 * h)), min(h - 1, int(0.45 * h))
-    v_top = see_probability(brain, strip[:top_end, :], label, max_dim=384)
-    v_bot = see_probability(brain, strip[bot_start:, :], label, max_dim=384)
-    if max(v_top, v_bot) < 0.5:
-        return None
-    # Floor-flat only when absent from the upper half: standing objects visible in both halves (umbrella 89%/100%) stay 3D.
-    on_floor = v_bot >= 0.5 and v_top < 0.35
-    y0, y1 = (bot_start, h) if on_floor else (0, max(1, int(0.60 * h))) if v_top > v_bot + 0.10 else (0, h)
-    x0 = max(0, int(round((u_center - 0.25 * span) * w)))
-    x1 = min(w, max(x0 + 1, int(round((u_center + 0.25 * span) * w))))
-    return (x0, y0, x1, y1), on_floor
+    # Keep the merged crop as a fallback when only the wider context is recognized.
+    adjacent = len(pos) == 2 and pos[1] == pos[0] + 1
+    for merge in (False, True) if len(pos) == 3 else (adjacent,):
+        if merge:
+            span = 0.40
+            u_center = sum(t_scores[i] * 0.5 * (thirds[i][0] + thirds[i][1]) for i in pos) / sum(
+                t_scores[i] for i in pos
+            )
+        else:
+            a, b = thirds[best_i]
+            span = b - a
+            halves = ((a, a + 0.65 * span), (b - 0.65 * span, b))
+            h_scores = [see_probability(brain, rgb[:, int(x0 * w):max(int(x0 * w) + 1, int(x1 * w))],
+                                        label, max_dim=384) for x0, x1 in halves]
+            if max(h_scores) < 0.5:
+                continue
+            total = h_scores[0] + h_scores[1]
+            u_center = (h_scores[0] * (a + 0.25 * span) + h_scores[1] * (b - 0.25 * span)) / total
+        sx0 = max(0, int(round((u_center - 0.30 * span) * w)))
+        sx1 = min(w, max(sx0 + 1, int(round((u_center + 0.30 * span) * w))))
+        strip = rgb[:, sx0:sx1]
+        top_end, bot_start = max(1, int(0.55 * h)), min(h - 1, int(0.45 * h))
+        v_top = see_probability(brain, strip[:top_end, :], label, max_dim=384)
+        v_bot = see_probability(brain, strip[bot_start:, :], label, max_dim=384)
+        if max(v_top, v_bot) < 0.5:
+            continue
+        # An umbrella can show in both halves (89%/100%) and must stay 3D.
+        on_floor = v_bot >= 0.5 and v_top < 0.35
+        y0, y1 = (bot_start, h) if on_floor else (0, max(1, int(0.60 * h))) if v_top > v_bot + 0.10 else (0, h)
+        x0 = max(0, int(round((u_center - 0.25 * span) * w)))
+        x1 = min(w, max(x0 + 1, int(round((u_center + 0.25 * span) * w))))
+        return (x0, y0, x1, y1), on_floor
+    return None
 
 
 def place_picture(rgb: np.ndarray, cam: Any, bx: float, by: float, radius: float) -> np.ndarray | None:
