@@ -27,6 +27,7 @@ from typing import Any
 
 from robot.agent.api import wrap
 from robot.eval.suite import end, rocks, turned
+from robot.perception.rig import to_robot
 from robot.sim.stack import Home
 
 TUNE = ("apt_0", "v3_sc0_staging_00")  # the layouts tasks and harness are tuned on; hold others out
@@ -146,25 +147,19 @@ def visited_in_order(sim: Referee, targets: list[Any], margin: float = 0.75) -> 
     return k == len(targets)
 
 
-def relative_xy(x: float, y: float, origin: tuple[float, float, float]) -> tuple[float, float]:
-    sx, sy, yaw = origin
-    dx, dy = x - sx, y - sy
-    return dx * math.cos(yaw) + dy * math.sin(yaw), -dx * math.sin(yaw) + dy * math.cos(yaw)
-
-
 def forward(sim: Referee, start: dict) -> float:
     """Metres moved along the starting heading (+ forward)."""
-    return relative_xy(*end(sim)[:2], start["pose"])[0]
+    return to_robot(start["pose"], *end(sim)[:2])[0]
 
 
 def straight_drive(sim: Referee, start: dict, metres: float) -> bool | str:
     if not sim.trace.poses:
         return "no ground-truth drive samples"
-    along = forward(sim, start)
+    origin = start["pose"]
+    projected = [to_robot(origin, x, y) for _, x, y, _ in sim.trace.poses]
+    along, _ = projected[-1]
     if abs(along - metres) > 0.2:
         return f"travelled {along:.2f} m forward; expected {metres:g} m within 0.20 m"
-    origin = start["pose"]
-    projected = [relative_xy(x, y, origin) for _, x, y, _ in sim.trace.poses]
     lateral = max(abs(side) for _, side in projected)
     if lateral > 0.2:
         return f"strayed {lateral:.2f} m sideways; allowed 0.20 m"
@@ -200,11 +195,11 @@ def out_and_back(sim: Referee, start: dict, targets: list[Any], margin: float) -
     poses = sim.trace.poses
     if not poses:
         return "no ground-truth return samples"
-    remaining = moved(sim, start)
+    t_end, ex, ey, eyaw = poses[-1]
+    remaining = math.dist(origin, (ex, ey))
     if remaining >= 0.8 or math.dist(origin, arrival) - remaining < 0.10:
         return f"did not return to the start after the outbound leg (ended {remaining:.2f} m away)"
-    cutoff = poses[-1][0] - STOP_DWELL
-    ex, ey, eyaw = end(sim)
+    cutoff = t_end - STOP_DWELL
     for t, x, y, yaw in reversed(poses):
         if math.dist((x, y), (ex, ey)) > 0.02 or abs(wrap(yaw - eyaw)) > 0.05:
             break
@@ -241,22 +236,23 @@ def says_cannot(text: str) -> bool:
 def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
     """The final spoken answer must assert presence, not just contain an affirmative word."""
     answers = [text.lower().replace("’", "'").strip() for _, text in sim.trace.said if text.strip()]
-    target = rf"(?:{'|'.join(map(re.escape, WORDS.get(label, (label,))))})s?\b"
-    negation = re.compile(r"\b(?:no|not|never|cannot|unable|none)\b|n't\b")
     failure = f"final answer did not unambiguously confirm that a {label} is present"
     if not answers:
         return failure
     affirmative = re.match(r"^(?:yes|yeah|yep)\b[\s,.!:-]*", answers[-1])
     answer = answers[-1][affirmative.end():] if affirmative else answers[-1]
     claim = r"(?:there (?:is|are)|there's|i (?:(?:can )?see|found|spotted))"
+    target = rf"(?:{'|'.join(map(re.escape, WORDS.get(label, (label,))))})s?\b"
     noun = rf"(?:(?:a|an|the|one)\s+)?(?:(?!(?:a|an|the|of|for|with)\b)[\w-]+\s+){{0,2}}{target}"
+    subject = rf"{noun}\s+(?:is|are)"
     location = r"(?:here|(?:parked |standing |sitting )?(?:in|inside|by|near|at|on|under|beside|behind|next to)\s+.+)"
     scope = re.escape(place)
     offsite = rf"\b(?:outside|outdoors|elsewhere|(?:another|a different|the other)\s+{scope})\b"
-    presence = rf"(?:{claim}\s+{noun}(?:,?\s+{location})?|{noun}\s+(?:is|are)\s+(?:present|{location}))"
+    absence = rf"\b(?:no|not|never|cannot|unable|none)\b|n't\b|{offsite}"
+    presence = rf"(?:{claim}\s+{noun}(?:,?\s+{location})?|{subject}\s+(?:present|{location}))"
     scope_denial = rf"not\s+(?:here|(?:in|inside)\s+(?:(?:this|the)\s+)?{scope})"
     belief = r"i (?:don't|do not) think (?:that )?"
-    assertion = (rf"(?:(?:{belief})?there\b|{noun}\s+(?:is|are)"
+    assertion = (rf"(?:(?:{belief})?there\b|{subject}"
                  r"|i\s+(?:(?:can|do|did)(?:n't| not)?)?\s*(?:see|find|spot))")
 
     def clauses(text: str) -> list[str]:
@@ -267,7 +263,7 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
             return True
         return bool(
             mentions(clause, label) and re.search(rf"(?:^|,\s*){assertion}", clause)
-            and (negation.search(clause) or re.search(offsite, clause))
+            and re.search(absence, clause)
         )
 
     final = clauses(answer)
@@ -276,9 +272,8 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
     if any(re.fullmatch(presence, clause) and not re.search(offsite, clause) and "?" not in clause for clause in final):
         return True
     # An elliptical answer has no subject to disambiguate it after a denial.
-    if any(denies(clause) for text in answers[:-1] for clause in clauses(text)):
-        return failure
-    if (affirmative and not answer) or re.fullmatch(r"(?:there (?:is|are) one|there's one)[.! ]*", answer):
+    elliptical = (affirmative and not answer) or re.fullmatch(r"(?:there (?:is|are) one|there's one)[.! ]*", answer)
+    if elliptical and not any(denies(clause) for text in answers[:-1] for clause in clauses(text)):
         return True
     return failure
 

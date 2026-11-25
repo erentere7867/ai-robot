@@ -28,8 +28,8 @@ def referee(poses=(), answers=(), objects=()):
 def test_come_back_requires_arrival_before_return_and_a_still_finish(path, arrival, problem):
     sim = referee(path, objects=[TV])
     start = {"pose": (0, 0, 0), "ends": [arrival, path[-1][1:]]}
-    assert TASK["R2"].check(sim, start) is (not problem)
-    assert problem in TASK["R2"].problem(sim, start)
+    actual = TASK["R2"].problem(sim, start)
+    assert problem in actual if problem else not actual
 
 
 @pytest.mark.parametrize(("path", "problem"), [
@@ -46,8 +46,8 @@ def test_come_back_requires_arrival_before_return_and_a_still_finish(path, arriv
 def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):
     sim = referee([(0, 0, 0, math.pi / 2), *path])
     start = {"pose": (0, 0, math.pi / 2)}
-    assert TASK["M3"].check(sim, start) is (not problem)
-    assert problem in TASK["M3"].problem(sim, start)
+    actual = TASK["M3"].problem(sim, start)
+    assert problem in actual if problem else not actual
 
 
 @pytest.mark.parametrize(("answers", "passed"), [
@@ -81,7 +81,6 @@ def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):
 ])
 def test_bike_answer_scores_the_claim_not_a_yes_token(answers, passed):
     sim = referee(answers=answers)
-    assert TASK["Q5"].check(sim, {}) is passed
     assert TASK["Q5"].problem(sim, {}) == (
         "" if passed else "final answer did not unambiguously confirm that a bike is present"
     )
