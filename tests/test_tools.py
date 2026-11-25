@@ -226,3 +226,15 @@ def test_plan_revision_keeps_completed_steps_and_blocking_is_not_completion():
         "1. [x] Reach the doorway", "2. [ ] Ask the user to open the door", "3. [ ] Enter the room",
     ]
     assert tools.todo.done_steps() == ["Reach the doorway"]
+
+
+def test_empty_plan_revision_clears_only_the_remaining_work():
+    tools = Tools(SimRobot(two_rooms()))
+    assert tools.run("todo", {"steps": ["Reach the doorway", "Enter the room"]})[1]
+    assert tools.run("todo_done", {"step": 1})[1]
+    assert tools.run("todo_blocked", {"step": 2, "reason": "door shut"})[1]
+    assert not tools.run("todo", {"steps": ";"})[1]
+    assert tools.todo.open_steps() == ["Enter the room (blocked: door shut)"]
+    result, ok = tools.run("todo", {"steps": []})
+    assert ok and result.splitlines()[1:] == ["1. [x] Reach the doorway"]
+    assert not tools.todo.open_steps()
