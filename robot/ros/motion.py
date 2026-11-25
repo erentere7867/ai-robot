@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from collections.abc import Callable
 from threading import RLock
@@ -130,6 +131,14 @@ class NavGoal:
             if not self.cancelled:
                 self.cancelled = True
                 self.sent.add_done_callback(self._cancel_when_accepted)
+
+    def wait_terminal(self, seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while not self.terminal():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+        return True
 
     def _cancel_when_accepted(self, future: Any) -> None:
         try:

@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted, TargetLost
+from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted, SafetyStop, TargetLost
 from robot.interfaces.live import PAGE
 from robot.perception.tracker import Track, Tracker
 from robot.ros.perceive import Perception
@@ -336,6 +336,34 @@ def test_ros_robot_shutdown_cleans_up_action_node_and_executor():
     assert robot._action_executor.shutdown_called
     assert robot.node.destroyed
     assert robot._executor.shutdown_called
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_ros_shutdown_waits_for_pending_goal_before_destroying_client(monkeypatch, confirmed):
+    from robot.ros.motion import NavGoal
+
+    robot = MockRosRobot(_make_scene())
+    sent, result = Future(), Future()
+    destroyed = []
+    robot._goal = NavGoal(sent, robot._motion.lock)
+    robot.actions = {"navigate_to_pose": SimpleNamespace(destroy=lambda: destroyed.append(True))}
+
+    def accept_during_shutdown(_):
+        assert not destroyed and robot._motion.owner is None and robot._goal.cancelled
+        sent.set_result(SimpleNamespace(
+            accepted=True, cancel_goal_async=lambda: result.set_result(SimpleNamespace(status=5)),
+            get_result_async=lambda: result,
+        ))
+
+    if confirmed:
+        monkeypatch.setattr("robot.ros.motion.time.sleep", accept_during_shutdown)
+        robot.shutdown()
+        assert result.done()
+    else:
+        monkeypatch.setattr("robot.ros.robot.CANCEL_WAIT_S", 0)
+        with pytest.raises(SafetyStop, match="restart Nav2"):
+            robot.shutdown()
+    assert destroyed == [True]
 
 
 def test_ros_robot_act_recreates_action_client_on_timeout():

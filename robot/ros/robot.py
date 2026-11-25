@@ -300,12 +300,8 @@ class RosRobot(SimRobot):
             with self._motion.lock:
                 self._halt()
                 pending.cancel()
-            if isinstance(exc, (TargetLost, PathBlocked)):
-                deadline = time.monotonic() + CANCEL_WAIT_S
-                while not pending.terminal() and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                if not pending.terminal():
-                    raise SafetyStop(f"Nav2 did not confirm that the {name} goal it was told to drop had stopped") from exc
+            if isinstance(exc, (TargetLost, PathBlocked)) and not pending.wait_terminal(CANCEL_WAIT_S):
+                raise SafetyStop(f"Nav2 did not confirm that the {name} goal it was told to drop had stopped") from exc
             raise
         finally:
             with self._motion.lock:
@@ -490,8 +486,13 @@ class RosRobot(SimRobot):
         return round(max(0.0, min(near) - RADIUS), 2) if near else 12.0
 
     def shutdown(self) -> None:
+        confirmed = True
         if hasattr(self, "_motion"):
-            self.cancel()
+            with self._motion.lock:
+                goal = self._goal
+                self.cancel()
+            if goal is not None:
+                confirmed = goal.wait_terminal(CANCEL_WAIT_S)
         for client in getattr(self, "actions", {}).values():
             try:
                 client.destroy()
@@ -505,3 +506,5 @@ class RosRobot(SimRobot):
             self._executor.shutdown()
         if hasattr(self, "node"):
             self.node.destroy_node()
+        if not confirmed:
+            raise SafetyStop("Nav2 did not confirm the previous goal stopped; restart Nav2 before driving again")
