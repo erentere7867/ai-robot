@@ -204,6 +204,22 @@ def test_frontier_tries_a_reachable_candidate_after_six_blocked_ones():
     assert robot._frontier_step(frontiers, max_leg=5.0) == (4.0, 1.0)
 
 
+def test_frontiers_that_share_a_blocked_capped_endpoint_check_it_once():
+    robot = object.__new__(RealRobot)
+    SimRobot.__init__(robot, _make_scene())
+    robot._plan = lambda end, _: [end]
+    checked = []
+
+    def reaches(end):
+        checked.append(end)
+        return end == (0.0, 1.5)
+
+    robot._nav_reaches = reaches
+    frontiers = [Pose(2.0, 0.0, 0.0), Pose(3.0, 0.0, 0.0), Pose(0.0, 4.0, 0.0)]
+    assert robot._frontier_step(frontiers, max_leg=1.5) == (0.0, 1.5)
+    assert checked == [(1.5, 0.0), (0.0, 1.5)]
+
+
 def test_object_approach_tries_farther_spot_after_rejecting_same_side_goals():
     robot = object.__new__(RealRobot)
     SimRobot.__init__(robot, _make_scene())

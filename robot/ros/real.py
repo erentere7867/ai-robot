@@ -876,7 +876,7 @@ class RealRobot(RosRobot):
                         end = cand
                 dist += seg
             candidates.append((dist, end))
-        for _, end in sorted(candidates, key=lambda item: item[0]):
+        for end in dict.fromkeys(end for _, end in sorted(candidates, key=lambda item: item[0])):
             if self._nav_reaches(end):
                 return CheckedFrontier(*end)
         return None
