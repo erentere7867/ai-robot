@@ -482,7 +482,7 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
             sim.shutdown = lambda: shutdowns.append(1)  # type: ignore[attr-defined]
             return sim
 
-    recall_histories: list[int] = []
+    recall_prompts: list[str] = []
 
     class PromptAwareBrain:
         def __init__(self, url: str) -> None:
@@ -505,8 +505,8 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
                 return call("turn", degrees=90, direction="left")
             if self.turn == 6:
                 return say("Turned left.")
-            recall_histories.append(len(messages))
             prompt = _text(messages[1]["content"])
+            recall_prompts.append(prompt)
             if "dining table (most recent)" in prompt:
                 return say("Your backup key is on the dining table.")
             return say("I don't know where your keys are.")
@@ -522,15 +522,15 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
     assert len(with_mem) == 1 and with_mem[0]["passed"] is True
     assert len(seen_stores) == 2 and seen_stores[0] is not seen_stores[1]
     assert len(shutdowns) == 2
-    assert recall_histories == [2]  # fresh Agent after restart has only system + user messages
+    assert len(recall_prompts) == 1 and "Recent conversation:" not in recall_prompts[0]
 
     seen_stores.clear()
     shutdowns.clear()
-    recall_histories.clear()
+    recall_prompts.clear()
     without_mem = home3d.run("nomem", ["R1R"], ["apt_0"], "http://fake", "front", "off", 1.0, use_memory=False)
     assert len(without_mem) == 1 and without_mem[0]["passed"] is False
     assert seen_stores == [None, None]
     assert len(shutdowns) == 2
-    assert recall_histories == [2]
+    assert len(recall_prompts) == 1 and "Recent conversation:" not in recall_prompts[0]
 
 
