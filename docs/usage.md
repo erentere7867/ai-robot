@@ -21,7 +21,7 @@ outside it:
 | Piece | Where | Port | Start |
 | :--- | :--- | :--- | :--- |
 | Language model (LFM3-VL-2B, llama.cpp) | Windows GPU (Vulkan) | 8081 | `tools\brain.ps1` |
-| Vision server (YOLOE-26l + Depth Anything, ONNX Runtime DirectML) | Windows GPU | 8090 | `tools\win\vision.ps1` |
+| Vision server (YOLOE-26l + Depth Anything V2 Base FP32, ONNX Runtime DirectML) | Windows GPU | 8090 | `tools\win\vision.ps1` |
 | 3D apartment (Habitat-Sim + ReplicaCAD) | WSL, rendered on the GPU | local socket | started by the eval or the demo |
 | The robot: ROS 2, Nav2, perception, the agent | WSL | live page 8765 | `python -m robot.eval.home3d` or the demo |
 
@@ -42,7 +42,8 @@ can time out.
 4. **Models.** `bash tools/linux/setup_models.sh` fetches what is missing in `models/` (the language model, the
    depth network, YOLOE-26l, the pose model, MobileCLIP's text encoder, the Piper voice and Whisper), makes the vision
    server's models in `models/vision/` (YOLOE exported with 8 word slots by `tools/linux/export_yoloe.py`, and the
-   depth network), and checks them. `--export <dir>` and `--import <dir>` carry the whole folder to another machine.
+   Depth Anything V2 Base FP32 in `models/vision/depth_base.onnx`), and checks them. To upgrade from Small, rerun
+   setup and restart the vision server. `--export <dir>` and `--import <dir>` carry the folder to another machine.
 5. **Vision server.** A full Python 3.10 or newer on Windows (not the embeddable one, which has no `venv`):
    ```powershell
    python -m venv $env:USERPROFILE\sprocket-win
@@ -89,8 +90,8 @@ Fifty instructions in drawn 2D rooms, fast; the model must be running.
 ## The 3D apartment
 
 The real robot software in a ReplicaCAD apartment: only the world, the body and the raw sensors are simulated
-([simulation_3d.md](simulation_3d.md)). The first run in a scene explores it for about 30 minutes and saves the map in
-`maps/`; later runs localise in it.
+([simulation_3d.md](simulation_3d.md)). A run in an unmapped scene explores and saves its map in `maps/`; later
+runs localise in it. The default `apt_0` scene already ships with a map.
 
 ```bash
 . tools/linux/env.sh
@@ -107,6 +108,8 @@ bash "<repo>/tools/linux/stop.sh"                # stops everything the run star
   robot believed was where (false ones in red), where it really went and where it thought it was; then every model turn
   with its reasoning, calls, results and the exact pictures it was given.
 - Results: `runs/<tag>.jsonl`; logs of the robot's processes: `runs/home_<scene>/`.
+- The 3D demo stores memory alongside the map in `maps/<scene>.memory.db` by default. The eval uses a separate
+  `memory.db` per task; pass `--no-memory` to disable it, or `--only R1R` to check recall across a restart.
 - `--rtf` is simulated seconds per second; 0.5 leaves room for the GPU and the model. One task takes a few minutes.
 
 ## Other tools

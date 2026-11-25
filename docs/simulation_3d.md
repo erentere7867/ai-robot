@@ -9,7 +9,7 @@ the robot; the judge alone reads it.
 | Layer | In the simulator | On the robot |
 | :--- | :--- | :--- |
 | World and body | `robot/sim/habitat_server.py`: a ReplicaCAD apartment in Habitat-Sim; a 0.30 m round body that rolls on the floor and stops where it would touch anything (no sliding along walls); every piece of furniture solid | the home |
-| Drivers | `robot/sim/habitat_ros.py`: three 1280×720 140° **colour** cameras at 5 Hz (no depth), front/rear 8×8 ToF grids at 10 Hz, wheel odometry and a gyro at 50 Hz, a motor controller with acceleration limits and a 0.3 s command watchdog; it owns `/clock` | camera drivers, the MCU, the IMU |
+| Drivers | `robot/sim/habitat_ros.py`: three 1280×720 140° **colour** cameras at 5 Hz (no depth), front/rear 8×8 ToF grids at 10 Hz, wheel odometry and a gyro at 50 Hz, a motor controller with acceleration limits and a 250 ms source-age command cutoff; it owns `/clock` | target: camera drivers, the MCU, the IMU; no physical ROS wheel bridge in this checkout |
 | Everything else | the robot's own code: robot_localization EKF (wheels + gyro), the depth node, slam_toolbox or AMCL, Nav2, YOLOE-26, the tracker, the agent | the same |
 
 Sensor errors are modelled where the real parts have them: wheels misjudge distance by about 1% and report 5% too
@@ -19,10 +19,9 @@ Without calibration a parked robot's heading drifted 53 degrees in a 220-second 
 target inside a mapped obstacle. Calibration reduced that to 0.5 degrees on the same readings. The judge gets
 `/ground_truth` (where the body really is), a bump count, and the apartment's objects; the robot never does.
 
-Simulated time runs at `--rtf` times wall time (default 0.33). On this PC the robot's software runs on the CPU (YOLOE
-about 0.4 s a frame, the depth network about 0.7 s), far slower than on the board's NPU and GPU; slowing the world
-gives it roughly the board's share of work per simulated second. Model calls take wall time, but nothing moves while
-the agent waits for one.
+Simulated time runs at `--rtf` times wall time (default 0.33). Lowering it gives the software more wall time per
+simulated second; model calls still take wall time. See [testing.md](testing.md) for CPU-only setup and measured
+rates. Board throughput is unmeasured.
 
 ## Seeing obstacles without a lidar
 
@@ -93,6 +92,18 @@ These runs did not exercise near-contact avoidance and do not show a live improv
 Base is [CC BY-NC 4.0](https://huggingface.co/onnx-community/depth-anything-v2-base).
 On an existing installation, rerun `bash tools/linux/setup_models.sh` and restart the vision server to pick up Base.
 Base latency on the Windows DirectML GPU and the physical board is still unmeasured.
+
+**Grounding follow-up (25 November, [#41](https://github.com/erentere7867/ai-robot/pull/41)).** The early arrival
+was an error in the goal, not Nav2 stopping short of it. In the replay, merging all three positive crop thirds
+put no table pixels in the crop; the fix prefers refining the strongest third and places a scan-backed target
+on the returning beam. The follow-up `apt_0 T1` trials ran CPU-only in the cloud Ubuntu container: both models
+passed 3/3 with zero bumps. Final centre-to-table gaps were 0.632–0.735 m with Small and 0.564–0.607 m with Base
+FP32 (pass at ≤0.75 m). This does not establish physical stopping performance.
+
+**CPU hot paths (25 November, [#37](https://github.com/erentere7867/ai-robot/pull/37)).** Median floor fitting
+for one 360×640 camera fell from 11.98 to 3.41 ms; scan conversion for three such cameras fell from 36.47 to
+7.24 ms; room segmentation on a 200×200 grid fell from 187.72 to 3.68 ms. These are microbenchmarks, not model
+inference or full-stack frame rates.
 
 ## What YOLOE finds
 
@@ -191,8 +202,9 @@ in view at all ("false"); YOLOE at the robot's threshold, 0.22:
 
 `robot/sim/stack.py` `Home(scene)`: if `maps/<scene>.yaml` does not exist, the robot explores (frontier
 exploration on Nav2, `robot/ros/explore.py`) while slam_toolbox builds the map, and saves it; its map's frame starts
-at its dock. Afterwards it localises in that map with AMCL from the dock. `Home.robot(detector, brain)` gives a
-RealRobot that knows only its own map: rooms are segmented from it and named by the furniture it sees.
+at its dock. The default budget is 600 simulated seconds. Afterwards it localises in that map with AMCL from the
+dock; `apt_0` already ships with a map. `Home.robot(detector, brain)` gives a RealRobot with its own map,
+segmented rooms and, by default, a map-specific SQLite store.
 
 In `apt_0` (19 November) exploring ended by itself after 347 simulated seconds (11 frontiers reached, 5 given up, none
 left). The map shows 94% of the reachable floor as free; 20% of what it shows free is not floor the body can reach,
@@ -222,7 +234,7 @@ shell: `. tools/linux/env.sh` (ROS, the Python env, OpenGL on the GPU, and ROS o
 networking, DDS over UDP finds the other processes but delivers no data).
 
 ```bash
-python -m robot.eval.home3d --tag first            # 27 tasks, judged against the truth
+python -m robot.eval.home3d --tag first            # judged against simulator truth
 python -m robot.interfaces.demo                    # talk to it on http://127.0.0.1:8765
 bash tools/linux/stop.sh                             # stop everything a run left behind
 ```
@@ -377,8 +389,8 @@ and run again. What made the robot look dumb, in the order found:
   turns and 39 s instead of 16 turns and 196 s, ending 0.86 m from a beanbag's edge: as near as the robot's map
   allows, the beanbags standing in floor it mapped as taken (the check wants 0.75 m).
 - **A goal Nav2 could not reach.** A search stop free on the robot's map but not on Nav2's costmap kept Nav2 backing
-  up, spinning and replanning along one 2 m stretch for 490 simulated seconds. A Nav2 goal that brings the robot no
-  0.25 m nearer in 30 simulated seconds is now given up as blocked; the search then goes on elsewhere.
+  up, spinning and replanning along one 2 m stretch for 490 simulated seconds. At the time, the stall check used
+  progress toward the goal; the 25 November follow-up below changed how progress and reachability are checked.
 - **New things checked last.** With the "gone?" questions ahead of naming new things on the vision model's one
   queue, the bike YOLOE called an umbrella was driven to before it was checked; the model's yes to that crop is 0%
   (real beanbags 100%, a beanbag called an umbrella 3%). New things are now named first.
@@ -595,6 +607,18 @@ Measured 3D verification (`apt_0`, `think=low`, 0.33x):
 - `"try going under the chair thats next to the big tv in the living room"`: LFM3-VL-2B at `think=low` still attempted
   `go_to('chair')` before clarifying (3 turns, `16.7 s`) — consistent with `view-goal-Q5jq` above (2B model
   instruction-following limit on unsupported under-furniture requests, not routed around in code).
+
+### Navigation follow-up (25 November)
+
+- [#34](https://github.com/erentere7867/ai-robot/pull/34): the 30 s stall timer now credits new ground at least
+  0.25 m from prior credited positions, not straight-line distance toward the goal. It allows detours.
+- [#38](https://github.com/erentere7867/ai-robot/pull/38): when there is no route, following stops and retries
+  planning rather than steering straight at the target. In a VLM-free Habitat/ROS body run with CPU depth,
+  a 0.30 m gap probe went from a 0.40 m/s peak forward request and 0.392 m movement to zero for both.
+- [#39](https://github.com/erentere7867/ai-robot/pull/39): search goals must pass the live Nav2 planner before
+  being driven to. A rejected candidate falls through to the next ranked candidate, without a cap. In a
+  VLM-free Habitat body run, adding a synthetic scan obstacle rejected the first frontier; the robot went to
+  the next and returned with no contact. Later review changes were checked by pytest, not rerun in Habitat.
 
 ## Hazards found
 

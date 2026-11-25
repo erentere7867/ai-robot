@@ -25,8 +25,7 @@ Read these, in order:
 1. `AGENTS.md`. Its rules bind every change you make.
 2. `README.md`. It has a table of where each behaviour lives in the code.
 3. `docs/usage.md` (this PC), then `docs/testing.md`.
-4. `docs/architecture.md`. Section 6 is the agent as it is now. Sections 3 and 5 are the target design and only
-   partly built.
+4. `docs/architecture.md`. It describes the checked-in stack and distinguishes it from the hardware target.
 5. `docs/simulation_3d.md`. It records what has been measured, including what failed and why. Never retry an idea
    it says failed without a new reason.
 6. `docs/ideas/sprocket-harness.md`.
@@ -277,7 +276,7 @@ in section 6.
    - The replay bench, the scoreboard metrics and the comparison command exist.
    - Baseline: 3 repeats on the tuning layouts and the held-out ones.
    - `docs/progress.md` is started.
-2. **More and better tasks.** The 27 tasks in `robot/eval/home3d.py` are too few to steer by. Grow them to about 100
+2. **More and better tasks.** The tasks in `robot/eval/home3d.py` are too few to steer by. Grow them to about 100
    that real people would say at home, across these kinds:
    - motion;
    - going to a thing;
@@ -301,8 +300,9 @@ in section 6.
      a flat with one.
    - **Furniture YOLOE cannot see from 22 cm.** It finds tables and counters 0–8% of the time. The model finds them
      90% of the time or more. Give the robot a general way to use that.
-   - **The synthetic scan.** 64% of obstacles within 1 m are ranged within 15%.
-5. **Decisions.** The 2B model picks the wrong tool more often as tools are added; there are 21 now. Try fewer,
+   - **The synthetic scan.** Earlier Small-model measurements ranged 64% of obstacles within 1 m to within 15%;
+     see `docs/simulation_3d.md` for the Base FP32 measurements and what they do not establish.
+5. **Decisions.** The 2B model picks the wrong tool more often as tools are added. Try fewer,
    clearer tools, results and errors that guide it better, and a shorter prompt. Measure on replay and the 2D suite,
    then confirm in 3D.
 6. **Search and exploration.** Find what is not in view, using rooms and where things usually are, without visiting
@@ -312,15 +312,16 @@ in section 6.
    - Localisation about 0.5 m off far from the dock.
    - Contact with things no sensor saw.
 
-   Build the behaviours in architecture section 3 only where a measurement shows they help.
+   Use the current motion and navigation stack in `docs/architecture.md` as the baseline for comparisons.
 8. **Memory.**
    - Replace the hand-written household lists in `robot/mind/memory.py` (`CANONICAL_SYNONYMS`, the anchor labels and
      the hashed-word "embeddings") with learned embeddings already in the stack, such as MobileCLIP's text encoder.
      Those lists break the first rule.
-   - Remember across tasks and sessions.
+   - Measure durable recall across tasks and sessions. SQLite is wired in; `R1R` tests recall of a corrected fact
+     after restarting the robot and agent.
    - Answer "where are my keys?" from what the robot saw, not only from what it was told.
 9. **Voice and interaction, end to end.** Speech in (Whisper), then the agent, then speech out (Piper). "Stop" and
-   interruptions mid-task. The wake-word turn and the voice direction, which are built but not wired in. Test it in
+   interruptions mid-task. Wake-word turning and voice direction are not wired end to end. Test it in
    the simulator by speaking requests with Piper into the Whisper path.
 10. **People:** "follow me", "come here", "what am I pointing at". The apartment has no people. Find a way to put
     moving people in the simulator, such as Habitat's humanoids or a moving textured model, and test these honestly.
@@ -336,8 +337,8 @@ in section 6.
 13. **Learning, later and only with the owner's agreement.** Fine-tune the model on recorded episodes from training
     layouts (`robot/train/scenes.py` makes random rooms), and judge it on layouts and tasks it never trained on.
 
-**Keep the design honest.** Whatever in architecture sections 3 and 5 does not earn its place in measurement, remove
-from the design and say why. `docs/architecture.md` describes what is.
+**Keep the design honest.** When a proposed behaviour does not earn its place in measurement, drop it and say why.
+`docs/architecture.md` describes what runs today.
 
 ## 8. Engineering, beyond AGENTS.md
 
@@ -354,7 +355,8 @@ from the design and say why. `docs/architecture.md` describes what is.
 
 ## 9. Your memory: docs/progress.md
 
-Keep it short: replace what is out of date rather than appending forever. It holds:
+This ledger is not yet checked in. When starting it, keep it short: replace what is out of date rather than appending
+forever. It should hold:
 
 - **Scoreboard.** The latest numbers per kind of task, tuning against held-out, with the date, the commit, the run
   tags and the number of repeats.

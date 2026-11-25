@@ -1,6 +1,7 @@
 # Sprocket v2
 
-A pet-like, helpful wheeled robot on the Arduino VENTUNO Q, with everything running on the robot.
+A general-purpose wheeled robot designed to run on the Arduino VENTUNO Q. The checked-in ROS stack runs in
+Habitat today; the STM32 firmware is separate and there is no ROS-to-Ventuno wheel bridge in this checkout.
 
 Its mind is an **agentic tool-calling loop** around an on-board vision-language model (`LFM3-VL-2B` for now). The
 model gets the three cameras' pictures and the user's words, answers what it can from the pictures, and acts by
@@ -26,19 +27,19 @@ rules for changing it are in [AGENTS.md](AGENTS.md).
 ## Layout
 
 ```text
-firmware/     STM32H5 sketch: 200 Hz wheel control, VL53L5CX step/cliff reflex, IMU + anti-snag
+firmware/     STM32H5 sketch: 200 Hz wheel control, e-stop, bumper, ToF safety and command watchdog
 robot/
   agent/      the agent loop, its tools (checked, with errors that teach), to-do list, instant stop/wait
   mind/       the model's client (native tool calls, yes/no probabilities), long-term memory (SQLite)
   perception/ camera rig, YOLOE for asked words, depth scaled by the floor, synthetic /scan, tracker, pose
-  body/       the body's control loops: trajectory rollout, pursuit, social yielding, aliveness
+  body/       2D trajectory rollout and pursuit, shared navigation progress guard
   ros/        the robot on ROS 2: Nav2, its own map and rooms, perception nodes, RealRobot
   sim/        the 2D simulator behind the same robot API, and the Habitat 3D apartment
-  interfaces/ live web page, voice (Whisper, voiceprints, Piper), the demo
+  interfaces/ live web page, voice helpers, demo
   eval/       the 2D suite, the 3D tasks with per-task reports, the vision model's photo check
-  train/      random 2D scenes (the post-training data builder comes next)
+  train/      random 2D scenes
 tests/        unit and integration tests
-tools/        start the model (brain.ps1, wsl/brain.sh) and the GPU vision server (win/), set up WSL and models
+tools/        start the model (brain.ps1, linux/brain.sh) and the vision server, set up WSL/Linux and models
 ```
 
 ## Where the behaviour lives
@@ -49,6 +50,9 @@ tools/        start the model (brain.ps1, wsl/brain.sh) and the GPU vision serve
 | The tools the model can call, their descriptions and checks | `robot/agent/tools.py` |
 | What a tool does in the world: `search`, `go_to`, `follow`, ... | `robot/sim/world.py` (`SimRobot`), overridden on the real stack in `robot/ros/real.py` (`RealRobot`) |
 | Driving through Nav2 | `robot/ros/robot.py` (`RosRobot`) |
+| ROS motion ownership, cancellation and stale commands | `robot/ros/motion.py` (`MotionGate`) |
+| Mapping a new layout and searching in a mapped one | `robot/ros/explore.py` (`Explorer`), `robot/ros/real.py` (`RealRobot`) |
+| Durable memory in demo and eval | `robot/mind/memory.py`, `robot/sim/stack.py`, `robot/eval/home3d.py` |
 | What YOLOE looks for, tracking, the model's check of each detection | `robot/perception/detector.py`, `robot/perception/tracker.py`, `robot/ros/perceive.py` |
 | YOLOE and depth on the GPU | `tools/vision_server.py` (Windows), `robot/perception/gpu.py` (its client) |
 | The model's own calls (yes/no, room names) | `robot/mind/brain.py` |
