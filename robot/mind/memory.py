@@ -628,7 +628,12 @@ class CirculatingMemory:
             if sim >= min_score:
                 scored.append((sim, float(created_at or 0.0), row_id, text))
         scored.sort(key=lambda x: (round(x[0], 4), x[1], x[2]), reverse=True)
-        return [(text, created_at) for _, created_at, _, text in scored[:top_k]]
+        picked = scored[:top_k]
+        if len(scored) > top_k:
+            newest = max(scored, key=lambda x: (x[1], x[2]))
+            if newest not in picked:
+                picked[-1] = newest
+        return [(text, created_at) for _, created_at, _, text in picked]
 
     def query_facts(self, query: str, top_k: int = 3, min_score: float = 0.25) -> list[str]:
         """Semantic vector similarity search over facts; returns top matching texts."""
