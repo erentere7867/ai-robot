@@ -47,6 +47,7 @@ class Task:
     criterion: Callable[[Referee, dict], bool | str]  # a string explains a failed condition
     needs: tuple[str, ...] = ()  # labels the layout must have, or the task is skipped there
     observe_after: float = 0.0
+    restart_after: tuple[int, ...] = ()  # 1-based request indices after which robot + agent restart on the same DB
 
     def problem(self, referee: Referee, start: dict) -> str:
         result = self.criterion(referee, start)
@@ -78,12 +79,14 @@ def out_dir() -> Path:
     return paths.RUNS
 
 
-def keep_pictures(robot: Any, folder: Path) -> list[tuple[float, str]]:
+def keep_pictures(robot: Any, folder: Path, kept: list[tuple[float, str]] | None = None) -> list[tuple[float, str]]:
     """Save camera views and object evidence as numbered JPEGs; the report shows which track produced a crop."""
     import cv2
 
     folder.mkdir(parents=True, exist_ok=True)
-    view, kept = robot.camera_view, []
+    view = robot.camera_view
+    if kept is None:
+        kept = []
 
     def save(label: str, frame: Any) -> Any:
         if frame is not None and getattr(frame, "size", 0):
@@ -379,6 +382,20 @@ TASKS = [
     # two requests in a row: context and memory
     Task("R1", ("Remember that my keys are on the sofa.", "Where are my keys?"),
          lambda s, st: mentions(said(s, last_only=True), "sofa")),
+    Task("R1R", (
+         "Remember that my spare keys are on the couch.",
+         "Actually, I moved my spare keys to the dining table.",
+         "Turn left 90 degrees.",
+         "Where did I leave my backup key?",
+    ), lambda s, st: (
+         mentions(st["said_by_turn"][3], "table")
+         and not re.search(
+             r"\b(?:not|aren't|isn't|no longer|don't know|do not know|not sure|unsure|uncertain|"
+             r"can't tell|cannot tell|no idea|whether)\b[^.?!;,:]{0,40}\btable\b",
+             st["said_by_turn"][3].replace("’", "'"),
+         )
+         and not mentions(st["said_by_turn"][2], "key")
+    ), restart_after=(2,)),
     Task("R2", ("Go to the TV.", "Come back."), lambda s, st: out_and_back(s, st, things(s, "tv"), 0.9),
          ("tv",), observe_after=2 * STOP_DWELL),
     Task("R3", ("Go to the sofa.", "Now turn around."),
@@ -411,9 +428,11 @@ def start_facts(home: Home) -> dict:
 
 
 def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: str, think: str,
-        rtf: float, review: bool = False, think_when: str = "always", live_port: int = 0) -> list[dict]:
+        rtf: float, review: bool = False, think_when: str = "always", live_port: int = 0,
+        use_memory: bool = True) -> list[dict]:
     from robot.agent.agent import Agent
     from robot.mind.brain import Brain
+    from robot.mind.memory import CirculatingMemory
     from robot.perception.detector import Detector
 
     brain = Brain(brain_url)
@@ -448,9 +467,15 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                     continue
                 if any(n not in labels and not (n == "tv" and "tv stand" in labels) for n in task.needs):
                     continue
+                task_dir = out.parent / tag / scene / task.id
+                task_dir.mkdir(parents=True, exist_ok=True)
+                db_path = task_dir / "memory.db"
+                if use_memory and db_path.exists():
+                    db_path.unlink()
+                store = CirculatingMemory(db_path) if use_memory else None
                 home.reset()
-                robot = home.robot(detector, brain)
-                kept = keep_pictures(robot, out.parent / tag / scene / task.id)
+                robot = home.robot(detector, brain, store=store)
+                kept = keep_pictures(robot, task_dir)
                 try:
                     home.wait(WATCH)  # sitting on its dock, looking around
                     robot._perceive_objects()
@@ -459,15 +484,38 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                     if holder is not None:
                         holder.sim = robot
                         live.update(scene=f"{scene}, task {task.id}")
-                    agent = Agent(brain, cameras=cameras, think=think, review=review, think_when=think_when,
-                                  live=live)
+                    agent = Agent(brain, memory=store, cameras=cameras, think=think, review=review,
+                                  think_when=think_when, live=live)
                     records = []
-                    for say in task.says:
+                    all_said: list[tuple[float, str]] = []
+                    for idx, say in enumerate(task.says, 1):
+                        said_mark = len(robot.trace.said)
                         records.append(agent.do(say, robot))
+                        new_said = robot.trace.said[said_mark:]
+                        all_said.extend(new_said)
                         start.setdefault("ends", []).append(home.path[-1][1:])  # the true pose after each request
+                        start.setdefault("said_by_turn", []).append(" ".join(t for _, t in new_said).lower())
+                        if idx in task.restart_after:
+                            if holder is not None:
+                                holder.sim = None
+                            robot.perception.stop()
+                            robot.shutdown()
+                            if store is not None:
+                                store.close()
+                                store = CirculatingMemory(db_path)
+                            home.reset()
+                            robot = home.robot(detector, brain, store=store)
+                            keep_pictures(robot, task_dir, kept=kept)
+                            home.wait(WATCH)
+                            robot._perceive_objects()
+                            if holder is not None:
+                                holder.sim = robot
+                            agent = Agent(brain, memory=store, cameras=cameras, think=think, review=review,
+                                          think_when=think_when, live=live)
                     if task.observe_after:
                         home.wait(task.observe_after)
                     referee = Referee(home, robot, since=mark)
+                    referee.trace.said = list(all_said)
                     problem = ""
                     passed = False
                     try:
@@ -483,7 +531,7 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                                  "problems": [p for r in records for p in r.problems],  # why, when it failed
                                  "steps": [line for r in records for line in [f"## {r.instruction}",
                                                                               *r.lines(thoughts=True)]],
-                                 "said": [t for _, t in robot.trace.said],
+                                 "said": [t for _, t in all_said],
                                  "knew": sorted(f"{t.label} {t.id}" for t in robot.things.values()),
                                  "model_s": [s.model_s for r in records for s in r.steps],
                                  "tokens": [s.tokens for r in records for s in r.steps],  # written, thought included
@@ -497,6 +545,8 @@ def run(tag: str, only: list[str], scenes: list[str], brain_url: str, cameras: s
                         holder.sim = None
                     robot.perception.stop()
                     robot.shutdown()
+                    if store is not None:
+                        store.close()
                 if live is not None:
                     live.update(history=(live.state.history + [{"instruction": f"{task.id}: {' / '.join(task.says)}",
                                                                 "outcome": "passed" if rows[-1]["passed"]
@@ -538,9 +588,11 @@ def main() -> None:
                         help="news: reason only after the request, the user's words or a failed call")
     parser.add_argument("--live", type=int, default=0, metavar="PORT",
                         help="serve the live page on this port to watch the run (0: off)")
+    parser.add_argument("--no-memory", action="store_true",
+                        help="disable the per-task SQLite memory store (for ablation / restart checks)")
     args = parser.parse_args()
     run(args.tag, args.only, args.scenes, args.brain, args.cameras, args.think, args.rtf, args.review,
-        args.think_when, args.live)
+        args.think_when, args.live, use_memory=not args.no_memory)
 
 
 if __name__ == "__main__":

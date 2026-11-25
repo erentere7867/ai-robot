@@ -30,6 +30,7 @@ MAPS = paths.MAPS
 RUNS = paths.RUNS
 RTF = 0.33  # simulated seconds per wall second: the robot's software gets about the board's work done per second
 SIMULATOR = ("robot.sim.habitat_ros", "habitat_server.py")  # what stands in for the home and the hardware
+_DEFAULT_STORE = object()
 
 
 def own_home(map_yaml: Path) -> tuple[Any, np.ndarray]:
@@ -141,13 +142,17 @@ class Home:
         self.reset(localise=False)
         return stats
 
-    def robot(self, detector: Any, brain: Any = None, store: Any = None) -> Any:
-        """A RealRobot at the dock that knows only its own map."""
+    def robot(self, detector: Any, brain: Any = None, store: Any = _DEFAULT_STORE) -> Any:
+        """A RealRobot at the dock that knows only its own map (and that map's SQLite memory store by default)."""
+        from robot.mind.memory import CirculatingMemory
         from robot.ros.real import RealRobot
 
+        owns_store = store is _DEFAULT_STORE
+        if owns_store:
+            store = CirculatingMemory(self.map.with_suffix(".memory.db"))
         scene, grid = own_home(self.map)
         return RealRobot(scene, detector=detector, brain=brain, store=store, grid=grid,
-                         places_file=self.map.with_suffix(".places.json"))
+                         places_file=self.map.with_suffix(".places.json"), owns_store=owns_store)
 
     def reset(self, localise: bool = True) -> None:
         """Carry the robot back to its dock and tell its localisation so (as when it is put back on its dock)."""

@@ -195,13 +195,13 @@ def test_a_side_and_an_edge_gap_compose_without_losing_the_target_id():
     chair, = sim.detect("chair")
     tools = Tools(sim)
     before = sim.pose()
-    ambiguous, ok = tools.run("go_to", {"target": "right chair"})
-    assert not ok and "viewpoint" in ambiguous and sim.pose() == before
-    refused, ok = tools.run("go_to_side", {"target": str(chair.id), "side": "under"})
-    assert not ok and "clearance" in refused and sim.pose() == before
+    ambiguous = tools.execute("go_to", {"target": "right chair"})
+    assert not ambiguous.ok and "viewpoint" in ambiguous.text and sim.pose() == before
+    refused = tools.execute("go_to_side", {"target": str(chair.id), "side": "under"})
+    assert not refused.ok and "clearance" in refused.text and sim.pose() == before
     endpoint = sim.spot(chair, "behind", distance=0.75)
-    _, ok = tools.run("go_to_side", {"target": str(chair.id), "side": "behind", "distance": 0.75})
-    assert ok and np.linalg.norm(np.asarray(endpoint) - (sim.x, sim.y)) < 0.2
+    res = tools.execute("go_to_side", {"target": str(chair.id), "side": "behind", "distance": 0.75})
+    assert res.ok and np.linalg.norm(np.asarray(endpoint) - (sim.x, sim.y)) < 0.2
     dispatch, = [e for e in sim.trace.events if e.name == "go_to"]
     assert dispatch.args["target"].id == chair.id
 
@@ -212,8 +212,8 @@ def test_a_distance_comparison_never_becomes_a_detector_label_or_starts_a_drive(
     tools = Tools(sim)
     for name, args in (("go_to", {"target": "the nearest box"}), ("search", {"what": "furthest bag", "near": "start"}),
                        ("wait", {"seconds": 1, "until": "closest person"})):
-        result, ok = tools.run(name, args)
-        assert not ok and "just the object name" in result
+        res = tools.execute(name, args)
+        assert not res.ok and "just the object name" in res.text
         assert sim.pose() == start and sim.vocabulary == words
 
 
@@ -232,8 +232,8 @@ def test_a_remembered_or_lost_id_does_not_confirm_arrival(monkeypatch, gone):
 
     monkeypatch.setattr(sim, "obj", observed)
     tools = Tools(sim)
-    result, ok = tools.run("go_to", {"target": str(target.id)})
-    assert not ok and "Target not confirmed" in result and tools.looked == ["front_camera"]
+    res = tools.execute("go_to", {"target": str(target.id)})
+    assert not res.ok and "Target not confirmed" in res.text and tools.looked == ["front_camera"]
 
 
 def test_the_next_request_sees_what_the_last_one_did_and_where_it_began():
@@ -276,28 +276,28 @@ def test_each_motion_says_what_the_request_has_done_so_far():
 
 @pytest.mark.parametrize(("name", "args", "progress"), [
     ("turn", {"degrees": "90 degrees", "direction": "left"}, "turned 90 degrees left; 90 degrees of turning in all"),
-    ("move", {"metres": "0.3 m", "direction": "forward"}, "moved 0.3 m forward"),
+    ("move", {"metres": "0.3 m", "direction": "forward"}, "moved 0.29 m forward"),
     ("turn", {"degrees": 90, "direction": "Left"}, "turned 90 degrees left; 90 degrees of turning in all"),
 ], ids=["turn-with-unit", "move-with-unit", "mixed-case-direction"])
 def test_motion_progress_uses_validated_arguments(name, args, progress):
     tools = Tools(SimRobot(Scene(6, 6, [], {})))
-    result, ok = tools.run(name, args)
-    assert ok
-    assert f"\nThis request so far: {progress}." in result
+    res = tools.execute(name, args)
+    assert res.ok
+    assert f"\nThis request so far: {progress}." in res.text
 
 
 def test_go_to_a_name_not_yet_seen_searches_for_it_and_then_goes_there():
     sim = SimRobot(Scene(16.0, 6.0, [Thing("ball", 6.0, 0.0, radius=0.15, color="red")], {}, start=Pose(-6.0, 0, 0)))
     ball, = sim.things.values()
-    turn_only, ok = Tools(sim).run("face", {"target": "red ball"})  # facing never drives off to look
-    assert not ok and "look('around'" in turn_only and not any(e.name == "search" for e in sim.trace.events)
-    result, ok = Tools(sim).run("go_to", {"target": "red ball"})  # 12 m away: out of the cameras' range
-    assert ok and result.startswith(f"Searched for it: found ball {ball.id}. Drive finished.")
+    turn_only = Tools(sim).execute("face", {"target": "red ball"})  # facing never drives off to look
+    assert not turn_only.ok and "look('around'" in turn_only.text and not any(e.name == "search" for e in sim.trace.events)
+    res = Tools(sim).execute("go_to", {"target": "red ball"})  # 12 m away: out of the cameras' range
+    assert res.ok and res.text.startswith(f"Searched for it: found ball {ball.id}. Drive finished.")
     names = [e.name for e in sim.trace.events]
     assert names.index("search") < names.index("go_to")
     assert math.dist((sim.x, sim.y), (ball.x, ball.y)) < 1.0
-    missing, ok = Tools(sim).run("go_to", {"target": "elephant"})
-    assert not ok and "searched here and found no 'elephant'" in missing
+    missing = Tools(sim).execute("go_to", {"target": "elephant"})
+    assert not missing.ok and "searched here and found no 'elephant'" in missing.text
 
 
 def test_look_and_go_toward_take_the_same_direction_words_and_look_with_a_camera_that_sees_that_way():
@@ -319,3 +319,222 @@ def test_a_number_written_with_an_exponent_or_a_leading_dot_still_moves_the_robo
     Agent(brain).do("Turn left a quarter turn, then go forward half a metre.", sim)
     results = tool_results(brain.seen[2])
     assert _text(results[0]).startswith("Turned 90 degrees left.") and "0.5" in _text(results[1])
+
+
+def test_partial_action_stops_remaining_batched_calls() -> None:
+    robot = SimRobot(living_room())
+    robot.move = lambda metres, direction="forward": None  # type: ignore[method-assign]
+    turns = []
+    robot.turn = lambda degrees, direction="left": turns.append((degrees, direction))  # type: ignore[method-assign]
+    brain = Scripted(
+        Reply("", tool_calls=[
+            ToolCall("c1", "move", {"metres": 1.0, "direction": "forward"}),
+            ToolCall("c2", "turn", {"degrees": 90, "direction": "left"}),
+        ]),
+        say("Stopped short."),
+    )
+    record = Agent(brain).do("Move forward 1 m then turn left.", robot)
+    assert record.outcome == "done"
+    assert turns == []
+    results = tool_results(brain.seen[1])
+    assert "ended short" in _text(results[0])
+    assert "Not run:" in _text(results[1])
+
+
+def test_correction_during_thinking_cancels_stale_tool_calls() -> None:
+    robot = SimRobot(living_room())
+    ran = []
+    robot.turn = lambda degrees, direction="left": ran.append((degrees, direction))  # type: ignore[method-assign]
+    agent: Agent
+
+    class InterjectingBrain(Scripted):
+        def chat(self, messages, tools, think=0, **_):  # noqa: ANN001, ANN003, ANN201
+            if not self.seen:
+                agent.interject("Wait, turn right instead.")
+            return super().chat(messages, tools, think=think)
+
+    brain = InterjectingBrain(
+        call("turn", degrees=90, direction="left"),
+        call("turn", degrees=90, direction="right"),
+        say("Turned right instead."),
+    )
+    agent = Agent(brain)
+    record = agent.do("Turn left 90 degrees.", robot)
+    assert record.outcome == "done"
+    assert ran == [(90.0, "right")]
+    assert "Not run: the user spoke" in _text(tool_results(brain.seen[1])[0])
+    assert any("Wait, turn right instead." in _text(m["content"]) for m in brain.seen[1] if m["role"] == "user")
+
+
+def test_correction_between_batched_calls_cancels_remaining_calls() -> None:
+    robot = SimRobot(living_room())
+    ran = []
+    agent: Agent
+
+    def first_turn(degrees: float, direction: str = "left") -> None:
+        ran.append((degrees, direction))
+        if len(ran) == 1:
+            agent.interject("Actually don't move forward.")
+
+    robot.turn = first_turn  # type: ignore[method-assign]
+    robot.move = lambda metres, direction="forward": ran.append(("move", metres))  # type: ignore[method-assign]
+    brain = Scripted(
+        Reply("", tool_calls=[
+            ToolCall("c1", "turn", {"degrees": 90, "direction": "left"}),
+            ToolCall("c2", "move", {"metres": 1.0, "direction": "forward"}),
+        ]),
+        say("Okay, staying put."),
+    )
+    agent = Agent(brain)
+    record = agent.do("Turn left and move forward.", robot)
+    assert record.outcome == "done"
+    assert ran == [(90.0, "left")]
+    assert "Not run: the user spoke" in _text(tool_results(brain.seen[1])[1])
+
+
+def test_open_todo_steps_mark_task_failed() -> None:
+    robot = SimRobot(living_room())
+    brain = Scripted(
+        call("todo", steps=["go to sofa", "turn around"]),
+        call("todo_done", step=1),
+        say("Done!"),
+        say("Really done!"),  # still ignores the open step after the review prompt
+    )
+    record = Agent(brain).do("Go to the sofa and turn around.", robot)
+    assert record.outcome == "failed"
+    assert any("turn around" in p for p in record.problems)
+
+
+def test_restart_recalls_corrected_fact_on_first_prompt_and_fails_without_memory(tmp_path) -> None:
+    from robot.mind.memory import CirculatingMemory
+
+    db = tmp_path / "restart.db"
+    mem1 = CirculatingMemory(db)
+    robot1 = SimRobot(living_room())
+    brain1 = Scripted(
+        call("remember", fact="spare keys are on the couch"),
+        say("Got it."),
+        call("remember", fact="spare keys are on the dining table"),
+        say("Updated."),
+    )
+    agent1 = Agent(brain1, memory=mem1)
+    assert agent1.do("Remember that my spare keys are on the couch.", robot1).outcome == "done"
+    assert agent1.do("Actually, I moved my spare keys to the dining table.", robot1).outcome == "done"
+    mem1.close()
+
+    # Restart: fresh SQLite handle, fresh robot, fresh Agent (no transcript)
+    mem2 = CirculatingMemory(db)
+    robot2 = SimRobot(living_room())
+    brain2 = Scripted(say("Turned."), say("Your backup key is on the dining table."))
+    agent2 = Agent(brain2, memory=mem2)
+    agent2.do("Turn left 90 degrees.", robot2)
+    irrelevant_prompt = _text(brain2.seen[0][1]["content"])
+    assert "Remembered facts" not in irrelevant_prompt
+
+    agent2.do("Where did I leave my backup key?", robot2)
+    recall_prompt = _text(brain2.seen[1][1]["content"])
+    assert "Remembered facts" in recall_prompt
+    assert "dining table (most recent)" in recall_prompt
+    assert recall_prompt.index("couch") < recall_prompt.index("dining table")
+    mem2.close()
+
+    # Ablation: without durable memory after restart, no stored facts reach the fresh agent
+    robot3 = SimRobot(living_room())
+    brain3 = Scripted(say("I don't know."))
+    Agent(brain3, memory=None).do("Where did I leave my backup key?", robot3)
+    assert "dining table" not in _text(brain3.seen[0][1]["content"])
+
+
+def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from robot.eval import home3d
+    from robot.mind import brain as brain_mod
+    from robot.perception import detector as det_mod
+
+    seen_stores: list[object] = []
+    shutdowns: list[int] = []
+
+    class FakeHome:
+        def __init__(self, scene: str, rtf: float = 1.0) -> None:
+            self.scene, self.bumps = scene, 0
+            self.truth = {"objects": []}
+            self.path = [(0.0, 0.0, 0.0, 0.0)]
+            self.world = SimpleNamespace(
+                call=lambda **kw: {"front_camera": {}, "rear_left_camera": {}, "rear_right_camera": {}},
+            )
+
+        def reset(self) -> None:
+            pass
+
+        def wait(self, seconds: float) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def robot(self, detector: object, brain: object, store: object = None) -> SimRobot:
+            seen_stores.append(store)
+            sim = SimRobot(living_room())
+            sim.store = store  # type: ignore[attr-defined]
+            sim.perception = SimpleNamespace(stop=lambda: None)  # type: ignore[attr-defined]
+            sim._perceive_objects = lambda: None  # type: ignore[attr-defined]
+            sim.shutdown = lambda: shutdowns.append(1)  # type: ignore[attr-defined]
+            return sim
+
+    recall_prompts: list[str] = []
+
+    class PromptAwareBrain:
+        def __init__(self, url: str) -> None:
+            self.turn = 0
+
+        def healthy(self) -> bool:
+            return True
+
+        def chat(self, messages, tools, think=0, **_):  # noqa: ANN001, ANN003, ANN201
+            self.turn += 1
+            if self.turn == 1:
+                return call("remember", fact="spare keys are on the couch")
+            if self.turn == 2:
+                return say("Got it.")
+            if self.turn == 3:
+                return call("remember", fact="spare keys are on the dining table")
+            if self.turn == 4:
+                return say("Updated.")
+            if self.turn == 5:
+                return call("turn", degrees=90, direction="left")
+            if self.turn == 6:
+                return say("Turned left.")
+            prompt = _text(messages[1]["content"])
+            recall_prompts.append(prompt)
+            if "dining table (most recent)" in prompt:
+                return say("Your backup key is on the dining table.")
+            return say("I don't know where your keys are.")
+
+    monkeypatch.setattr(home3d, "Home", FakeHome)
+    monkeypatch.setattr(home3d, "out_dir", lambda: tmp_path)
+    monkeypatch.setattr(home3d, "keep_pictures", lambda robot, folder, kept=None: kept if kept is not None else [])
+    monkeypatch.setattr(home3d, "write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(brain_mod, "Brain", PromptAwareBrain)
+    monkeypatch.setattr(det_mod, "Detector", lambda: object())
+
+    with_mem = home3d.run("mem", ["R1R"], ["apt_0"], "http://fake", "front", "off", 1.0, use_memory=True)
+    assert len(with_mem) == 1 and with_mem[0]["passed"] is True
+    assert len(seen_stores) == 2 and seen_stores[0] is not seen_stores[1]
+    assert len(shutdowns) == 2
+    assert len(recall_prompts) == 1 and "Recent conversation:" not in recall_prompts[0]
+
+    seen_stores.clear()
+    shutdowns.clear()
+    recall_prompts.clear()
+    without_mem = home3d.run("nomem", ["R1R"], ["apt_0"], "http://fake", "front", "off", 1.0, use_memory=False)
+    assert len(without_mem) == 1 and without_mem[0]["passed"] is False
+    assert seen_stores == [None, None]
+    assert len(shutdowns) == 2
+    assert len(recall_prompts) == 1 and "Recent conversation:" not in recall_prompts[0]
+
+    r1r = next(t for t in home3d.TASKS if t.id == "R1R")
+    assert r1r.criterion(None, {"said_by_turn": ["", "", "", "your spare keys are on the dining table."]})
+    assert r1r.criterion(None, {"said_by_turn": ["", "", "", "not on the couch; they're on the dining table."]})
+    assert not r1r.criterion(None, {"said_by_turn": ["", "", "", "i don't know whether they're on the table."]})
+    assert not r1r.criterion(None, {"said_by_turn": ["", "", "", "they aren't on the table; they're on the couch."]})
