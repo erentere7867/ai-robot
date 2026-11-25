@@ -1,10 +1,9 @@
-"""Human pose estimation from 2D keypoints and depth, gaze/pointing ray resolution."""
+"""Human pose estimation from 2D keypoints and depth: facing, posture, and the gaze and pointing rays."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
 
@@ -118,59 +117,3 @@ def estimate_pose_from_keypoints(keypoints_2d: np.ndarray, cam: Camera, depth_m:
     return HumanPose(facing_yaw=facing_yaw, head_yaw=head_yaw, posture=posture,
                      pointing_ray=pointing_ray, gaze_ray=gaze_ray)
 
-
-def resolve_ray_target(ray: tuple[tuple[float, float, float], tuple[float, float, float]],
-                       tracks: list[Any], max_cone_rad: float = 0.32) -> Any | tuple[float, float] | None:
-    """Find closest non-person track inside ray cone, or intersect ray with floor z=0."""
-    origin, direction = ray
-    ox, oy, oz = origin
-    dx, dy, dz = direction
-    dir_len = math.hypot(dx, dy, dz)
-    if dir_len < 1e-6:
-        return None
-
-    # Find closest non-person Track within cone
-    best_track = None
-    best_dist = math.inf
-
-    for t in tracks:
-        is_person = getattr(t, "person", False) or getattr(t, "label", "") == "person"
-        if is_person:
-            continue
-        tx, ty = float(t.x), float(t.y)
-        tz = float(getattr(t, "z", 0.25))
-
-        wx, wy, wz = tx - ox, ty - oy, tz - oz
-        dist = math.hypot(wx, wy, wz)
-        if dist < 0.25:  # ignore things at origin
-            continue
-
-        # 3D angle
-        dot = (wx * dx + wy * dy + wz * dz) / (dist * dir_len)
-        dot = max(-1.0, min(1.0, dot))
-        angle = math.acos(dot)
-
-        # 2D horizontal angle fallback
-        dist_2d = math.hypot(wx, wy)
-        dir_2d = math.hypot(dx, dy)
-        if dir_2d > 1e-4 and dist_2d > 1e-4:
-            dot_2d = (wx * dx + wy * dy) / (dist_2d * dir_2d)
-            angle_2d = math.acos(max(-1.0, min(1.0, dot_2d)))
-            angle = min(angle, angle_2d)
-
-        if angle <= max_cone_rad and dist < best_dist:
-            best_track = t
-            best_dist = dist
-
-    if best_track is not None:
-        return best_track
-
-    # Floor intersection z = 0.0
-    if dz < -1e-3:
-        t_floor = -oz / dz
-        if 0.0 < t_floor <= 8.0:
-            fx = ox + t_floor * dx
-            fy = oy + t_floor * dy
-            return float(fx), float(fy)
-
-    return None
