@@ -22,15 +22,17 @@ class CandidatePath:
 
 
 class Progress:
-    """Only new ground counts: detours can progress, but repeated recoveries cannot."""
+    """Credit new ground or a waypoint advance, not repeated travel along the same stretch."""
 
     def __init__(self, here: tuple[float, float], now: float, radius: float, timeout: float) -> None:
         self.visited, self.since = [here], now
         self.radius, self.timeout = radius, timeout
 
-    def stalled(self, here: tuple[float, float], now: float) -> bool:
+    def stalled(self, here: tuple[float, float], now: float, *, advanced: bool = False) -> bool:
         if all(math.dist(here, point) >= self.radius for point in reversed(self.visited)):
             self.visited.append(here)
+            advanced = True
+        if advanced:
             self.since = now
         return now - self.since > self.timeout
 

@@ -607,14 +607,14 @@ class SimRobot:
                 occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
                 people=people,
             )
-            idx = next_idx
             if arrived:
                 break
 
-            if progress.stalled((self.x, self.y), self.t):
+            if progress.stalled((self.x, self.y), self.t, advanced=next_idx > idx):
                 self._halt()
                 raise PathBlocked(f"no progress toward ({tx:.1f}, {ty:.1f}) for {STALL_S:.0f} s")
 
+            idx = next_idx
             self._step(v_cmd * torque, w_cmd)
         self._halt()
 

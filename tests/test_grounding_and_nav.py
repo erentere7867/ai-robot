@@ -477,7 +477,8 @@ def test_live_html_reply_banner_and_speech_toggle():
 # ---------------------------------------------------------------------------
 
 
-def test_orbit_around_furniture_no_false_cable_snag():
+@pytest.mark.parametrize("laps", [1.0, 2.0])
+def test_orbit_around_furniture_no_false_cable_snag(laps):
     desk = Thing("desk", 0.0, 0.0, radius=0.5)
     scene = Scene(
         width=10.0,
@@ -489,9 +490,11 @@ def test_orbit_around_furniture_no_false_cable_snag():
     )
     sim = SimRobot(scene)
     # Must orbit cleanly without raising PathBlocked: cable snag detected
-    sim.orbit("desk", laps=1.0, distance=0.5)
+    sim.orbit("desk", laps=laps, distance=0.5)
     assert sim.t > 1.0
     assert len(sim.trace.poses) > 20
+    bearings = np.unwrap([math.atan2(y, x) for _, x, y, _ in sim.trace.poses])
+    assert bearings[-1] - bearings[0] == pytest.approx(laps * math.tau, abs=0.1)
 
 
 def test_snag_detection_still_triggers_when_snag_at_present():
