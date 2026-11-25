@@ -93,7 +93,9 @@ guard, also crediting waypoint advances. The 2D rollout is not the ROS path foll
   or detection is evidence, not proof of identity.
 - **Hot paths.** Depth uses bounded ray caches and vectorized floor fitting and scan conversion. Image resizing,
   room segmentation and vision decoding avoid repeated work; detector and depth requests reuse connections,
-  while upload buffers close after each response. See the dated [simulation results](simulation_3d.md).
+  while upload buffers close after each response. The vision server normalizes depth inputs into a reusable
+  buffer under its inference lock. Habitat RGB serialization and ROS depth publishing avoid a second
+  per-frame copy. See the dated [simulation results](simulation_3d.md).
 
 ---
 
