@@ -185,7 +185,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--models", default=str(Path(__file__).resolve().parents[1] / "models" / "vision"))
     parser.add_argument("--yoloe", default="yoloe26l_8.onnx")
-    parser.add_argument("--depth", default="depth_small.onnx")
+    parser.add_argument("--depth", default="depth_base.onnx")
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--provider", default="DmlExecutionProvider")
     args = parser.parse_args()

@@ -9,9 +9,19 @@ import numpy as np
 
 from robot.agent.agent import Step, TaskRecord
 from robot.eval import report
-from robot.eval.home3d import Referee, Task, keep_pictures, write_report
+from robot.eval.home3d import TASKS, Referee, Task, keep_pictures, write_report
 from robot.perception.tracker import Track
 from robot.sim.world import Thing, Trace
+
+
+def test_nearest_table_task_requires_ending_near_the_table_nearest_the_start():
+    task = next(task for task in TASKS if task.id == "T1")
+    truth = {"objects": [{"id": i, "label": "table", "x": x, "y": 0.0, "radius": 0.4}
+                         for i, x in enumerate((2.0, 4.0), 1)]}
+    home = SimpleNamespace(truth=truth, path=[(0.0, 0.0, 0.0, 0.0)])
+    for x, passed in [(0.0, False), (1.5, True), (3.5, False)]:
+        home.path[1:] = [(5.0, x, 0.0, 0.0)]
+        assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
 
 
 def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):

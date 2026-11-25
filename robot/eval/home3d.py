@@ -220,6 +220,8 @@ TASKS = [
     Task("N6", ("Go to the sofa, then to the TV, then come back here.",),
          lambda s, st: visited_in_order(s, [things(s, "sofa")[0], things(s, "tv")[0]]) and moved(s, st) < 0.8,
          ("sofa", "tv")),
+    Task("T1", ("Go to the nearest table.",),
+         lambda s, st: ends_near(s, nearest(things(s, "table"), st["xy"])), ("table",)),
     # seeing and answering
     Task("P1", ("Go between the sofa and the table.",), lambda s, st: between(s, "sofa", "table"), ("sofa", "table")),
     Task("Q1", ("What do you see in front of you?",),

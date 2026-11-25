@@ -261,16 +261,13 @@ def tof_scan(grid: np.ndarray, side: str, num_beams: int = 360, pitch_rad: float
 
 
 class MonoDepth:
-    """Metric depth from one colour picture. Depth Anything V2 small (ONNX; on the board, on its GPU or NPU) gives
+    """Metric depth from one colour picture. Depth Anything V2 Base (ONNX) gives
     relative inverse depth, and `fit_to_floor` makes it metres. Its input is `height` pixels tall; the result is at
-    the size of a `width`-wide copy of the frame. Against true depth in the apartment, the scan made from it ranged
-    64% of obstacles within a metre to 15%, with fake returns on 17% of open beams (true depth: 92% and 1%); narrower
-    virtual views cut from the 140-degree picture did no better overall."""
+    the size of a `width`-wide copy of the frame."""
 
-    def __init__(self, weights: str = "depth-anything-v2-small-onnx/model.onnx", height: int = 364, width: int = 640,
+    def __init__(self, weights: str = "depth-anything-v2-base-onnx/model.onnx", height: int = 364, width: int = 640,
                  threads: int = 0, server: Any = None) -> None:
-        """`server`: the GPU vision server (robot/perception/gpu.py), 82 ms a frame on the RX 6600 against about
-        600 ms here on the CPU; without one, the network runs here on the CPU with `threads`."""
+        """Use the vision server when supplied, otherwise run the network on the CPU with `threads`."""
         self.server, self.height, self.width = server, height, width
         if server is not None:
             return

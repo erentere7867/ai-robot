@@ -5,7 +5,7 @@
 #   bash tools/linux/setup_models.sh --check          # only check (exit status: how many are missing)
 #   bash tools/linux/setup_models.sh --export <dir>   # copy all models to <dir>/sprocket-models (links followed)
 #   bash tools/linux/setup_models.sh --import <dir>   # copy them back from <dir>/sprocket-models
-# About 2.6 GB. Sources: LiquidAI/LFM3-VL-2B-GGUF and onnx-community/depth-anything-v2-small on Hugging Face,
+# Sources: LiquidAI/LFM3-VL-2B-GGUF and onnx-community/depth-anything-v2-base on Hugging Face,
 # ultralytics' releases (YOLOE-26l, the pose model, MobileCLIP's text encoder), Piper's voices, faster-whisper.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -32,9 +32,9 @@ get() {  # get <url> <file>: download unless present (resumes a partial download
 fetch() {
   get "$HF/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/LFM3-VL-2B-QAD-Q4_0.gguf" "$MODELS_DIR/llm/LFM3-VL-2B-QAD-Q4_0.gguf"
   get "$HF/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/mmproj-LFM3-VL-2B-F16.gguf" "$MODELS_DIR/llm/mmproj-LFM3-VL-2B-F16.gguf"
-  depth="$HF/onnx-community/depth-anything-v2-small/resolve/main"
-  get "$depth/onnx/model.onnx" "$MODELS_DIR/depth-anything-v2-small-onnx/model.onnx"
-  get "$depth/preprocessor_config.json" "$MODELS_DIR/depth-anything-v2-small-onnx/preprocessor_config.json"
+  depth="$HF/onnx-community/depth-anything-v2-base/resolve/main"
+  get "$depth/onnx/model.onnx" "$MODELS_DIR/depth-anything-v2-base-onnx/model.onnx"
+  get "$depth/preprocessor_config.json" "$MODELS_DIR/depth-anything-v2-base-onnx/preprocessor_config.json"
   [ -x "$VENV_PY" ] || { echo "no $VENV_PY: run tools/linux/setup.sh first"; exit 1; }
   for asset in yoloe-26l-seg.pt yolo26n-pose.pt mobileclip2_b.ts; do  # from models/: ultralytics looks there
     [ -f "$MODELS_DIR/$asset" ] || (cd "$MODELS_DIR" && "$VENV_PY" -c \
@@ -49,16 +49,16 @@ download_model as d; d('base.en', output_dir='$MODELS_DIR/whisper/faster-whisper
   mkdir -p "$MODELS_DIR/vision"
   [ -f "$MODELS_DIR/vision/yoloe26l_8.onnx" ] || (cd "$MODELS_DIR" && "$VENV_PY" "$HERE/export_yoloe.py" \
     yoloe-26l-seg.pt vision/yoloe26l_8.onnx)
-  [ -f "$MODELS_DIR/vision/depth_small.onnx" ] || cp "$MODELS_DIR/depth-anything-v2-small-onnx/model.onnx" \
-    "$MODELS_DIR/vision/depth_small.onnx"
+  [ -f "$MODELS_DIR/vision/depth_base.onnx" ] || cp "$MODELS_DIR/depth-anything-v2-base-onnx/model.onnx" \
+    "$MODELS_DIR/vision/depth_base.onnx"
 }
 
 check() {
   local missing=0
   echo "=== $MODELS_DIR ==="
   for rel in llm/LFM3-VL-2B-QAD-Q4_0.gguf llm/mmproj-LFM3-VL-2B-F16.gguf yoloe-26l-seg.pt yolo26n-pose.pt \
-             mobileclip2_b.ts depth-anything-v2-small-onnx/model.onnx voice/en_US-lessac-medium.onnx \
-             whisper/faster-whisper-base.en/model.bin vision/yoloe26l_8.onnx vision/depth_small.onnx; do
+             mobileclip2_b.ts depth-anything-v2-base-onnx/model.onnx voice/en_US-lessac-medium.onnx \
+             whisper/faster-whisper-base.en/model.bin vision/yoloe26l_8.onnx vision/depth_base.onnx; do
     if [ -e "$MODELS_DIR/$rel" ]; then printf "  [OK]   %-44s %s\n" "$rel" "$(du -shL "$MODELS_DIR/$rel" | cut -f1)"
     else printf "  [MISS] %s\n" "$rel"; missing=$((missing + 1)); fi
   done

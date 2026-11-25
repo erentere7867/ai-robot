@@ -49,9 +49,9 @@ Everything is installed and was checked on 19 November.
   fix it in the scripts, not by hand.
 - **Which doc for which machine.** `docs/usage.md` is the reference for this PC. `docs/testing.md`'s route for a plain
   Linux machine should keep working, but this PC is where you test.
-- **Speeds here.** The model reads a picture in about 0.15 s. YOLOE-26l takes 75 ms a frame and depth 82 ms, both on
-  the GPU. One 3D task takes a few minutes at `--rtf 0.33` to `0.5`. A full pass of the tasks on the two tuning
-  layouts takes hours, so run repeats overnight.
+- **Speeds here.** The model reads a picture in about 0.15 s. YOLOE-26l takes 75 ms a frame and the previous Small
+  depth model 82 ms, both on the GPU. One 3D task takes a few minutes at `--rtf 0.33` to `0.5`. A full pass of the
+  tasks on the two tuning layouts takes hours, so run repeats overnight.
 
 ### Working here without losing runs
 

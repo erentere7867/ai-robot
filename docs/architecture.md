@@ -37,7 +37,7 @@ Brain board: **Arduino VENTUNO Q** (Qualcomm Dragonwing IQ-8275: 8-core Kryo CPU
 | Processor | Workloads | Rate / Latency |
 | :--- | :--- | :--- |
 | **40 TOPS Hexagon NPU** | `LFM3-VL-2B` (Q4_0: the agent, yes/no checks), `YOLOE-26l-seg` (open-vocab masks for the asked words) | not measured on the board yet; on a desktop RX 6600: a picture read in ~0.15 s, YOLOE-26l 75 ms a frame |
-| **Adreno 623 GPU** | `Depth Anything V2 small` (relative depth, scaled by the floor), `RTMPose` / `YOLO-Pose` (keypoints/gaze/pointing), `MobileCLIP2` (crop embeddings) | 10–30 Hz total |
+| **Adreno 623 GPU** | `Depth Anything V2 Base` (relative depth, scaled by the floor), `RTMPose` / `YOLO-Pose` (keypoints/gaze/pointing), `MobileCLIP2` (crop embeddings) | 10–30 Hz target; Base unmeasured |
 | **8-core Kryo CPU** | 30–50 Hz Living Body Engine, `slam_toolbox` / Nav2 costmap, `WeSpeaker` voiceprint embedding, `Whisper`, `Piper` TTS, `ChimeSynthesizer`, SQLite + Vector Memory | 30–50 Hz body, <2 ms memory lookup |
 | **STM32H5 MCU** | 200 Hz wheel PID + gyro odometry, `VL53L5CX` 8×8 step/cliff governor, IMU+current anti-cable snag reflex, 300 ms command watchdog | 200 Hz–1 kHz |
 
@@ -87,11 +87,12 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
    `follow("the cat")`, `go_to("ball")`), and gives their boxes and masks to ranging and tracking, so the fast loops
    run without the model. There is no fixed household list: in the apartment one added about 1.4 wrong names a
    picture, and big furniture was found under 8% of the time from 22 cm anyway. In the simulator YOLOE and depth run on
-   the Windows GPU (`tools/vision_server.py`, DirectML: 75 and 82 ms a frame); on the board, on its NPU.
+   the Windows GPU (`tools/vision_server.py`, DirectML: 75 ms a frame for YOLOE; Base depth not yet measured);
+   the board target is its NPU.
    The detector and depth node reuse their HTTP connections, but each camera upload buffer closes as soon as its
    reply is read. The connection does not own a history of sent pixels.
 1. **Metric depth from the floor (`depth.py`, the depth node in `robot/ros/perceive.py`):**
-   - `Depth Anything V2 small` (ONNX) estimates relative inverse depth for each camera's newest frame.
+   - `Depth Anything V2 Base FP32` (ONNX) estimates relative inverse depth for each camera's newest frame.
    - `fit_to_floor()` turns it into metres: the camera's height and the IMU's tilt give the floor's true distance at
      every pixel, and a robust (RANSAC) line fit in the lower picture gives the network's scale and shift.
 2. **Synthetic 360° `/scan` from where the floor ends (`synthetic_scan`, `combine`):**
