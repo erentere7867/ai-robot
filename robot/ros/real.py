@@ -22,7 +22,6 @@ import numpy as np
 
 from robot.agent.api import Matches, NotFound, Object, PathBlocked, Point, Pose, wrap
 from robot.mind.brain import _with_image
-from robot.mind.memory import ANCHOR_LABELS, CANONICAL_SYNONYMS
 from robot.perception.camera import data_url
 from robot.perception.locate import locate_crop
 from robot.perception.rig import RIG, to_map, to_robot
@@ -91,7 +90,6 @@ class RealRobot(RosRobot):
         self.brain = brain
         self.things, self.memory = {}, {}
         self._cleared_tracks: set[int] = set()
-        self._habit_recorded: dict[int, str] = {}
         self.human_pose: Any = None
         self.speaker_profile: Any = None
         self.answers: queue.Queue[str] = queue.Queue()  # what the user types or says while listening
@@ -121,6 +119,8 @@ class RealRobot(RosRobot):
         with self.perception.lock:
             if self.store is not None:
                 self.store.save(self.perception.tracker, self.notes, self.places)
+
+    persists_facts = True
 
     def remember(self, fact: str) -> None:
         super().remember(fact)
@@ -159,8 +159,6 @@ class RealRobot(RosRobot):
         things, memory, detected = {}, {}, set()
         people = []
         tracks = self.perception.objects()
-        anchors: list[Any] = []
-        movables: list[Any] = []
         human_pose = None
         for tr in tracks:
             if not tr.present:
@@ -197,19 +195,6 @@ class RealRobot(RosRobot):
                 people.append((tr, thing))
                 if getattr(tr, "pose", None) is not None and human_pose is None:
                     human_pose = tr.pose
-            elif tr.confirmed and not tr.rejected:
-                c_label = CANONICAL_SYNONYMS.get(tr.label.lower(), tr.label.lower())
-                if c_label in ANCHOR_LABELS or tr.label.lower() in ANCHOR_LABELS:
-                    anchors.append(tr)
-                else:
-                    movables.append(tr)
-        if self.store is not None and anchors and movables and hasattr(self.store, "record_habit"):
-            for mv in movables:
-                best_anc = min(anchors, key=lambda a: math.hypot(mv.x - a.x, mv.y - a.y))
-                if math.hypot(mv.x - best_anc.x, mv.y - best_anc.y) <= (best_anc.radius + mv.radius + 1.2):
-                    if self._habit_recorded.get(mv.id) != best_anc.label:
-                        self.store.record_habit(mv.label, best_anc.label)
-                        self._habit_recorded[mv.id] = best_anc.label
         if people:
             speaker_name = getattr(self.speaker_profile, "name", None)
             matched_speaker = next((t.id for tr, t in people if speaker_name and tr.voice_id == speaker_name), None)
@@ -300,15 +285,6 @@ class RealRobot(RosRobot):
             px = self.x if x is None else float(x)
             py = self.y if y is None else float(y)
             self.store.observe_clear_space(px, py, radius=radius)
-
-    def record_habit(self, item_label: str, anchor_name: str, alpha: float = 0.3) -> None:
-        if self.store is not None and hasattr(self.store, "record_habit"):
-            self.store.record_habit(item_label, anchor_name, alpha=alpha)
-
-    def usual_anchors(self, item_label: str, limit: int = 5) -> list[tuple[str, float]]:
-        if self.store is not None and hasattr(self.store, "usual_anchors"):
-            return self.store.usual_anchors(item_label, limit=limit)
-        return []
 
     def identify_speaker(self, voice_vec: Any, look_vec: Any = None, threshold: float = 0.65) -> Any:
         """Identify the active speaker via CirculatingMemory and bind them as the active user track."""

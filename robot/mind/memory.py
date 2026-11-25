@@ -622,7 +622,7 @@ class CirculatingMemory:
             rows = self.db.execute("SELECT text FROM facts ORDER BY id").fetchall()
             return [r[0] for r in rows]
 
-    def query_facts_dated(self, query: str, top_k: int = 3, min_score: float = 0.25) -> list[tuple[str, float]]:
+    def query_facts(self, query: str, top_k: int = 3, min_score: float = 0.25) -> list[tuple[str, float]]:
         """Semantic vector similarity search over facts; returns (text, created_at), newest first on ties."""
         q_vec = embed_text(query)
         with self.lock:
@@ -640,10 +640,6 @@ class CirculatingMemory:
             if newest not in picked:
                 picked[-1] = newest
         return [(text, created_at) for _, created_at, _, text in picked]
-
-    def query_facts(self, query: str, top_k: int = 3, min_score: float = 0.25) -> list[str]:
-        """Semantic vector similarity search over facts; returns top matching texts."""
-        return [text for text, _ in self.query_facts_dated(query, top_k=top_k, min_score=min_score)]
 
     def record_route_note(
         self,

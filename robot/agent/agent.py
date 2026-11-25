@@ -18,7 +18,7 @@ from typing import Any
 
 from robot.agent.api import Preempted, SafetyStop, side, wrap
 from robot.agent.instant import instant
-from robot.agent.tools import CAMERA_NAMES, Tools, recalled_facts, speakable
+from robot.agent.tools import CAMERA_NAMES, ActionResult, Tools, recalled_facts, speakable
 from robot.perception.camera import data_url
 
 MAX_TURNS = 16  # model replies per task
@@ -386,12 +386,13 @@ class Agent:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
                         self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
                         try:
-                            result, ok = self._run(robot, tools, call.name, call.args, record)
+                            res = self._run(robot, tools, call.name, call.args, record)
                         except Preempted:
                             step.calls.append((call.name, call.args, "Interrupted before returning a result.", False))
                             raise
+                        result, ok = res.text, res.ok
                         failed = not ok
-                        if tools.last_result is not None and tools.last_result.status == "partial":
+                        if res.status == "partial":
                             partial = True
                         if call.name == "say" and ok:
                             last_said = str(call.args.get("text", ""))
@@ -482,28 +483,28 @@ class Agent:
                 "reply to the user, with no tool call.")
 
     def _run(self, robot: Any, tools: Tools, name: str, args: dict[str, Any],
-             record: TaskRecord) -> tuple[str, bool]:
+             record: TaskRecord) -> ActionResult:
         """One call. A user who speaks during it interrupts it; a plain stop ends the task (Preempted)."""
         self._acting.set()
         try:
             if not self._heard.empty():
                 if not self._stopped.is_set():
                     robot.resume()
-                return "Not run: the user spoke (their words follow).", False
-            result, ok = tools.run(name, args)
+                return ActionResult("Not run: the user spoke (their words follow).", False, "interrupted")
+            res = tools.execute(name, args)
         except Preempted:
             if self._stopped.is_set() or self._heard.empty():
                 raise
             robot.resume()
-            return "Interrupted: the user spoke (their words follow).", False
+            return ActionResult("Interrupted: the user spoke (their words follow).", False, "interrupted")
         finally:
             self._acting.clear()
-        if not ok:
-            record.problems.append(f"{name}: {result}")
+        if not res.ok:
+            record.problems.append(f"{name}: {res.text}")
             self._mood(robot, "uh_oh", "uh_oh")
         elif name == "search" and tools.found is not None:
             self._mood(robot, "happy", "happy")
-        return result, ok
+        return res
 
     def _finish(self, robot: Any, record: TaskRecord, outcome: str, said: str) -> TaskRecord:
         record.outcome = outcome

@@ -62,11 +62,54 @@ def test_tools_uses_robot_store_when_memory_not_passed(tmp_path) -> None:
     robot.store = store  # type: ignore[attr-defined]
     tools = Tools(robot)
     assert tools.memory is store
-    _, ok = tools.run("remember", {"fact": "umbrella is in the closet"})
-    assert ok
+    res = tools.execute("remember", {"fact": "umbrella is in the closet"})
+    assert res.ok
     store.close()
 
     reopened = CirculatingMemory(db)
-    assert any("umbrella" in f for f in reopened.query_facts("where is my umbrella"))
+    assert any("umbrella" in f for f, _ in reopened.query_facts("where is my umbrella"))
     reopened.close()
+
+
+def test_tools_remember_single_write_path_and_recall_dedupes_raw_facts(tmp_path) -> None:
+    from robot.agent.tools import Tools
+    from robot.eval.suite import living_room
+    from robot.mind.memory import CirculatingMemory
+    from robot.sim.world import SimRobot
+
+    store = CirculatingMemory(tmp_path / "single.db")
+    writes: list[str] = []
+    orig = store.remember_fact
+
+    def tracked(text: str, room: str = "", now_wall: float | None = None, *, refresh: bool = True) -> None:
+        writes.append(text)
+        orig(text, room=room, now_wall=now_wall, refresh=refresh)
+
+    store.remember_fact = tracked  # type: ignore[method-assign]
+
+    class StoreBackedRobot(SimRobot):
+        persists_facts = True
+
+        def __init__(self) -> None:
+            super().__init__(living_room())
+            self.store = store
+
+        def remember(self, fact: str) -> None:
+            super().remember(fact)
+            self.store.remember_fact(fact, room="living room")
+
+    robot = StoreBackedRobot()
+    tools = Tools(robot, memory=store)
+    assert tools.execute("remember", {"fact": "spare keys are on the couch"}).ok
+    assert tools.execute("remember", {"fact": "spare keys are on the dining table"}).ok
+    assert writes == ["spare keys are on the couch", "spare keys are on the dining table"]
+
+    recalled = tools.execute("recall", {"query": "where are my spare keys?"})
+    assert recalled.ok
+    lines = [line for line in recalled.text.splitlines() if "spare keys" in line]
+    assert lines == [
+        "spare keys are on the couch (earlier)",
+        "spare keys are on the dining table (most recent)",
+    ]
+    store.close()
 
