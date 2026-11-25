@@ -104,11 +104,11 @@ class Brain:
         calls = []
         for i, tc in enumerate(message.get("tool_calls") or []):
             fn = tc.get("function") or {}
-            raw_args = fn.get("arguments") or {}
+            raw_args = fn.get("arguments")
             try:
-                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
-            except json.JSONDecodeError:
-                args = {"_unparsed": raw_args}
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except ValueError:
+                args = None
             calls.append(ToolCall(tc.get("id") or f"call_{i}", str(fn.get("name", "")), args if isinstance(args, dict)
                                   else {"_unparsed": raw_args}))
         t = data.get("timings") or {}

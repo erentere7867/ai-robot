@@ -165,6 +165,22 @@ def test_repeated_look_samples_the_requested_camera_again_while_stationary(monke
     assert len(set(urls)) == 5 and (sim.x, sim.y) == (0.0, 0.0)
 
 
+def test_the_same_search_can_run_again_after_repositioning(monkeypatch):
+    sim = SimRobot(living_room())
+    viewpoints = []
+
+    def miss(what, area, toward):
+        viewpoints.append(sim.pose())
+
+    monkeypatch.setattr(sim, "search", miss)
+    search = call("search", what="umbrella")
+    brain = Scripted(search, call("move", metres=0.5, direction="forward"), search, say("No umbrella found."))
+    Agent(brain, cameras="none").do("Look for the umbrella.", sim)
+    before, after = viewpoints
+    assert after.x > before.x
+    assert "Searched here: no umbrella found." in _text(tool_results(brain.seen[3])[-1])
+
+
 def test_search_returns_its_crop_before_a_queued_drive(monkeypatch):
     sim = SimRobot(living_room())
     seen, = sim.detect("chair")
@@ -181,6 +197,111 @@ def test_search_returns_its_crop_before_a_queued_drive(monkeypatch):
     assert not any(e.name == "go_to" for e in sim.trace.events)
 
 
+@pytest.mark.parametrize("history_count", [2, 4])
+def test_correction_keeps_look_back_frames_beside_a_live_view(monkeypatch, history_count):
+    sim = SimRobot(living_room())
+    frames = [(ago, np.full((18, 15, 3), ago * 20, dtype=np.uint8)) for ago in range(history_count, 0, -1)]
+    current = np.full((18, 15, 3), 200, dtype=np.uint8)
+    brain = Scripted(call("look_back", seconds=5), say("It moved left."))
+    agent = Agent(brain)
+
+    def past_views(seconds):
+        agent.interject("Actually, where is it now?")
+        return frames
+
+    monkeypatch.setattr(sim, "past_views", past_views, raising=False)
+    monkeypatch.setattr(sim, "camera_view", lambda camera, *_: None if camera == "front_camera" else current)
+    agent.do("What happened in the last five seconds?", sim, speak=False)
+    result, = tool_results(brain.seen[1])
+    actual = [(part["text"], image["image_url"]["url"]) for part, image in zip(result[1::2], result[2::2], strict=True)]
+    assert actual == [(f"front camera {ago} s ago:", data_url(rgb)) for ago, rgb in frames[-2:]]
+    correction = brain.seen[1][-1]
+    assert correction["role"] == "user" and "Actually, where is it now?" in _text(correction["content"])
+    assert "What you sense now:" in _text(correction["content"])
+    assert correction["content"][1:] == [
+        {"type": "text", "text": "rear-left camera:"},
+        {"type": "image_url", "image_url": {"url": data_url(current)}},
+    ]
+
+
+@pytest.mark.parametrize(("see_after_moves", "pictures"), [("front", 1), (True, 3)])
+def test_post_move_pictures_are_seen_before_another_batched_action(see_after_moves, pictures):
+    sim = SimRobot(living_room())
+    batch = Reply("", tool_calls=[ToolCall("first", "turn", {"degrees": 90, "direction": "left"}),
+                                 ToolCall("second", "move", {"metres": 1, "direction": "forward"})])
+    brain = Scripted(batch, say("I've turned, but haven't moved forward."))
+    Agent(brain, see_after_moves=see_after_moves).do("Turn left and move if the way is clear.", sim)
+    turned, skipped = tool_results(brain.seen[1])
+    assert sum(p["type"] == "image_url" for p in turned) == pictures
+    assert "inspect the returned pictures" in skipped
+    assert [e.name for e in sim.trace.events if e.name in {"turn", "move"}] == ["turn"]
+
+
+def test_unavailable_post_turn_picture_is_reported_without_executing_the_rest_of_the_batch(monkeypatch):
+    sim = SimRobot(living_room())
+    camera_view = sim.camera_view
+
+    def view(*args):
+        if not any(event.name == "turn" for event in sim.trace.events):
+            return camera_view(*args)
+        return None
+
+    monkeypatch.setattr(sim, "camera_view", view)
+    batch = Reply("", tool_calls=[ToolCall("first", "turn", {"degrees": 90, "direction": "left"}),
+                                 ToolCall("second", "move", {"metres": 1, "direction": "forward"})])
+    brain = Scripted(batch, say("I turned but can't see whether the way is clear."))
+    Agent(brain, think_when="news").do("Turn left and move if the way is clear.", sim)
+    turned, skipped = tool_results(brain.seen[1])
+    assert "Turned 90 degrees left." in turned
+    assert "No recent camera pictures are available." in turned
+    assert "no recent camera pictures were available" in skipped
+    assert brain.thinks[1] == 128
+    assert [e.name for e in sim.trace.events if e.name in {"turn", "move"}] == ["turn"]
+
+
+@pytest.mark.parametrize("answer", ["right", None])
+def test_clarification_is_read_before_running_an_action(answer):
+    sim = SimRobot(living_room())
+    if answer:
+        sim.replies = [(0, answer)]
+    batch = Reply("", tool_calls=[ToolCall("question", "ask", {"question": "Which way?"}),
+                                 ToolCall("guess", "turn", {"degrees": 90, "direction": "left"})])
+    followup = [call("turn", degrees=90, direction="right")] if answer else []
+    brain = Scripted(batch, *followup, say("I turned right." if answer else "I'm staying put."))
+    Agent(brain, think_when="news").do("Turn toward the side I name.", sim)
+    result, skipped = tool_results(brain.seen[1])
+    assert result == ('The user answered: "right"' if answer else "No answer.")
+    assert "read the result of asking the user" in skipped and brain.thinks[1] == 128
+    turns = [e for e in sim.trace.events if e.name == "turn"]
+    assert len(turns) == bool(answer)
+    if answer:
+        assert turns[0].args["direction"] == "right"
+
+
+def test_a_malformed_call_blocks_its_batch_and_can_be_repaired():
+    sim = SimRobot(living_room())
+    batch = Reply("", tool_calls=[ToolCall("bad", "turn", {"_unparsed": '{"degrees":'}),
+                                 ToolCall("skipped", "move", {"metres": 1, "direction": "forward"})])
+    brain = Scripted(batch, call("turn", degrees=90, direction="left"), say("Turned left."))
+    record = Agent(brain).do("Turn left.", sim)
+    assert record.outcome == "done"
+    bad, skipped = tool_results(brain.seen[1])
+    assert "send the arguments as a JSON object" in bad and "earlier call in this turn failed" in skipped
+    assert [e.name for e in sim.trace.events if e.name in {"turn", "move"}] == ["turn"]
+
+
+def test_empty_model_reply_gets_one_repair_turn():
+    sim = SimRobot(living_room())
+    brain = Scripted(say(""), say("A brown chair."))
+    assert Agent(brain).do("What do you see?", sim).outcome == "done"
+    assert "no answer or tool call" in brain.seen[1][-1]["content"]
+    assert [text for _, text in sim.trace.said] == ["A brown chair."]
+
+    silent = Scripted(say(""), say(""), say("Should not be reached."))
+    assert Agent(silent).do("What do you see?", SimRobot(living_room())).outcome == "failed"
+    assert len(silent.seen) == 2
+
+
 def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
     sim = SimRobot(living_room())
     cut = call("move", metres=1)
@@ -188,6 +309,28 @@ def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
     record = Agent(Scripted(cut)).do("Drive a metre.", sim)
     assert record.outcome == "failed" and "cut off" in sim.trace.said[-1][1]
     assert not any(e.name == "move" for e in sim.trace.events)
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_correction_supersedes_an_answer_or_cut_off_reply(finish_reason):
+    sim = SimRobot(living_room())
+    stale = call("turn", degrees=90, direction="left") if finish_reason == "length" else say("Turning left.")
+    stale.raw = {"choices": [{"finish_reason": finish_reason}]}
+
+    class Corrected(Scripted):
+        def chat(self, messages, tools, think=0, **_):  # noqa: ANN001, ANN003, ANN201
+            if not self.seen:
+                agent.interject("Actually, stay where you are.")
+            return super().chat(messages, tools, think=think)
+
+    brain = Corrected(stale, say("I'll stay here."))
+    agent = Agent(brain)
+    assert agent.do("Turn left.", sim).outcome == "done"
+    correction = brain.seen[1][-1]["content"]
+    assert "Actually, stay where you are." in _text(correction)
+    assert sum(p["type"] == "image_url" for p in correction) == 3
+    assert not any(e.name == "turn" for e in sim.trace.events)
+    assert [text for _, text in sim.trace.said] == ["I'll stay here."]
 
 
 def test_a_side_and_an_edge_gap_compose_without_losing_the_target_id():
@@ -392,6 +535,33 @@ def test_correction_between_batched_calls_cancels_remaining_calls() -> None:
     assert "Not run: the user spoke" in _text(tool_results(brain.seen[1])[1])
 
 
+@pytest.mark.parametrize(("finished", "revision", "renumbered"), [
+    (3, ["first", "second"], True),
+    (1, ["second", "third", "fourth"], False),
+])
+def test_todo_revision_blocks_queued_ticks_only_if_numbering_changes(finished, revision, renumbered):
+    batch = Reply("", tool_calls=[
+        ToolCall("revise", "todo", {"steps": revision}),
+        ToolCall("tick", "todo_done", {"step": 2}),
+        ToolCall("speak", "say", {"text": "Still working."}),
+    ])
+    brain = Scripted(
+        call("todo", steps=["first", "second", "third"]),
+        call("todo_done", step=finished),
+        batch,
+        call("todo", steps=[]),
+        say("Done."),
+    )
+    record = Agent(brain, cameras="none").do("Work through the plan.", SimRobot(living_room()))
+    revised, tick, speech = record.steps[2].calls
+    assert revised[3] and speech[3]
+    if renumbered:
+        assert "2. [ ] first\n3. [ ] second" in revised[2]
+        assert not tick[3] and "updated step numbers" in tick[2]
+    else:
+        assert tick[3] and tick[2].startswith("Ticked step 2.")
+
+
 def test_open_todo_steps_mark_task_failed() -> None:
     robot = SimRobot(living_room())
     brain = Scripted(
@@ -403,6 +573,19 @@ def test_open_todo_steps_mark_task_failed() -> None:
     record = Agent(brain).do("Go to the sofa and turn around.", robot)
     assert record.outcome == "failed"
     assert any("turn around" in p for p in record.problems)
+
+
+def test_plan_revision_defers_tick_when_same_title_steps_change_numbers():
+    batch = Reply("", tool_calls=[
+        ToolCall("revise", "todo", {"steps": ["Inspect the door"] * 2}),
+        ToolCall("tick", "todo_done", {"step": 2}),
+    ])
+    brain = Scripted(call("todo", steps=["Inspect the door"] * 3),
+                     call("todo_done", step=3), batch, call("todo", steps=[]), say("Done."))
+    record = Agent(brain, cameras="none").do("Inspect the doors.", SimRobot(living_room()))
+    revised, tick = record.steps[2].calls
+    assert revised[3] and "1. [x] Inspect the door\n2. [ ] Inspect the door" in revised[2]
+    assert not tick[3] and "updated step numbers" in tick[2]
 
 
 def test_restart_recalls_corrected_fact_on_first_prompt_and_fails_without_memory(tmp_path) -> None:
