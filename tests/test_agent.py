@@ -344,6 +344,18 @@ def test_review_shows_completed_and_blocked_steps_after_revising_a_plan():
     assert [text for _, text in sim.trace.said] == ["I turned left but couldn't enter."]
 
 
+def test_speech_deferred_by_a_search_miss_is_not_counted_as_spoken(monkeypatch):
+    sim = SimRobot(living_room())
+    monkeypatch.setattr(sim, "search", lambda *args, **kwargs: None)
+    search = call("search", what="towel")
+    speech = call("say", text="No towel in this room.")
+    brain = Scripted(Reply("", tool_calls=search.tool_calls + speech.tool_calls), speech, say("Done."))
+    Agent(brain, cameras="none").do("Look for my towel.", sim)
+    assert _text(tool_results(brain.seen[1])[-1]).startswith("Not run: read the search result")
+    assert tool_results(brain.seen[2])[-1].startswith("Said it.")
+    assert [text for _, text in sim.trace.said] == ["No towel in this room."]
+
+
 def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
     sim = SimRobot(living_room())
     cut = call("move", metres=1)
