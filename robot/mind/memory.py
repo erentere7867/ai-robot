@@ -609,6 +609,11 @@ class CirculatingMemory:
                     "INSERT INTO facts (text, room, vec, created_at) VALUES (?, ?, ?, ?)",
                     (text, room, _vec_to_blob(vec), now_wall),
                 )
+            else:
+                self.db.execute(
+                    "UPDATE facts SET created_at = ?, room = CASE WHEN ? != '' THEN ? ELSE room END WHERE text = ?",
+                    (now_wall, room, room, text),
+                )
 
     def notes(self) -> list[str]:
         """Return all remembered fact texts in chronological order."""
