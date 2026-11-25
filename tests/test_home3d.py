@@ -37,6 +37,10 @@ def test_come_back_requires_arrival_before_return_and_a_still_finish(path, arriv
     ([(1, -1, 0.5, math.pi / 2), (2, 0, 1, math.pi / 2)], "1.00 m sideways"),
     ([(1, 0, 0.5, 0), (2, 0, 1, math.pi / 2)], "heading changed"),
     ([(1, 0, 0.6, math.pi / 2)], "expected 1 m"),
+    ([(1, 0, 1.1, math.pi / 2), (2, 0, 1, math.pi / 2)], "backtracked"),
+    ([(1, 0, 1.03, math.pi / 2), (2, 0, 1.015, math.pi / 2), (3, 0, 1, math.pi / 2)], "backtracked"),
+    ([(1, 0, -0.1, math.pi / 2), (2, 0, 1, math.pi / 2)], "backtracked"),
+    ([(1, 0, 0.5, math.pi / 2), (2, 0, 0.49, math.pi / 2), (3, 0, 1, math.pi / 2)], ""),
     ([(1, -0.05, 0.5, math.pi / 2 + 0.1), (2, -0.07, 1.1, math.pi / 2)], ""),
 ])
 def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):

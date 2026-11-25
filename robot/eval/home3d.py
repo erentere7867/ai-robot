@@ -164,12 +164,19 @@ def straight_drive(sim: Referee, start: dict, metres: float) -> bool | str:
     if abs(along - metres) > 0.2:
         return f"travelled {along:.2f} m forward; expected {metres:g} m within 0.20 m"
     origin = start["pose"]
-    lateral = max(abs(relative_xy(x, y, origin)[1]) for _, x, y, _ in sim.trace.poses)
+    projected = [relative_xy(x, y, origin) for _, x, y, _ in sim.trace.poses]
+    lateral = max(abs(side) for _, side in projected)
     if lateral > 0.2:
         return f"strayed {lateral:.2f} m sideways; allowed 0.20 m"
     yaw_error = max(abs(wrap(yaw - origin[2])) for _, _, _, yaw in sim.trace.poses)
     if yaw_error > 0.3:
         return f"heading changed by {math.degrees(yaw_error):.0f}°; allowed {math.degrees(0.3):.0f}°"
+    backtrack_limit = 0.02  # The return's 2 cm stillness tolerance also allows small settling here (2% of 1 m).
+    furthest = 0.0
+    for along, _ in projected:
+        if furthest - along > backtrack_limit:
+            return f"backtracked {furthest - along:.2f} m; allowed {backtrack_limit:.2f} m"
+        furthest = max(furthest, along)
     return True
 
 
