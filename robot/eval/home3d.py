@@ -257,7 +257,7 @@ TASKS = [
          "Where did I leave my backup key?",
     ), lambda s, st: (
          mentions(st["said_by_turn"][3], "table")
-         and not re.search(r"\b(?:not|aren't|isn't|no longer)\b[^.?!]{0,20}\btable\b",
+         and not re.search(r"\b(?:not|aren't|isn't|no longer)\b[^.?!;,:]{0,20}\btable\b",
                            st["said_by_turn"][3].replace("’", "'"))
          and not mentions(st["said_by_turn"][2], "key")
     ), restart_after=(2,)),
