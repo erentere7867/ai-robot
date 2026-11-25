@@ -17,6 +17,7 @@ class CandidatePath:
     clearance: float
     progress_score: float
     social_score: float
+    blocked: bool
     visual_prob: float = 0.5
     total_score: float = 0.0
 
@@ -147,12 +148,13 @@ class BodyController:
             candidates.append(
                 CandidatePath(
                     label=label,
-                    v=round(v, 3),
-                    w=round(w, 3),
+                    v=v,
+                    w=w,
                     points=points,
                     clearance=round(clearance, 3),
                     progress_score=round(progress_score, 3),
                     social_score=round(social_score, 3),
+                    blocked=blocked,
                     visual_prob=0.5,
                     total_score=round(total_score, 3),
                 )
@@ -171,10 +173,7 @@ class BodyController:
         occupied_fn: Callable[[float, float], bool] = lambda x, y: False,
         people: list[tuple[float, float, float, float]] | tuple = (),
     ) -> tuple[float, float, int, bool]:
-        """Non-stop waypoint spline pursuit: advances idx when within blend_r of intermediate waypoints
-
-        so the robot never stops (v > 0) until the final waypoint. Returns (v, w, new_idx, arrived).
-        """
+        """Blend intermediate waypoints when the checked path is clear. Return (v, w, new_idx, arrived)."""
         if not waypoints or idx >= len(waypoints):
             return 0.0, 0.0, idx, True
 
@@ -207,19 +206,12 @@ class BodyController:
         candidates = self.rollout_trajectories(
             pose, waypoints[idx], occupied_fn, people, v_max=speed, horizon_s=1.2, dt=0.1
         )
-        best = candidates[0]
-
-        if best.clearance > 0.15 or not occupied_fn(best.points[0][0], best.points[0][1]):
-            v = best.v
-            w = best.w
-        else:
-            w = max(-1.5, min(1.5, 2.5 * err))
-            v = 0.05 if abs(err) < 0.6 else 0.0
-
-        if not is_last and v < 0.1 and abs(err) < 0.6:
-            v = 0.15
-
-        return v, w, idx, False
+        # The checked arc is only valid at its evaluated speed. The old 0.15 m/s floor could
+        # drive into an obstacle even when every rollout's first point was occupied.
+        for candidate in candidates:
+            if not candidate.blocked or candidate.clearance > 0.15:
+                return candidate.v, candidate.w, idx, False
+        return 0.0, max(-1.5, min(1.5, 2.5 * err)), idx, False
 
     def aliveness_velocity(
         self,

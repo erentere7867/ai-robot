@@ -6,8 +6,22 @@ from unittest.mock import Mock
 
 import pytest
 
+from robot.body import BodyController
 from robot.ros.motion import COMMAND_AGE_NS, NAV, MotionGate, NavGoal
 from robot.sim.habitat_ros import Hardware
+
+
+def test_body_does_not_creep_forward_when_every_checked_arc_is_blocked():
+    body = BodyController()
+    command = body.step_pursuit((0, 0, 0), [(1, 0), (2, 0)], 0, occupied_fn=lambda x, y: x >= 0.01)
+    assert command == (0.0, 0.0, 0, False)
+
+
+def test_body_does_not_speed_up_an_already_checked_arc():
+    body = BodyController()
+    v, _, idx, arrived = body.step_pursuit((0, 0, 0), [(1, 0), (2, 0)], 0, v_cruise=0.0506)
+    assert 0 < v <= 0.0506
+    assert idx == 0 and not arrived
 
 
 @pytest.fixture
