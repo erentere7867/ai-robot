@@ -777,7 +777,7 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
     real = object.__new__(RealRobot)
     SimRobot.__init__(real, _make_scene())
     real._ready = True
-    real.store, real._cleared_tracks, real._habit_recorded, real._rooms, real._named_at = None, set(), {}, [], 0.0
+    real.store, real._cleared_tracks, real._rooms, real._named_at = None, set(), [], 0.0
     real.speaker_profile, real._user = None, None
     tracker = Tracker()
     cam = RIG["front_camera"]
@@ -887,8 +887,8 @@ def test_search_toward_and_lean_stationary_look():
     scene = Scene(10.0, 6.0, [Thing("mug", 3.5, 0.0, radius=0.1)], {}, start=Pose(-3.0, 0.0, 0.0))
     sim = SimRobot(scene)
     tools = Tools(sim)
-    out = tools.execute("search", {"what": "mug", "area": "everywhere", "toward": "front"})
-    assert out.ok and "Found candidate mug" in out.text and sim.x > -1.0
+    res = tools.execute("search", {"what": "mug", "area": "everywhere", "toward": "front"})
+    assert res.ok and "Found candidate mug" in res.text and sim.x > -1.0
 
     # Stationary look(what=...) returns only matching detections + pictures without re-dumping full scene text.
     seen_msgs = []
@@ -936,10 +936,10 @@ def test_small_object_depth_refinement_and_arrived_reached_wording():
     # Tools._arrived says "Facing" when stopped farther away (>0.6 m gap), "Reached" within normal stopping gap
     sim = SimRobot(Scene(10.0, 6.0, [Thing("umbrella", 3.0, 0.0, radius=0.15)], {}, start=Pose(0.0, 0.0, 0.0)))
     tools = Tools(sim)
-    out_far = tools.execute("stop_near", {"target": "umbrella", "metres": 1.2})
-    assert out_far.ok and "Facing umbrella" in out_far.text and "Reached" not in out_far.text
-    out_near = tools.execute("go_to", {"target": "umbrella"})
-    assert out_near.ok and "Reached umbrella" in out_near.text
+    far = tools.execute("stop_near", {"target": "umbrella", "metres": 1.2})
+    assert far.ok and "Facing umbrella" in far.text and "Reached" not in far.text
+    near = tools.execute("go_to", {"target": "umbrella"})
+    assert near.ok and "Reached umbrella" in near.text
 
 
 def test_floor_sees_now_and_spotted_standpoint_pull_in():
@@ -1011,8 +1011,8 @@ def test_says_no_contractions_and_search_near_direction_or_here():
     orig_detect = sim.detect
     sim.detect = lambda desc: (seen_detects.append(desc), orig_detect(desc))[1]
     tools = Tools(sim)
-    out = tools.execute("search", {"what": "mug", "near": "front"})
-    assert out.ok and "Found candidate mug" in out.text and "front" not in seen_detects
+    res = tools.execute("search", {"what": "mug", "near": "front"})
+    assert res.ok and "Found candidate mug" in res.text and "front" not in seen_detects
     seen_detects.clear()
     tools.execute("search", {"what": "mug", "near": "here"})
     assert "here" not in seen_detects
@@ -1085,12 +1085,12 @@ def test_sync_vlm_vetting_cluster_pick_and_semantic_places(tmp_path):
     assert "kitchen: cabinets, counter" in txt and "hallway: doorway, wooden door" in txt
 
     tools = Tools(sim)
-    out = tools.execute("search", {"what": "mug", "near": "hallway"})
-    assert out.ok and "Found candidate mug" in out.text and sim.x < -1.0
+    res = tools.execute("search", {"what": "mug", "near": "hallway"})
+    assert res.ok and "Found candidate mug" in res.text and sim.x < -1.0
 
     # Out-of-view go_to("kitchen") resolves to mapped "kitchen: cabinets, counter" and drives there without blind search
-    out2 = tools.execute("go_to", {"target": "kitchen"})
-    assert out2.ok and "Arrived at kitchen: cabinets, counter" in out2.text and sim.x > 2.0
+    res2 = tools.execute("go_to", {"target": "kitchen"})
+    assert res2.ok and "Arrived at kitchen: cabinets, counter" in res2.text and sim.x > 2.0
 
 
 def test_color_qualified_sees_now_and_visual_target_color_check():
@@ -1162,8 +1162,8 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
         ("search", {"what": "bike 7"}),
         ("look", {"direction": "front", "what": "25 CHAIR"}),
     ):
-        result = tools.execute(name, args)
-        assert not result.ok and ("search(" in result.text or "object ID" in result.text)
+        res = tools.execute(name, args)
+        assert not res.ok and ("search(" in res.text or "object ID" in res.text)
     assert sim.vocabulary == vocab_before
 
     # 2. Default see_after_moves="front" attaches 1 fresh front_camera frame after open-loop moves without full scene dump

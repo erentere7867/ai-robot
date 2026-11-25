@@ -343,8 +343,8 @@ def test_a_side_and_an_edge_gap_compose_without_losing_the_target_id():
     refused = tools.execute("go_to_side", {"target": str(chair.id), "side": "under"})
     assert not refused.ok and "clearance" in refused.text and sim.pose() == before
     endpoint = sim.spot(chair, "behind", distance=0.75)
-    result = tools.execute("go_to_side", {"target": str(chair.id), "side": "behind", "distance": 0.75})
-    assert result.ok and np.linalg.norm(np.asarray(endpoint) - (sim.x, sim.y)) < 0.2
+    res = tools.execute("go_to_side", {"target": str(chair.id), "side": "behind", "distance": 0.75})
+    assert res.ok and np.linalg.norm(np.asarray(endpoint) - (sim.x, sim.y)) < 0.2
     dispatch, = [e for e in sim.trace.events if e.name == "go_to"]
     assert dispatch.args["target"].id == chair.id
 
@@ -355,8 +355,8 @@ def test_a_distance_comparison_never_becomes_a_detector_label_or_starts_a_drive(
     tools = Tools(sim)
     for name, args in (("go_to", {"target": "the nearest box"}), ("search", {"what": "furthest bag", "near": "start"}),
                        ("wait", {"seconds": 1, "until": "closest person"})):
-        result = tools.execute(name, args)
-        assert not result.ok and "just the object name" in result.text
+        res = tools.execute(name, args)
+        assert not res.ok and "just the object name" in res.text
         assert sim.pose() == start and sim.vocabulary == words
 
 
@@ -375,8 +375,8 @@ def test_a_remembered_or_lost_id_does_not_confirm_arrival(monkeypatch, gone):
 
     monkeypatch.setattr(sim, "obj", observed)
     tools = Tools(sim)
-    result = tools.execute("go_to", {"target": str(target.id)})
-    assert not result.ok and "Target not confirmed" in result.text and tools.looked == ["front_camera"]
+    res = tools.execute("go_to", {"target": str(target.id)})
+    assert not res.ok and "Target not confirmed" in res.text and tools.looked == ["front_camera"]
 
 
 def test_the_next_request_sees_what_the_last_one_did_and_where_it_began():
@@ -424,19 +424,18 @@ def test_each_motion_says_what_the_request_has_done_so_far():
 ], ids=["turn-with-unit", "move-with-unit", "mixed-case-direction"])
 def test_motion_progress_uses_validated_arguments(name, args, progress):
     tools = Tools(SimRobot(Scene(6, 6, [], {})))
-    result = tools.execute(name, args)
-    assert result.ok
-    assert f"\nThis request so far: {progress}." in result.text
+    res = tools.execute(name, args)
+    assert res.ok
+    assert f"\nThis request so far: {progress}." in res.text
 
 
 def test_go_to_a_name_not_yet_seen_searches_for_it_and_then_goes_there():
     sim = SimRobot(Scene(16.0, 6.0, [Thing("ball", 6.0, 0.0, radius=0.15, color="red")], {}, start=Pose(-6.0, 0, 0)))
     ball, = sim.things.values()
     turn_only = Tools(sim).execute("face", {"target": "red ball"})  # facing never drives off to look
-    assert not turn_only.ok and "look('around'" in turn_only.text
-    assert not any(e.name == "search" for e in sim.trace.events)
-    result = Tools(sim).execute("go_to", {"target": "red ball"})  # 12 m away: out of the cameras' range
-    assert result.ok and result.text.startswith(f"Searched for it: found ball {ball.id}. Drive finished.")
+    assert not turn_only.ok and "look('around'" in turn_only.text and not any(e.name == "search" for e in sim.trace.events)
+    res = Tools(sim).execute("go_to", {"target": "red ball"})  # 12 m away: out of the cameras' range
+    assert res.ok and res.text.startswith(f"Searched for it: found ball {ball.id}. Drive finished.")
     names = [e.name for e in sim.trace.events]
     assert names.index("search") < names.index("go_to")
     assert math.dist((sim.x, sim.y), (ball.x, ball.y)) < 1.0

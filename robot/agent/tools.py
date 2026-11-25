@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -68,19 +68,20 @@ class ActionResult:
     turned_deg: float = 0.0
 
 
-def recalled_facts(memory: Any, query: str) -> list[str]:
-    """Retrieve matching stored facts; when multiple match, return them oldest-to-newest so corrections stand out."""
-    if memory is None:
-        return []
-    if hasattr(memory, "query_facts_dated"):
-        dated = list(memory.query_facts_dated(query))
-        if len(dated) <= 1:
-            return [text for text, _ in dated]
+def recalled_facts(memory: Any, query: str, extra: Iterable[str] = ()) -> list[str]:
+    """Retrieve matching stored facts (oldest to newest when multiple match) plus any extra unstored notes."""
+    dated: list[tuple[str, float]] = list(memory.query_facts(query)) if memory is not None else []
+    if len(dated) > 1:
         dated.sort(key=lambda item: item[1])
-        return [f"{text} ({'most recent' if i == len(dated) - 1 else 'earlier'})" for i, (text, _) in enumerate(dated)]
-    if hasattr(memory, "query_facts"):
-        return list(memory.query_facts(query))
-    return []
+        lines = [f"{text} ({'most recent' if i == len(dated) - 1 else 'earlier'})" for i, (text, _) in enumerate(dated)]
+    else:
+        lines = [text for text, _ in dated]
+    seen = {text for text, _ in dated}
+    for note in extra:
+        if note not in seen:
+            seen.add(note)
+            lines.append(note)
+    return lines
 
 
 def _turn_span(robot: Any, pose_idx: int, before: Pose, after: Pose, commanded: float) -> float | None:
@@ -258,6 +259,12 @@ class Tools:
     def __init__(self, robot: Any, memory: Any = None) -> None:
         self.robot = robot
         self.memory = memory if memory is not None else getattr(robot, "store", None)
+        robot_persists = (
+            self.memory is not None
+            and getattr(robot, "persists_facts", False)
+            and getattr(robot, "store", None) is self.memory
+        )
+        self._fact_store = None if robot_persists else self.memory
         self.todo = Todo()
         self.looked: list[str] = []  # cameras the model asked to see since the last observation
         self.moved = False  # the robot moved since the last observation
@@ -291,6 +298,11 @@ class Tools:
         try:
             checked = _check(tool, args)
             raw = tool.run(**checked)
+            res = raw if isinstance(raw, ActionResult) else ActionResult(raw, True, "reached" if tool.moves else "ok")
+            if self.found is not None and name != "search":
+                res = replace(res, text=f"Searched for it: found {self.found.label} {self.found.id}. {res.text}")
+            if tool.moves:
+                self.moved = True
         except ToolError as exc:
             return ActionResult(f"Error: {exc}.{motion_note()}", False, "error", moved_m)
         except NotFound as exc:
@@ -310,19 +322,16 @@ class Tools:
             return ActionResult(f"Timed out: {exc}{motion_note()}.", False, "timeout", moved_m)
         except (ValueError, TypeError) as exc:
             return ActionResult(f"Error: {exc}.", False, "error")
-        else:
-            self.moved |= tool.moves
         finally:
             if before is not None and not self.moved:
                 now = self.robot.pose()
                 if (math.dist((now.x, now.y), (before.x, before.y)) > 0.02
                         or abs((now.yaw - before.yaw + 180) % 360 - 180) > 2.0):
                     self.moved = True
-        res = raw if isinstance(raw, ActionResult) else ActionResult(raw, True, "reached" if tool.moves else "ok")
-        if self.found is not None and name != "search":
-            res = replace(res, text=f"Searched for it: found {self.found.label} {self.found.id}. {res.text}")
-        if tool.moves and (progress := self._progress(name, checked, res)):
-            res = replace(res, text=f"{res.text}\n{progress}")
+        if tool.moves:
+            progress = self._progress(name, checked, res)
+            if progress:
+                res = replace(res, text=res.text + "\n" + progress)
         return res
 
     def _progress(self, name: str, args: dict[str, Any], res: ActionResult) -> str:
@@ -795,16 +804,12 @@ class Tools:
 
     def remember(self, fact: str) -> str:
         self.robot.remember(fact)
-        if (self.memory is not None and hasattr(self.memory, "remember_fact")
-                and not (self.memory is getattr(self.robot, "store", None) and hasattr(self.robot, "_owns_store"))):
-            self.memory.remember_fact(fact)
+        if self._fact_store is not None:
+            self._fact_store.remember_fact(fact)
         return "Remembered."
 
     def recall(self, query: str) -> str:
-        stored = recalled_facts(self.memory, query)
-        lines = list(stored)
-        raw_stored = {f.removesuffix(" (most recent)").removesuffix(" (earlier)") for f in stored}
-        lines += [f for f in self.robot.recall(query) if f not in raw_stored and f not in lines]
+        lines = recalled_facts(self.memory, query, extra=self.robot.recall(query))
         room_at = getattr(self.robot, "_room_at", None)
         for o in self.robot.where(query, area="everywhere"):
             ago = "now" if o.last_seen < 2 else f"{o.last_seen / 60:.0f} min ago" if o.last_seen >= 60 else \

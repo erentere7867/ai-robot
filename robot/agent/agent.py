@@ -399,12 +399,12 @@ class Agent:
                         running = ", ".join(f"{k}={v!r}" for k, v in call.args.items())
                         self._push(status="acting", steps=[*record.lines(thoughts=True), f"{call.name}({running}) ..."])
                         try:
-                            outcome = self._run(robot, tools, call.name, call.args, record)
+                            res = self._run(robot, tools, call.name, call.args, record)
                         except Preempted:
                             step.calls.append((call.name, call.args, "Interrupted before returning a result.", False))
                             raise
-                        result, ok = outcome.text, outcome.ok
-                        if outcome.status == "partial":
+                        result, ok = res.text, res.ok
+                        if res.status == "partial":
                             barrier = ("Not run: an earlier call in this turn ended short; inspect the result before "
                                        "deciding the next action.")
                         if self.see_after_moves is True and tools.moved:
@@ -527,7 +527,7 @@ class Agent:
                 if not self._stopped.is_set():
                     robot.resume()
                 return ActionResult("Not run: the user spoke (their words follow).", False, "interrupted")
-            result = tools.execute(name, args)
+            res = tools.execute(name, args)
         except Preempted:
             if self._stopped.is_set() or self._heard.empty():
                 raise
@@ -535,12 +535,12 @@ class Agent:
             return ActionResult("Interrupted: the user spoke (their words follow).", False, "interrupted")
         finally:
             self._acting.clear()
-        if not result.ok:
-            record.problems.append(f"{name}: {result.text}")
+        if not res.ok:
+            record.problems.append(f"{name}: {res.text}")
             self._mood(robot, "uh_oh", "uh_oh")
         elif name == "search" and tools.found is not None:
             self._mood(robot, "happy", "happy")
-        return result
+        return res
 
     def _finish(self, robot: Any, record: TaskRecord, outcome: str, said: str) -> TaskRecord:
         record.outcome = outcome
