@@ -31,7 +31,7 @@ robot/
   agent/      the agent loop, its tools (checked, with errors that teach), to-do list, instant stop/wait
   mind/       the model's client (native tool calls, yes/no probabilities), long-term memory (SQLite)
   perception/ camera rig, YOLOE for asked words, depth scaled by the floor, synthetic /scan, tracker, pose
-  body/       the body's control loops: trajectory rollout, pursuit, social yielding, aliveness
+  body/       motion progress, gestures, and simulated proprioception
   ros/        the robot on ROS 2: Nav2, its own map and rooms, perception nodes, RealRobot
   sim/        the 2D simulator behind the same robot API, and the Habitat 3D apartment
   interfaces/ live web page, voice (Whisper, voiceprints, Piper), the demo

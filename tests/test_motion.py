@@ -6,25 +6,30 @@ from unittest.mock import Mock
 
 import pytest
 
-from robot.agent.api import Pose
-from robot.body import BodyController
+from robot.agent.api import PathBlocked, Pose
 from robot.eval.suite import two_rooms
 from robot.ros.motion import COMMAND_AGE_NS, NAV, MotionGate, NavGoal
 from robot.sim.habitat_ros import Hardware
-from robot.sim.world import SimRobot
+from robot.sim.world import Scene, SimRobot, Thing
 
 
-def test_body_does_not_creep_forward_when_every_checked_arc_is_blocked():
-    body = BodyController()
-    command = body.step_pursuit((0, 0, 0), [(1, 0), (2, 0)], 0, occupied_fn=lambda x, y: x >= 0.01)
-    assert command == (0.0, 0.0, 0, False)
+def test_sim_drive_path_reaches_the_corner_before_turning():
+    robot = SimRobot(Scene(10, 10, [], {}, start=Pose(0, 0, 180)))
+    robot.drive_path([(0, 0), (1, 0), (1, 1)])
+    path = [(x, y) for _, x, y, _ in robot.trace.poses]
+    corner = path.index(pytest.approx((1, 0)))
+    assert all(y == pytest.approx(0) for _, y in path[:corner])
+    assert all(x == pytest.approx(1) for x, _ in path[corner:])
+    assert (robot.x, robot.y) == pytest.approx((1, 1), abs=0.08)
+    assert robot.trace.bumps == 0
 
 
-def test_body_does_not_speed_up_an_already_checked_arc():
-    body = BodyController()
-    v, _, idx, arrived = body.step_pursuit((0, 0, 0), [(1, 0), (2, 0)], 0, v_cruise=0.0506)
-    assert 0 < v <= 0.0506
-    assert idx == 0 and not arrived
+def test_sim_drive_path_stops_before_contact_between_waypoints():
+    obstacle = Thing("ball", 0.5, 0.075, radius=0.027)
+    robot = SimRobot(Scene(10, 10, [obstacle], {}, start=Pose(0, 0, 0)))
+    with pytest.raises(PathBlocked, match="obstructed"):
+        robot.drive_path([(0, 0), (1, 0)])
+    assert robot.x < obstacle.x and robot.trace.bumps == 0
 
 
 @pytest.mark.parametrize("side", [-1, 1])
