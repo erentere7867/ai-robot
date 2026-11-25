@@ -231,7 +231,7 @@ def says_cannot(text: str) -> bool:
                           text.replace("’", "'")))
 
 
-def confirms_presence(sim: Referee, label: str) -> bool | str:
+def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
     """The final spoken answer must assert presence, not just contain an affirmative word."""
     answers = [text.lower().replace("’", "'").strip() for _, text in sim.trace.said if text.strip()]
     target = rf"(?:{'|'.join(map(re.escape, WORDS.get(label, (label,))))})s?\b"
@@ -242,7 +242,10 @@ def confirms_presence(sim: Referee, label: str) -> bool | str:
     affirmative = re.match(r"^(?:yes|yeah|yep)\b[\s,.!:-]*", answers[-1])
     answer = answers[-1][affirmative.end():] if affirmative else answers[-1]
     claim = r"(?:there (?:is|are)|there's|i (?:(?:can )?see|found|spotted))"
-    if re.match(rf"{claim}\s+(?:(?:a|an|the|one)\s+)?(?:\w+\s+){{0,2}}{target}", answer):
+    noun = rf"(?:(?:a|an|the|one)\s+)?(?:(?!(?:a|an|the|of|for|with)\b)[\w-]+\s+){{0,2}}{target}"
+    location = r"(?:here|(?:parked |standing |sitting )?(?:in|inside|by|near|at|on|under|beside|behind|next to)\s+.+)"
+    offsite = rf"\b(?:outside|outdoors|elsewhere|(?:another|a different|the other)\s+{re.escape(place)})\b"
+    if not re.search(offsite, answer) and re.fullmatch(rf"{claim}\s+{noun}(?:\s+{location})?[.! ]*", answer):
         return True
     # An elliptical answer has no subject to disambiguate it after a denial.
     if any(negation.search(text) and (mentions(text, label) or text.startswith("no")) for text in answers[:-1]):
@@ -305,7 +308,8 @@ TASKS = [
     Task("Q4", ("Which is closer to you, the sofa or the TV?",),
          lambda s, st: first_named(said(s, last_only=True), *(lambda c: (c, "tv" if c == "sofa" else "sofa"))(
              _closer(s, st, "sofa", "tv"))), ("sofa", "tv")),
-    Task("Q5", ("Is there a bike in the apartment?",), lambda s, st: confirms_presence(s, "bike"), ("bike",)),
+    Task("Q5", ("Is there a bike in the apartment?",), lambda s, st: confirms_presence(s, "bike", "apartment"),
+         ("bike",)),
     # finding things
     Task("S1", ("Find a plant and go to it.",), lambda s, st: ends_near(s, things(s, "plant")), ("plant",)),
     Task("S2", ("Is there a dog in the apartment?",), lambda s, st: says_no(said(s, last_only=True))),
