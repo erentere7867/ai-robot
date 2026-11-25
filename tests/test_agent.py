@@ -356,6 +356,22 @@ def test_speech_deferred_by_a_search_miss_is_not_counted_as_spoken(monkeypatch):
     assert [text for _, text in sim.trace.said] == ["No towel in this room."]
 
 
+def test_plan_step_updates_wait_for_the_model_to_see_revised_step_numbers():
+    sim = SimRobot(living_room())
+    plan = call("todo", steps=["Inspect the door", "Enter the room"])
+    block_old = call("todo_blocked", step=2, reason="door shut")
+    brain = Scripted(call("todo", steps=["Inspect the door", "Enter the room", "Turn left"]),
+                     call("todo_done", step=3),
+                     Reply("", tool_calls=plan.tool_calls + block_old.tool_calls),
+                     call("todo_blocked", step=3, reason="door shut"),
+                     say("I couldn't enter."), say("The door was shut."))
+    Agent(brain, cameras="none").do("Inspect the door, enter the room, and turn left.", sim)
+    plan_result, skipped = tool_results(brain.seen[3])[-2:]
+    assert "3. [ ] Enter the room" in plan_result
+    assert skipped == "Not run: read the revised plan for the current step numbers."
+    assert "Open to-do steps: Inspect the door; Enter the room (blocked: door shut)." in brain.seen[5][-1]["content"]
+
+
 def test_cut_off_model_turn_does_not_dispatch_a_partial_drive():
     sim = SimRobot(living_room())
     cut = call("move", metres=1)
