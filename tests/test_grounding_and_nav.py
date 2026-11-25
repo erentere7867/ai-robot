@@ -839,7 +839,7 @@ def test_scan_sectors_made_earlier_are_moved_to_where_the_robot_is_now():
     assert abs(float(np.nanmin(scan)) - 1.0) < 0.01  # driven 1 m toward it
 
 
-def test_wheels_that_do_not_follow_the_drive_put_the_touched_spot_in_the_scan():
+def test_wheels_that_do_not_follow_the_drive_put_the_touched_spot_in_the_scan(monkeypatch):
     import numpy as np
 
     from robot.ros.model import BODY_R
@@ -861,6 +861,15 @@ def test_wheels_that_do_not_follow_the_drive_put_the_touched_spot_in_the_scan():
     k = int(np.nanargmin(ranges))
     assert abs(float(ranges[k]) - (BODY_R + 0.03 + 0.3)) < 0.02 and abs(k + 0.5 - 180) < 2  # still there, ahead
     assert np.all(np.isnan(scan._contact_part(t + 200.0, (0.0, 0.0, 0.0))[2]))  # forgotten after CONTACT_KEEP
+
+    monkeypatch.setattr("robot.ros.perceive.synthetic_scan", lambda *_, **__: (np.full(360, np.nan),))
+    navigation, measured = [], []
+    scan._pub = SimpleNamespace(publish=navigation.append)
+    scan._measured_pub = SimpleNamespace(publish=measured.append)
+    scan._laser_scan_cls = lambda: SimpleNamespace(header=SimpleNamespace())
+    scan.ingest_depth("front_camera", SimpleNamespace(sec=60, nanosec=0), np.zeros((1, 1)))
+    assert np.isfinite(navigation[0].ranges).any()
+    assert np.isnan(measured[0].ranges).all()
 
 
 def test_camera_for_ambiguous_ids_uses_distinct_visible_marks_not_old_or_rejected_ones():
@@ -890,6 +899,53 @@ def test_a_stale_detection_cannot_put_its_badge_on_a_new_exposure():
     p.boxes = {cam: [((10, 12, 45, 70), 1)]}
     assert np.array_equal(p.render_annotated_view(cam, 160, 90, 7.0), current)
     assert p.render_annotated_view(cam, 160, 90, 9.0) is None
+    frame, marks, stamp = p.annotated_observation(cam, 160, 90, 7.0)
+    assert np.array_equal(frame, current) and not marks and stamp == 8.0
+    assert p.annotated_observation(cam, 160, 90, 9.0) is None
+    p.detected[cam] = (8.0, current)
+    assert p.annotated_observation(cam, 160, 90, 7.0)[1] == {1}
+    real = object.__new__(RealRobot)
+    real.perception, real._now = p, lambda: 8.25
+    assert real.camera_observation(cam, 160, 90)[1] == {1: 0.25}
+    p.tracker.tracks[1].rejected = True
+    assert p.annotated_observation(cam, 160, 90, 7.0)[1] == set()
+
+
+def test_spatial_observation_uses_only_fresh_measured_scan_returns_and_reported_amcl():
+    real = object.__new__(RealRobot)
+    real._now = lambda: 10.0
+    real._call = lambda: None
+    real.perception = object.__new__(Perception)
+    real.perception.amcl_sigma = None
+    real._scan = None
+    real.perception.measured_scan = None
+    assert real.spatial_observation() == (None, "unavailable")
+
+    covariance = [0.0] * 36
+    covariance[0], covariance[7], covariance[35] = 0.01, 0.07, 0.09
+    real.perception._amcl(SimpleNamespace(pose=SimpleNamespace(covariance=covariance)))
+    real._scan = SimpleNamespace(
+        header=SimpleNamespace(frame_id="base_link", stamp=SimpleNamespace(sec=9, nanosec=500_000_000)),
+        angle_min=-math.pi, angle_increment=math.pi / 4, range_min=0.12, range_max=8.0,
+        ranges=[1.2, 0.3, math.inf, 0.2, 0.8, 0.3, math.nan, 0.5, 0.7],
+    )
+    assert real.spatial_observation()[1] == "unavailable"
+    real.perception.measured_scan = real._scan
+    sigma, scan = real.spatial_observation()
+    assert sigma == pytest.approx((0.2, 0.3))
+    assert scan == {"front": 0.8, "left": None, "right": None, "behind": 0.7}
+    assert real.clearance("ahead") == 0.65
+    real._scan.ranges[4] = 12.0
+    assert real.spatial_observation()[1]["front"] is None
+    assert real.clearance("ahead") == 12.0
+    real._scan.angle_min = math.nextafter(math.radians(-15), -math.inf)
+    real._scan.ranges = [0.8]
+    assert real.spatial_observation()[1]["front"] is None
+    assert real.clearance("ahead") == 12.0
+    real._now = lambda: 11.0
+    assert real.spatial_observation()[1] == "stale"
+    real._now = lambda: 9.0
+    assert real.spatial_observation()[1] == "stale"
 
 
 def test_real_robot_wall_bounds_rejection():

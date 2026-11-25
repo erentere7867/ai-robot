@@ -36,6 +36,12 @@ DIRECT = "direct"
 PLAN_TIMEOUT_S, PLAN_ENDPOINT_M = 2.0, 0.10
 
 
+def nearest_scan_return(scan: Any, bearing: float) -> float | None:
+    return min((r for k, r in enumerate(scan.ranges) if math.isfinite(r) and scan.range_min <= r <= scan.range_max
+                and abs(math.degrees(wrap(scan.angle_min + k * scan.angle_increment - bearing))) <= 15),
+               default=None)
+
+
 class RosRobot(SimRobot):
     def __init__(self, scene: Scene, max_time: float = 600.0, nudge: Any = None,
                  synthetic_scan: bool = True) -> None:
@@ -543,9 +549,8 @@ class RosRobot(SimRobot):
         msg = self._scan
         if msg is None:
             return super().clearance(direction)
-        near = [r for k, r in enumerate(msg.ranges) if msg.range_min <= r <= msg.range_max
-                and abs(math.degrees(wrap(msg.angle_min + k * msg.angle_increment - math.radians(offset)))) <= 15]
-        return round(max(0.0, min(near) - RADIUS), 2) if near else 12.0
+        near = nearest_scan_return(msg, math.radians(offset))
+        return round(max(0.0, near - RADIUS), 2) if near is not None else 12.0
 
     def shutdown(self) -> None:
         confirmed = True
