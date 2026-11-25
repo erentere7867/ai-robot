@@ -994,6 +994,17 @@ def test_locate_crop_places_the_lidar_surface_on_the_returning_beam():
     assert math.hypot(place.x, place.y) - place.radius == pytest.approx(1.232)
 
 
+def test_locate_crop_ranks_returns_by_distance_from_the_photo_pose():
+    from robot.perception.locate import locate_crop
+
+    ranges = np.full(360, np.inf)
+    ranges[1], ranges[359] = 3.0, 1.0
+    place = locate_crop(RIG["front_camera"], (560, 100, 720, 400),
+                        scan=(ranges, -math.pi, math.tau / 360), scan_in_camera=(4.0, 0.0, 0.0))
+    assert place is not None and place.how == "lidar"
+    assert math.hypot(place.x, place.y) - place.radius == pytest.approx(3.0)
+
+
 def test_locate_in_picture_refines_the_strongest_third_when_every_third_is_positive():
     from robot.ros.perceive import locate_in_picture
 
@@ -1127,4 +1138,3 @@ def test_badge_deoverlap_and_detector_max_asked():
     assert len(det.asked) == MAX_ASKED == 3
     assert det.asked == ["stool", "mug", "bicycle"]
     assert det.vocabulary == ["person", "stool", "mug", "bicycle"]
-
