@@ -86,6 +86,15 @@ def test_come_back_requires_arrival_before_return_and_a_still_finish(path, arriv
     assert problem in actual if problem else not actual
 
 
+def test_tv_approach_and_return_accept_the_same_monitor_destination():
+    monitor = {"id": 2, "label": "monitor", "x": 2.0, "y": 0.0, "radius": 0.3}
+    path = [(0, 0, 0, 0), (2, 1.8, 0, 0), (4, 0, 0, 0), (5, 0, 0, 0)]
+    objects = [TV, monitor]
+    start = {"pose": path[0][1:], "ends": [path[1][1:], path[-1][1:]]}
+    assert not TASK["N5"].problem(referee(path[:2], objects=objects), start)
+    assert not TASK["R2"].problem(referee(path, objects=objects), start)
+
+
 @pytest.mark.parametrize(("path", "problem"), [
     ([(1, -5, 1, math.pi / 2)], "5.00 m sideways"),
     ([(1, -1, 0.5, math.pi / 2), (2, 0, 1, math.pi / 2)], "1.00 m sideways"),
