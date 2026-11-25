@@ -20,14 +20,14 @@ from robot.agent.api import (
     wrap,
     xy,
 )
+from robot.body.controller import Progress
 from robot.interfaces.voice import chime as synth_chime
 from robot.ros import motion
 from robot.ros.bringup import CRUISE as ROS_CRUISE
 from robot.ros.bringup import TURN
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
-# A Nav2 goal that has not brought the robot PROGRESS_M nearer in PROGRESS_S simulated seconds is given up: a search
-# stop Nav2 could not reach kept it backing up, spinning and replanning along one 2 m stretch for 490 s.
+# A search stop Nav2 could not reach kept it backing up, spinning and replanning along one 2 m stretch for 490 s.
 PROGRESS_S, PROGRESS_M = 30.0, 0.25
 CANCEL_WAIT_S = 2.0
 DIRECT = "direct"
@@ -286,19 +286,14 @@ class RosRobot(SimRobot):
             if result is None:
                 raise PathBlocked(f"{name} refused the goal")
             next_check = 0.0
-            to = (fields["pose"].pose.position.x, fields["pose"].pose.position.y) if "pose" in fields else None
-            best, since = math.inf, self.t
+            progress = Progress((self.x, self.y), self.t, PROGRESS_M, PROGRESS_S)
             while not result.done():
                 self._nav_tick(pending)
                 if watch is not None and time.monotonic() >= next_check:
                     self._check_goal(watch)
                     next_check = time.monotonic() + 0.2
-                if to is not None:  # Nav2 retries and recovers for as long as it likes; a goal that gets no nearer ends
-                    gap = math.dist(to, (self.x, self.y))
-                    if gap < best - PROGRESS_M:
-                        best, since = gap, self.t
-                    elif self.t - since > PROGRESS_S:
-                        raise PathBlocked(f"no nearer to ({to[0]:.1f}, {to[1]:.1f}) in {PROGRESS_S:g} s")
+                if name == "navigate_to_pose" and not result.done() and progress.stalled((self.x, self.y), self.t):
+                    raise PathBlocked(f"no navigation progress for {PROGRESS_S:g} s")
             self._interrupts()
             if pending.cancelled:
                 raise Preempted("stopped")

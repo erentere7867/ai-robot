@@ -13,7 +13,6 @@ the real robot. Nothing of the truth reaches the robot: the first time in a home
 from __future__ import annotations
 
 import math
-import re
 import subprocess
 import sys
 import threading
@@ -38,18 +37,16 @@ def own_home(map_yaml: Path) -> tuple[Any, np.ndarray]:
     """What the robot knows of a home before it looks around: the extent of the map it built (its frame starts at the
     dock) and that map as its planning grid. No objects, rooms or places yet: those come from looking."""
     from robot.agent.api import Pose
-    from robot.ros.explore import _pgm, load_grid
+    from robot.ros.explore import load_grid, read_map
     from robot.sim.world import RES, Scene
 
-    text = map_yaml.read_text()
-    res = float(re.search(r"resolution: ([\d.]+)", text).group(1))
-    ox, oy, _ = (float(v) for v in re.search(r"origin: \[([^\]]+)\]", text).group(1).split(","))
-    rows, cols = _pgm(map_yaml.with_name(re.search(r"image: (.+)", text).group(1).strip())).shape
+    res, (ox, oy), image = saved = read_map(map_yaml)
+    rows, cols = image.shape
     half_w = max(abs(ox), abs(ox + cols * res)) + 0.5  # the robot's grid is centred on its frame's origin
     half_h = max(abs(oy), abs(oy + rows * res)) + 0.5
     size = (2 * half_w, 2 * half_h)
     shape = (round(size[0] / RES), round(size[1] / RES))
-    return Scene(size[0], size[1], [], {}, start=Pose(0.0, 0.0, 0.0)), load_grid(map_yaml, shape, size)
+    return Scene(size[0], size[1], [], {}, start=Pose(0.0, 0.0, 0.0)), load_grid(saved, shape, size)
 
 
 class Home:

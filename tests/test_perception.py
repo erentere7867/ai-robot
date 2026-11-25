@@ -372,14 +372,14 @@ def test_frontiers_are_open_edges_of_the_map_with_room_for_the_robot():
 
 
 def test_a_saved_map_becomes_the_planners_grid_in_the_house_frame(tmp_path):
-    from robot.ros.explore import load_grid
+    from robot.ros.explore import load_grid, read_map
 
     image = np.full((100, 140), 254, dtype=np.uint8)  # a 7 x 5 m map at 5 cm, all free...
     image[:, 70] = 0  # ...with a wall along x = 0 (the map starts at x = -3.5)
     image[:10, :] = 205  # and unknown along its top (largest y) edge
     (tmp_path / "m.pgm").write_bytes(b"P5\n140 100\n255\n" + image.tobytes())
     (tmp_path / "m.yaml").write_text("image: m.pgm\nresolution: 0.050\norigin: [-3.5, -2.5, 0.0]\n")
-    grid = load_grid(tmp_path / "m.yaml", (70, 50), (7.0, 5.0))  # 10 cm cells
+    grid = load_grid(read_map(tmp_path / "m.yaml"), (70, 50), (7.0, 5.0))  # 10 cm cells
     assert grid[35, 25] and not grid[20, 25] and not grid[50, 25]  # the wall at x = 0, floor either side
     assert grid[20, 48] and not grid[20, 40]  # unknown counts as blocked
 
