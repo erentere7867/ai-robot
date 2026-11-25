@@ -237,7 +237,7 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
     target = rf"(?:{'|'.join(map(re.escape, WORDS.get(label, (label,))))})s?\b"
     negation = re.compile(r"\b(?:no|not|never|cannot|unable|none)\b|n't\b")
     failure = f"final answer did not unambiguously confirm that a {label} is present"
-    if not answers or negation.search(answers[-1]) or "?" in answers[-1]:
+    if not answers:
         return failure
     affirmative = re.match(r"^(?:yes|yeah|yep)\b[\s,.!:-]*", answers[-1])
     answer = answers[-1][affirmative.end():] if affirmative else answers[-1]
@@ -245,10 +245,27 @@ def confirms_presence(sim: Referee, label: str, place: str) -> bool | str:
     noun = rf"(?:(?:a|an|the|one)\s+)?(?:(?!(?:a|an|the|of|for|with)\b)[\w-]+\s+){{0,2}}{target}"
     location = r"(?:here|(?:parked |standing |sitting )?(?:in|inside|by|near|at|on|under|beside|behind|next to)\s+.+)"
     offsite = rf"\b(?:outside|outdoors|elsewhere|(?:another|a different|the other)\s+{re.escape(place)})\b"
-    if not re.search(offsite, answer) and re.fullmatch(rf"{claim}\s+{noun}(?:\s+{location})?[.! ]*", answer):
+    presence = rf"(?:{claim}\s+{noun}(?:\s+{location})?|{noun}\s+(?:is|are)\s+(?:present|{location}))"
+
+    def clauses(text: str) -> list[str]:
+        return [part.rstrip(" .!;") for part in re.split(r"(?<=[.!?;])\s+|,?\s+(?:but|however)\s+", text)]
+
+    def denies(clause: str) -> bool:
+        if re.match(rf"^no(?:[,!:.]|$|\s+{noun})", clause):
+            return True
+        assertion = rf"(?:there\b|{noun}\s+(?:is|are)|i\s+(?:(?:can|do|did)(?:n't| not)?)?\s*(?:see|find|spot))"
+        return bool(
+            mentions(clause, label) and re.search(rf"(?:^|,\s*){assertion}", clause)
+            and (negation.search(clause) or re.search(offsite, clause))
+        )
+
+    final = clauses(answer)
+    if any(denies(clause) for clause in final):
+        return failure
+    if any(re.fullmatch(presence, clause) and not re.search(offsite, clause) and "?" not in clause for clause in final):
         return True
     # An elliptical answer has no subject to disambiguate it after a denial.
-    if any(negation.search(text) and (mentions(text, label) or text.startswith("no")) for text in answers[:-1]):
+    if any(denies(clause) for text in answers[:-1] for clause in clauses(text)):
         return failure
     if (affirmative and not answer) or re.fullmatch(r"(?:there (?:is|are) one|there's one)[.! ]*", answer):
         return True

@@ -49,6 +49,7 @@ def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):
 @pytest.mark.parametrize(("answers", "passed"), [
     (["No, there is no bike.", "Yes, I can keep looking."], False),
     (["No, there is no bike.", "Yes."], False),
+    (["No bike here.", "Yes."], False),
     (["Yes.", "Actually, there isn't a bicycle here."], False),
     (["Yes, there is a bike. No, that's not a bike."], False),
     (["I heard someone say yes."], False),
@@ -57,10 +58,17 @@ def test_forward_uses_the_starting_heading_and_the_whole_path(path, problem):
     (["I can see a picture of bicycles."], False),
     (["There is a bike outside."], False),
     (["There is a bike in another apartment."], False),
+    (["There is a bike. There is no bicycle."], False),
+    (["There is a bike. The bicycle is outside."], False),
     (["Yes."], True),
     (["Yes, there is one."], True),
     (["I can see a blue bicycle by the desk."], True),
     (["There is a bike parked inside the apartment."], True),
+    (["Yes, the bike is in the living room."], True),
+    (["A bike is present."], True),
+    (["Yes, a bike is here."], True),
+    (["Yes, there is a bike. I don't know whose it is."], True),
+    (["There is a bike, but I don't know whose bike it is."], True),
     (["No, there is no bike.", "There’s a bicycle by the desk."], True),
 ])
 def test_bike_answer_scores_the_claim_not_a_yes_token(answers, passed):
