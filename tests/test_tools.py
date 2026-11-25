@@ -50,6 +50,24 @@ def test_honest_move_turn_and_go_toward_partial_outcomes() -> None:
     assert not res.ok and res.status == "partial" and "ended short" in res.text
 
 
+def test_successful_motion_progress_reports_measured_distance_and_turn(monkeypatch) -> None:
+    from robot.agent.tools import Tools
+    from robot.eval.suite import living_room
+    from robot.sim.world import SimRobot
+
+    robot = SimRobot(living_room())
+    tools = Tools(robot)
+    move, turn = robot.move, robot.turn
+    monkeypatch.setattr(robot, "move", lambda metres, direction: move(0.83 * metres, direction))
+    monkeypatch.setattr(robot, "turn", lambda degrees, direction: turn(degrees - 15, direction))
+
+    moved = tools.execute("move", {"metres": 1, "direction": "forward"})
+    turned = tools.execute("turn", {"degrees": 90, "direction": "left"})
+
+    assert moved.ok and "This request so far: moved 0.82 m forward." in moved.text
+    assert turned.ok and "moved 0.82 m forward; turned 75 degrees left; 75 degrees of turning in all." in turned.text
+
+
 def test_tools_uses_robot_store_when_memory_not_passed(tmp_path) -> None:
     from robot.agent.tools import Tools
     from robot.eval.suite import living_room
@@ -150,4 +168,3 @@ def test_go_to_side_accounts_for_default_02m_gap() -> None:
     assert abs((1.25 - 0.4 - ROBOT_RADIUS) - 0.7) < 1e-6
     res = Tools(SideStopRobot()).execute("go_to_side", {"target": "1", "side": "left"})
     assert res.ok and res.status == "reached"
-

@@ -276,7 +276,7 @@ def test_each_motion_says_what_the_request_has_done_so_far():
 
 @pytest.mark.parametrize(("name", "args", "progress"), [
     ("turn", {"degrees": "90 degrees", "direction": "left"}, "turned 90 degrees left; 90 degrees of turning in all"),
-    ("move", {"metres": "0.3 m", "direction": "forward"}, "moved 0.3 m forward"),
+    ("move", {"metres": "0.3 m", "direction": "forward"}, "moved 0.29 m forward"),
     ("turn", {"degrees": 90, "direction": "Left"}, "turned 90 degrees left; 90 degrees of turning in all"),
 ], ids=["turn-with-unit", "move-with-unit", "mixed-case-direction"])
 def test_motion_progress_uses_validated_arguments(name, args, progress):
@@ -538,5 +538,3 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
     assert r1r.check(None, {"said_by_turn": ["", "", "", "not on the couch; they're on the dining table."]})
     assert not r1r.check(None, {"said_by_turn": ["", "", "", "i don't know whether they're on the table."]})
     assert not r1r.check(None, {"said_by_turn": ["", "", "", "they aren't on the table; they're on the couch."]})
-
-
