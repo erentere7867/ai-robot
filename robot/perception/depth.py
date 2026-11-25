@@ -78,22 +78,30 @@ def _tilt_matrix(pitch_rad: float, roll_rad: float) -> np.ndarray:
     return ry @ rx
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=16)
+def _base_rays(cam: Camera, h: int, w: int, stride: int = 1):  # noqa: ANN202
+    """Tilt-independent 1D ray components for `(cam, h, w, stride)` (~4 KB per entry)."""
+    cam = cam.at(w, h)
+    u = np.arange(0, w, stride, dtype=np.float32)[None, :] + 0.5
+    v = np.arange(h, dtype=np.float32)[:, None] + 0.5
+    x_opt = (u - cam.width / 2) / cam.focal
+    y_opt = (v - cam.height / 2) / cam.focal
+    c, s_ = math.cos(cam.yaw), math.sin(cam.yaw)
+    fx, fy = c + x_opt * s_, s_ - x_opt * c  # the ray (forward 1, right x_opt) on the floor plane: 1 x columns
+    fx.flags.writeable = fy.flags.writeable = y_opt.flags.writeable = False
+    return cam, fx, fy, y_opt
+
+
+@lru_cache(maxsize=8)
 def _rays(cam: Camera, h: int, w: int, pitch_rad: float, roll_rad: float, stride: int = 1):  # noqa: ANN202
     """For a picture h x w from `cam` (columns every `stride`): each column's direction on the floor plane per metre
     of depth along the lens axis (fx, fy: 1 x columns), each pixel's rise per metre of depth (vz: rows x columns),
     and the lens's height above the floor, all with the body tipped by pitch and roll."""
-    cam = cam.at(w, h)
+    cam, fx, fy, y_opt = _base_rays(cam, h, w, stride)
     r_tilt = _tilt_matrix(pitch_rad, roll_rad)
-    u = np.arange(0, w, stride, dtype=np.float32)[None, :] + 0.5
-    v = np.arange(h, dtype=np.float32)[:, None] + 0.5
-    x_opt, y_opt = (u - cam.width / 2) / cam.focal, (v - cam.height / 2) / cam.focal
-    c, s_ = math.cos(cam.yaw), math.sin(cam.yaw)
-    fx, fy = c + x_opt * s_, s_ - x_opt * c  # the ray (forward 1, right x_opt) on the floor plane: 1 x columns
-    fz = -y_opt * np.ones_like(fx)
-    vz = r_tilt[2, 0] * fx + r_tilt[2, 1] * fy + r_tilt[2, 2] * fz
+    vz = (r_tilt[2, 0] * fx + r_tilt[2, 1] * fy) - r_tilt[2, 2] * y_opt
     cam_z = float((r_tilt @ np.array([cam.x, cam.y, cam.z], dtype=np.float32))[2])
-    fx.flags.writeable = fy.flags.writeable = vz.flags.writeable = False
+    vz.flags.writeable = False
     return cam, fx, fy, vz, cam_z
 
 
@@ -136,21 +144,31 @@ def fit_to_floor(inverse: np.ndarray, cam: Camera, pitch_rad: float = 0.0, roll_
         return None
     a_c = a_cand[keep].astype(np.float32)
     b_c = (y[i[keep]] - a_c * x[i[keep]]).astype(np.float32)
-    # Score the 200 hypotheses on ~1,500 strided samples (fits in L2 cache), then refit on all inliers.
+    # Score hypotheses on ~1,500 strided samples (fits in L2 cache); if the winner fails the full inlier
+    # threshold, fall back to full-set scoring so a borderline valid frame is never dropped.
     s_step = max(1, n // 1500)
     xs, ys = x[::s_step], y[::s_step]
     tol_s = np.float32(0.08) * ys
-    best_k, best_n = -1, 0
+    best_k, best_s = -1, 0
     for s in range(0, len(a_c), 32):
         counts = np.count_nonzero(np.abs(a_c[s:s + 32, None] * xs + b_c[s:s + 32, None] - ys) < tol_s, axis=1)
         k = int(np.argmax(counts))
-        if int(counts[k]) > best_n:
-            best_k, best_n = s + k, int(counts[k])
+        if int(counts[k]) > best_s:
+            best_k, best_s = s + k, int(counts[k])
     if best_k < 0:
         return None
-    best = np.abs(a_c[best_k] * x + b_c[best_k] - y) < np.float32(0.08) * y
+    tol = np.float32(0.08) * y
+    best = np.abs(a_c[best_k] * x + b_c[best_k] - y) < tol
     if int(np.count_nonzero(best)) < 0.3 * n:
-        return None
+        best_n = int(np.count_nonzero(best))
+        for s in range(0, len(a_c), 16):
+            counts = np.count_nonzero(np.abs(a_c[s:s + 16, None] * x + b_c[s:s + 16, None] - y) < tol, axis=1)
+            k = int(np.argmax(counts))
+            if int(counts[k]) > best_n:
+                best_k, best_n = s + k, int(counts[k])
+        if best_n < 0.3 * n:
+            return None
+        best = np.abs(a_c[best_k] * x + b_c[best_k] - y) < tol
     xb, yb = x[best].astype(np.float64), y[best].astype(np.float64)
     xm, ym = float(xb.mean()), float(yb.mean())
     dx_b = xb - xm
