@@ -1196,13 +1196,14 @@ def test_frontier_search_stops_when_covered_and_filters_live_costmap_obstacles()
     assert list(real._next_stops("umbrella", None, [])) == []
     real.brain.yes_probability.assert_not_called()
 
-    # Live Nav2 costmap marking the right half lethal (>= 99) removes frontiers there.
+    # Live Nav2 costmap + incremental OccupancyGridUpdate marking the right half lethal (>= 99) removes frontiers there.
     real.coverage = np.zeros_like(real.occupied)
     real._cover()
     assert real._unseen("all")  # has frontiers in the uncovered right room before costmap overlay
-    cm_data = np.zeros((120, 240), dtype=np.int8)
-    cm_data[:, 120:] = 100  # x >= 0.0 blocked on live costmap
-    real._costmap = (cm_data, 0.05, (-6.0, -3.0))
+    real._costmap = (np.zeros((120, 240), dtype=np.int8), 0.05, (-6.0, -3.0))
+    assert any(v.x >= 0.0 for v in real._unseen("all"))
+    update = SimpleNamespace(x=120, y=0, width=120, height=120, data=np.full(120 * 120, 100, dtype=np.int8))
+    real._on_costmap_update(update)
     assert not any(v.x >= 0.0 for v in real._unseen("all"))
 
 

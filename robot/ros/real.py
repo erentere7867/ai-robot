@@ -85,12 +85,15 @@ class RealRobot(RosRobot):
         self._search_snap_after = 0.0
         self._search_coverage: dict[str, np.ndarray] = {}
         self._costmap: tuple[np.ndarray, float, tuple[float, float]] | None = None
+        from map_msgs.msg import OccupancyGridUpdate
         from nav_msgs.msg import OccupancyGrid
         from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
         costmap_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                  reliability=ReliabilityPolicy.RELIABLE)
         self.node.create_subscription(OccupancyGrid, "/global_costmap/costmap", self._on_costmap, costmap_qos)
+        self.node.create_subscription(OccupancyGridUpdate, "/global_costmap/costmap_updates",
+                                      self._on_costmap_update, 10)
         self.perception = Perception(self.node, detector, self._pose_at, brain,
                                      scan_bridge=getattr(self, "_scan_bridge", None))
         self.brain = brain
@@ -815,6 +818,19 @@ class RealRobot(RosRobot):
         info = msg.info
         data = np.asarray(msg.data, dtype=np.int8).reshape(info.height, info.width)
         self._costmap = (data, float(info.resolution), (float(info.origin.position.x), float(info.origin.position.y)))
+
+    def _on_costmap_update(self, msg: Any) -> None:
+        cm = getattr(self, "_costmap", None)
+        if cm is None:
+            return
+        data, res, origin = cm
+        h, w = data.shape
+        x0, y0, pw, ph = int(msg.x), int(msg.y), int(msg.width), int(msg.height)
+        if x0 < 0 or y0 < 0 or x0 + pw > w or y0 + ph > h:
+            return
+        updated = data.copy()
+        updated[y0:y0 + ph, x0:x0 + pw] = np.asarray(msg.data, dtype=np.int8).reshape(ph, pw)
+        self._costmap = (updated, res, origin)
 
     def _search_blocked(self) -> np.ndarray:
         """Occupancy mask combining static inflated walls with live Nav2 global costmap lethal/inscribed obstacles."""
