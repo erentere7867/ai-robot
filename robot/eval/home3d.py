@@ -257,8 +257,11 @@ TASKS = [
          "Where did I leave my backup key?",
     ), lambda s, st: (
          mentions(st["said_by_turn"][3], "table")
-         and not re.search(r"\b(?:not|aren't|isn't|no longer)\b[^.?!;,:]{0,20}\btable\b",
-                           st["said_by_turn"][3].replace("’", "'"))
+         and not re.search(
+             r"\b(?:not|aren't|isn't|no longer|don't know|do not know|not sure|unsure|uncertain|"
+             r"can't tell|cannot tell|no idea|whether)\b[^.?!;,:]{0,40}\btable\b",
+             st["said_by_turn"][3].replace("’", "'"),
+         )
          and not mentions(st["said_by_turn"][2], "key")
     ), restart_after=(2,)),
     Task("R2", ("Go to the TV.", "Come back."), lambda s, st: moved(s, st) < 0.8, ("tv",)),
