@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from robot.ros.model import CAMERAS, MAX_DV, MAX_DW, MAX_V, MAX_W, TOF, TRACK, WHEEL_R
+from robot.ros.motion import WHEELS
 from robot.sim.habitat import Habitat
 
 DT = 0.02  # the motor controller's period, simulated seconds
@@ -89,7 +90,7 @@ class Hardware:
         self.truth = self.world.call(op="reset", pose=start)
         self.t = 0.0
         self.v = self.w = 0.0
-        self.cmd, self.cmd_t = (0.0, 0.0), -1.0
+        self.cmd = (0, 0.0, 0.0)  # ROS stamp in ns, v, w
         self.odom = [0.0, 0.0, 0.0]  # what the wheels make of the way so far
         self.wheels = [0.0, 0.0]  # wheel angles, radians
         self.bumps = 0
@@ -103,7 +104,7 @@ class Hardware:
             **{f"{name}/image": pub(Image, f"/{name}/image", 2) for name in CAMERAS},
             **{f"{name}/info": pub(CameraInfo, f"/{name}/camera_info", 2) for name in CAMERAS},
         }
-        self.node.create_subscription(TwistStamped, "/cmd_vel", self._command, 10)
+        self.node.create_subscription(TwistStamped, WHEELS, self._command, 1)
         # the simulator's own control, not the robot's: put the body back on its dock between eval tasks
         from std_msgs.msg import Empty
 
@@ -114,7 +115,16 @@ class Hardware:
         self.rendered: list[float] = []  # wall seconds per picture, for the report
 
     def _command(self, msg: Any) -> None:
-        self.cmd, self.cmd_t = (msg.twist.linear.x, msg.twist.angular.z), self.t
+        header = msg.header.stamp
+        stamp = header.sec * 1_000_000_000 + header.nanosec
+        if self.cmd[0] <= stamp <= round(self.t * 1e9):
+            v, w = msg.twist.linear.x, msg.twist.angular.z
+            self.cmd = (stamp, v, w) if math.isfinite(v) and math.isfinite(w) else (stamp, 0.0, 0.0)
+
+    def _want(self) -> tuple[float, float]:
+        # DDS delivery must not restart the watchdog for a command already old at its source.
+        stamp, v, w = self.cmd
+        return (v, w) if 0 < stamp and 0 <= round(self.t * 1e9) - stamp <= WATCHDOG * 1e9 else (0.0, 0.0)
 
     def _stamp(self) -> Any:
         """The time as a ROS stamp, from whole nanoseconds (splitting the float seconds instead once turned 4.99999
@@ -127,9 +137,10 @@ class Hardware:
     # ---- one motor-controller period ---------------------------------------------------------------------------
     def tick(self, k: int) -> None:
         if self.reset_asked:  # the wheels' own count carries on: the robot was carried, not driven
-            self.reset_asked, self.v, self.w, self.cmd = False, 0.0, 0.0, (0.0, 0.0)
+            self.reset_asked, self.v, self.w = False, 0.0, 0.0
+            self.cmd = (round(self.t * 1e9), 0.0, 0.0)
             self.truth = self.world.call(op="reset", pose=self.start)
-        want = self.cmd if self.t - self.cmd_t <= WATCHDOG else (0.0, 0.0)
+        want = self._want()
         self.v = _approach(self.v, max(-MAX_V, min(MAX_V, want[0])), MAX_DV * DT)
         self.w = _approach(self.w, max(-MAX_W, min(MAX_W, want[1])), MAX_DW * DT)
         before = self.truth

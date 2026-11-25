@@ -1,9 +1,4 @@
-"""Sprocket v2 Robot API on ROS 2: Nav2 navigation, TF pose, synthetic /scan, and /cmd_vel Twist control.
-
-Every skill from the 2D simulator (`go_to`, `follow`, `express`, etc.) runs through ROS 2: Nav2 actions for map-level
-goals, BodyController 30-50 Hz pursuit and procedural aliveness on /cmd_vel, and 3-CSI calibrated synthetic /scan for
-AMCL/clearance without hardware lidar.
-"""
+"""Sprocket's ROS 2 API: Nav2 for navigation, and one checked velocity output for every skill."""
 
 from __future__ import annotations
 
@@ -26,12 +21,16 @@ from robot.agent.api import (
     xy,
 )
 from robot.interfaces.voice import chime as synth_chime
+from robot.ros.bringup import CRUISE as ROS_CRUISE
+from robot.ros.bringup import TURN
+from robot.ros.motion import CANCELED, CHECKED, CONTROL_PERIOD, DONE, NAV, SELECTED, WHEELS, MotionGate, NavGoal
 from robot.sim.world import CRUISE, DT, RADIUS, Scene, SimRobot
 
-DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
 # A Nav2 goal that has not brought the robot PROGRESS_M nearer in PROGRESS_S simulated seconds is given up: a search
 # stop Nav2 could not reach kept it backing up, spinning and replanning along one 2 m stretch for 490 s.
 PROGRESS_S, PROGRESS_M = 30.0, 0.25
+CANCEL_WAIT_S = 2.0
+DIRECT = "direct"
 
 
 class RosRobot(SimRobot):
@@ -41,6 +40,7 @@ class RosRobot(SimRobot):
         from geometry_msgs.msg import TwistStamped
         from nav2_msgs.action import DriveOnHeading, FollowPath, NavigateToPose, Spin
         from rclpy.action import ActionClient
+        from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
         from rclpy.executors import MultiThreadedExecutor
         from rclpy.parameter import Parameter
         from sensor_msgs.msg import LaserScan
@@ -60,15 +60,21 @@ class RosRobot(SimRobot):
         self.kinds = {"navigate_to_pose": NavigateToPose, "follow_path": FollowPath, "spin": Spin,
                       "drive_on_heading": DriveOnHeading}
         self.actions: dict[str, Any] = {}
-        # Direct motion (drive, express) enters Nav2's own command chain where its controller's does: the velocity
-        # smoother, then the collision monitor, which stops the robot short of anything in the way. Nothing reaches
-        # the wheels around that safety stop.
         self._twist = TwistStamped
-        self.cmd = self.node.create_publisher(TwistStamped, "/cmd_vel_nav", 10)
+        self.cmd = self.node.create_publisher(TwistStamped, WHEELS, 1)
+        selected = self.node.create_publisher(TwistStamped, SELECTED, 1)
+        self._motion = MotionGate(lambda: self.node.get_clock().now().nanoseconds,
+                                  lambda v, w, t: selected.publish(self._twist_msg(v, w, t)),
+                                  self._publish, ROS_CRUISE, TURN)
+        self._goal: NavGoal | None = None
         self._scan: Any = None
         self.last_chime: bytes | None = None
         self.on_chime: Any = None
         self._scan_bridge = SyntheticScanPublisher(self.node, publish=False) if synthetic_scan else None
+        motion_group = MutuallyExclusiveCallbackGroup()
+        self.node.create_subscription(TwistStamped, NAV, self._nav_command, 1, callback_group=motion_group)
+        self.node.create_subscription(TwistStamped, CHECKED, self._checked_command, 1, callback_group=motion_group)
+        self.node.create_timer(CONTROL_PERIOD, self._motion.expire, callback_group=motion_group)
         self.node.create_subscription(LaserScan, "/scan", lambda m: setattr(self, "_scan", m), 10)
         self._executor = MultiThreadedExecutor()
         self._executor.add_node(self.node)
@@ -76,7 +82,6 @@ class RosRobot(SimRobot):
         self._action_executor = MultiThreadedExecutor()
         self._action_executor.add_node(self._action_node)
         threading.Thread(target=self._action_executor.spin, daemon=True).start()
-        self._goal: Any = None
         self.t0 = None
         deadline, next_nudge = time.monotonic() + 300.0, time.monotonic() + 10.0  # Gazebo can take minutes
         while not self._read_pose():
@@ -158,40 +163,60 @@ class RosRobot(SimRobot):
     def _wait(self, seconds: float) -> None:
         end = self._now() + seconds
         while self._now() < end:
+            self._interrupts()
             time.sleep(0.01)
 
     def _step(self, v: float, w: float, dt: float = DT) -> None:
-        """One control period: say, listen, sleep and drive in the 2D world all advance time through this."""
-        self._interrupts()
-        if self._behaviour is not None and not v and not w:  # a background skill drives while the program waits
-            v, w = self._behaviour()
-        if self._scan_bridge is not None and v:
-            hazard = self._scan_bridge.hazards.get("front" if v > 0 else "rear")
-            if hazard is not None:
-                pitch = self._scan_bridge.tilts[-1][2] if self._scan_bridge.tilts else 0.0
-                if v < 0 and getattr(hazard, "kind", "") == "cliff":
-                    v, w = 0.0, 0.0
-                else:
-                    _, v, w, _ = self.body.check_proprioception(
-                        v, w, self.v_now, self.w_now, dt, pitch_rad=pitch, hazard=hazard)
-        if v or w or self.v_now or self.w_now:
-            self._publish(v, w)
-        self.v_now, self.w_now = v, w
-        self._wait(dt)
-        self._sync()
+        """Direct motion and background skills; Nav2 waits without running either."""
+        try:
+            self._interrupts()
+            if self._behaviour is not None and not v and not w:
+                v, w = self._behaviour()
+            with self._motion.lock:
+                self._interrupts()
+                if v or w:
+                    self._motion_available()
+                    self._motion.arm(DIRECT)
+                    self._motion.submit(DIRECT, v, w)
+                elif self._motion.owner == DIRECT:
+                    self._halt()
+            self._wait(dt)
+            self._sync()
+        except BaseException:
+            self._halt()
+            raise
 
-    def _publish(self, v: float, w: float) -> None:
+    def _twist_msg(self, v: float, w: float, stamp: int) -> Any:
         msg = self._twist()
-        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(stamp, 1_000_000_000)
         msg.header.frame_id = "base_link"
         msg.twist.linear.x, msg.twist.angular.z = float(v), float(w)
-        self.cmd.publish(msg)
+        return msg
+
+    def _publish(self, v: float, w: float) -> None:
+        if self._scan_bridge is not None and v:
+            hazard = self._scan_bridge.hazards.get("front" if v > 0 else "rear")
+            if getattr(hazard, "kind", "") == "cliff":
+                v = w = 0.0  # do not turn a cliff stop into motion toward the opposite side
+        self.v_now, self.w_now = v, w
+        self.cmd.publish(self._twist_msg(v, w, self.node.get_clock().now().nanoseconds))
+
+    @staticmethod
+    def _command(msg: Any) -> tuple[float, float, int]:
+        stamp = msg.header.stamp
+        return msg.twist.linear.x, msg.twist.angular.z, stamp.sec * 1_000_000_000 + stamp.nanosec
+
+    def _nav_command(self, msg: Any) -> None:
+        self._motion.submit(NAV, *self._command(msg))
+
+    def _checked_command(self, msg: Any) -> None:
+        self._motion.checked(*self._command(msg))
 
     def cancel(self) -> None:
-        super().cancel()
-        if self._goal is not None:
-            self._goal.cancel_goal_async()
-        self._publish(0.0, 0.0)
+        with self._motion.lock:
+            super().cancel()
+            if self._goal is not None:
+                self._goal.cancel()
 
     # ---- Nav2 actions -----------------------------------------------------------------------------------------
     def _check_goal(self, target: Object) -> None:
@@ -205,8 +230,23 @@ class RosRobot(SimRobot):
         if current.label != target.label or math.dist(current.position, target.position) > limit:
             raise TargetLost(f"stopped: the label or mapped footprint of {target.label} {target.id} changed")
 
+    def _motion_available(self) -> None:
+        self._retire_goal()
+        if self._goal is not None:
+            raise SafetyStop("Nav2 has not released the previous motion goal")
+
+    def _nav_tick(self, goal: NavGoal) -> None:
+        if goal.cancelled:
+            raise Preempted("stopped")
+        self._wait(DT)
+        self._sync()
+
     def _act(self, name: str, *, watch: Object | None = None, **fields: Any) -> None:
         """Send one action goal and wait for it, keeping the trace and the stop checks running meanwhile."""
+        self._interrupts()
+        with self._motion.lock:
+            self._motion_available()
+            self._halt()
         client = self.actions[name]
         if not client.wait_for_server(timeout_sec=10.0):
             from rclpy.action import ActionClient
@@ -222,27 +262,22 @@ class RosRobot(SimRobot):
             setattr(goal, key, value)
         if watch is not None:
             self._check_goal(watch)
-        sent = client.send_goal_async(goal)
+        with self._motion.lock:
+            self._interrupts()
+            self._motion_available()
+            pending = self._goal = NavGoal(client.send_goal_async(goal), self._motion.lock)
+            self._motion.arm(NAV)
         try:
-            while not sent.done():
-                self._step(0.0, 0.0)
-        except BaseException:
-            def cancel_when_accepted(future: Any) -> None:
-                accepted = future.result()
-                if accepted and accepted.accepted:
-                    accepted.cancel_goal_async()
-            sent.add_done_callback(cancel_when_accepted)
-            raise
-        handle = sent.result()
-        if not handle.accepted:
-            raise PathBlocked(f"{name} refused the goal")
-        self._goal, result = handle, handle.get_result_async()
-        next_check = 0.0
-        to = (fields["pose"].pose.position.x, fields["pose"].pose.position.y) if "pose" in fields else None
-        best, since = math.inf, self.t
-        try:
+            while not pending.sent.done():
+                self._nav_tick(pending)
+            result = pending.result_future()
+            if result is None:
+                raise PathBlocked(f"{name} refused the goal")
+            next_check = 0.0
+            to = (fields["pose"].pose.position.x, fields["pose"].pose.position.y) if "pose" in fields else None
+            best, since = math.inf, self.t
             while not result.done():
-                self._step(0.0, 0.0)
+                self._nav_tick(pending)
                 if watch is not None and time.monotonic() >= next_check:
                     self._check_goal(watch)
                     next_check = time.monotonic() + 0.2
@@ -252,25 +287,35 @@ class RosRobot(SimRobot):
                         best, since = gap, self.t
                     elif self.t - since > PROGRESS_S:
                         raise PathBlocked(f"no nearer to ({to[0]:.1f}, {to[1]:.1f}) in {PROGRESS_S:g} s")
+            self._interrupts()
+            if pending.cancelled:
+                raise Preempted("stopped")
+            outcome = result.result()
+            if outcome.status == CANCELED:
+                raise Preempted("stopped")
+            if outcome.status != DONE:
+                detail = getattr(outcome.result, "error_msg", "") or f"status {outcome.status}"
+                raise PathBlocked(f"{name} could not finish: {detail}")
         except BaseException as exc:
-            handle.cancel_goal_async()
-            self._publish(0.0, 0.0)
+            with self._motion.lock:
+                self._halt()
+                pending.cancel()
             if isinstance(exc, (TargetLost, PathBlocked)):
-                # Do not hand the model another motion turn while the old controller can still drive.
-                deadline = time.monotonic() + 2.0
-                while not result.done() and time.monotonic() < deadline:
+                deadline = time.monotonic() + CANCEL_WAIT_S
+                while not pending.terminal() and time.monotonic() < deadline:
                     time.sleep(0.02)
-                if not result.done():
+                if not pending.terminal():
                     raise SafetyStop(f"Nav2 did not confirm that the {name} goal it was told to drop had stopped") from exc
             raise
         finally:
+            with self._motion.lock:
+                self._halt()
+                pending.released = True
+                self._retire_goal()
+
+    def _retire_goal(self) -> None:
+        if self._goal is not None and self._goal.released and self._goal.terminal():
             self._goal = None
-        status = result.result().status
-        if status == CANCELED:
-            raise Preempted("stopped")
-        if status != DONE:
-            detail = getattr(result.result().result, "error_msg", "") or f"status {status}"
-            raise PathBlocked(f"{name} could not finish: {detail}")
 
     def _pose_msg(self, x: float, y: float, yaw: float) -> Any:
         from geometry_msgs.msg import PoseStamped
@@ -325,7 +370,7 @@ class RosRobot(SimRobot):
         if abs(err) > 0.22:
             try:
                 self._rotate(err)
-            except Exception:
+            except PathBlocked:
                 pass
 
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
@@ -393,17 +438,16 @@ class RosRobot(SimRobot):
                     raise  # stopped well short; within 10% (10 cm at most) is done, as in the 2D world
 
     def _halt(self) -> None:
-        """Every end of motion sends an explicit stop: Nav2's velocity smoother keeps the last command until its
-        timeout, so silence would let the robot coast on for up to a second (measured: about 25 cm after a drive)."""
         super()._halt()
-        if hasattr(self, "cmd"):
-            self._publish(0.0, 0.0)
+        if hasattr(self, "_motion"):
+            self._motion.stop()
 
     def stop(self) -> None:
         self._call("stop")
-        if self._goal is not None:
-            self._goal.cancel_goal_async()
-        self._halt()
+        with self._motion.lock:
+            self._halt()
+            if self._goal is not None:
+                self._goal.cancel()
 
     # ---- Sprocket v2 skills on ROS 2 --------------------------------------------------------------------------
     def express(self, posture: str, chime_kind: str = "", seconds: float = 0.6) -> None:
@@ -446,7 +490,8 @@ class RosRobot(SimRobot):
         return round(max(0.0, min(near) - RADIUS), 2) if near else 12.0
 
     def shutdown(self) -> None:
-        self._halt()
+        if hasattr(self, "_motion"):
+            self.cancel()
         for client in getattr(self, "actions", {}).values():
             try:
                 client.destroy()

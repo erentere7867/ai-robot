@@ -43,9 +43,18 @@ Brain board: **Arduino VENTUNO Q** (Qualcomm Dragonwing IQ-8275: 8-core Kryo CPU
 
 ---
 
-## 3. Layer 1: The Living Body Engine (`robot/body/controller.py` @ 30–50 Hz)
+## 3. Layer 1: The Living Body Engine (`robot/body/controller.py`)
 
-The Living Body Engine runs continuously at 30–50 Hz and blends goal pursuit, obstacle avoidance, social politeness, active vision, and lifelike motion.
+The full trajectory rollout below currently drives the 2D simulator at a 20 Hz simulated timestep.
+In ROS, Nav2 owns path following; the API owns direct motion such as gestures. Both use one velocity gate
+(`robot/ros/motion.py`): Nav2 and direct motion cannot own it at the same time. The gate sends only the active
+owner's command to Collision Monitor and accepts only fresh, matching replies for `/cmd_vel`. The base, not
+Nav2's velocity smoother, now limits acceleration. Stop closes the gate and sends zero before waiting on Nav2.
+A late goal response is canceled, and no new motion starts until that goal is terminal. The gate checks for
+missing replies at 40 Hz and sends zero once a checked command is more than 250 ms old in ROS time.
+
+The checked-in ROS wheel consumer is Habitat. There is no physical ROS-to-Ventuno bridge in this checkout, and
+physical stop timing has not been measured. This software stop is not a hardware e-stop.
 
 ### 3.1 Driverless-Car Trajectory Rollout & Scoring
 At every control tick while navigating toward a goal or moving track:
