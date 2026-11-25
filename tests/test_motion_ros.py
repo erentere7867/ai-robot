@@ -27,7 +27,7 @@ def wait_for(f, why, timeout=12):
 
 
 @pytest.mark.skipif(os.environ.get("RUN_ROS_MOTION_SMOKE") != "1", reason="requires an isolated ROS 2/Nav2 graph")
-def test_live_nav2_motion_handoff(tmp_path):
+def test_live_nav2_motion_handoff(tmp_path, monkeypatch):
     import rclpy
     from geometry_msgs.msg import Point, TransformStamped, TwistStamped
     from nav_msgs.msg import OccupancyGrid
@@ -102,6 +102,8 @@ def test_live_nav2_motion_handoff(tmp_path):
             wait_for(lambda: node.count_publishers(NAV) >= 2, "Nav2 nodes did not remap their command output")
             robot = RosRobot(Scene(10, 10, [], {}, start=Pose(0, 0, 0)), synthetic_scan=False)
             assert [pub.node_name for pub in node.get_publishers_info_by_topic(WHEELS)] == ["sprocket_api"]
+            stale = node.create_publisher(TwistStamped, CHECKED, 1)
+            wait_for(lambda: stale.get_subscription_count() >= 2, "checked topic did not discover the motion gate")
             errors = []
 
             def drive():
@@ -120,11 +122,18 @@ def test_live_nav2_motion_handoff(tmp_path):
             assert isinstance(errors[0], Preempted), errors
             wait_for(lambda: wheels[-1][1] == (0.0, 0.0), "wheels did not receive stop")
             tail = len(wheels)
-            checked_before = checked.count(moving)
-            stale = node.create_publisher(TwistStamped, CHECKED, 1)
-            wait_for(lambda: stale.get_subscription_count() > 0, "checked topic missing")
-            stale.publish(robot._twist_msg(*moving))
-            wait_for(lambda: checked.count(moving) > checked_before, "the late reply was not delivered")
+            replay = (moving[0] / 2, moving[1], moving[2])
+            replay_seen = threading.Event()
+            check = robot._motion.checked
+
+            def observe_replay(v, w, stamp):
+                check(v, w, stamp)
+                if (v, w, stamp) == replay:
+                    replay_seen.set()
+
+            monkeypatch.setattr(robot._motion, "checked", observe_replay)
+            stale.publish(robot._twist_msg(*replay))
+            assert replay_seen.wait(2.0), "the motion gate did not receive the late reply"
             wait_for(lambda: robot._goal is None or robot._goal.terminal(), "Nav2 never confirmed stop")
             time.sleep(0.1)
             assert all(raw[:2] == (0.0, 0.0) for raw, _ in wheels[tail:]), wheels[tail:]
