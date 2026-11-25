@@ -31,6 +31,7 @@ def ventuno_mcu(tmp_path_factory):
 @pytest.mark.parametrize("scenario", [
     "e-stop", "left bumper", "right bumper", "invalid distance", "invalid status", "missing targets",
     "insufficient coverage", "read failure", "command timeout", "stalled control", "independent safety pins",
+    "late range frame",
 ])
 def test_ventuno_motor_cutoff(ventuno_mcu, scenario):
     subprocess.run([str(ventuno_mcu), scenario], check=True)

@@ -84,7 +84,7 @@ float targetV = 0, targetW = 0;
 uint32_t lastCmdMs = 0;
 int headDdeg = 0;
 
-// The timer ISR and the sketch share only the motor gate, deadline timestamps and hard-stop latch.
+// The timer ISR and sketch share the motor gate, deadlines and hard-stop latch under this lock.
 struct k_spinlock safetyLock;
 bool estopCmd = false, motorsEnabled = false;
 uint32_t lastDriveMs = 0;
@@ -127,12 +127,18 @@ void setMotorGate(bool enable) {
   motorsEnabled = enable;
 }
 
+bool rangeFresh(uint32_t now) {
+  return rangeValid && now - lastRangeMs < RANGE_TIMEOUT_MS;
+}
+
 void checkSafety(uint32_t now) {
   latchedFlags |= physicalFlags();
   if (estopCmd) latchedFlags |= 4;
-  if (motorsEnabled && (now - lastCmdMs >= WATCHDOG_MS || now - lastDriveMs >= CONTROL_WATCHDOG_MS))
-    latchedFlags |= 2048;
-  if (latchedFlags && motorsEnabled) setMotorGate(false);
+  if (motorsEnabled) {
+    if (!rangeFresh(now)) latchedFlags |= 256;
+    if (now - lastCmdMs >= WATCHDOG_MS || now - lastDriveMs >= CONTROL_WATCHDOG_MS) latchedFlags |= 2048;
+    if (latchedFlags) setMotorGate(false);
+  }
 }
 
 void safetyTick(struct k_timer *) {
@@ -141,10 +147,6 @@ void safetyTick(struct k_timer *) {
   k_spin_unlock(&safetyLock, key);
 }
 K_TIMER_DEFINE(safetyTimer, safetyTick, nullptr);
-
-bool rangeFresh(uint32_t now) {
-  return rangeValid && now - lastRangeMs < RANGE_TIMEOUT_MS;
-}
 
 bool motionBlocked(uint32_t now) {
   checkSafety(now);
@@ -410,18 +412,19 @@ void readRange() {
       stepUp |= deltaZ >= TORQUE_BOOST_DZ_MM && deltaZ <= TRAVERSABLE_DZ_MM;
     }
   }
+  auto key = k_spin_lock(&safetyLock);
+  uint32_t now = k_uptime_get_32();
+  if (cliff) latchedFlags |= 2;
+  checkSafety(now);
+  bool expired = rangeValid && !rangeFresh(now);
   rangeValid = validZones >= MIN_VALID_ZONES;
+  if (rangeValid) lastRangeMs = now;
+  k_spin_unlock(&safetyLock, key);
+
   minRangeMm = rangeValid ? closest : -1;
   cliffDetected = cliff;
   torqueBoostActive = rangeValid && stepUp;
-  if (cliff) {
-    auto key = k_spin_lock(&safetyLock);
-    latchedFlags |= 2;
-    checkSafety(k_uptime_get_32());
-    k_spin_unlock(&safetyLock, key);
-  }
-  if (rangeValid) lastRangeMs = k_uptime_get_32();
-  if (!rangeValid || cliff) haltAll();
+  if (expired || !rangeValid || cliff) haltAll();
 }
 
 void loop() {

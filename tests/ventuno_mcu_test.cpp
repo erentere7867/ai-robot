@@ -68,6 +68,7 @@ struct VL53L5CX_ResultsData {
 };
 VL53L5CX_ResultsData frame{};
 bool frameReady = false, readOk = true;
+void (*duringRangeRead)() = nullptr;
 struct SparkFun_VL53L5CX {
   bool begin() { return true; }
   void setResolution(int) {}
@@ -75,6 +76,7 @@ struct SparkFun_VL53L5CX {
   void startRanging() {}
   bool isDataReady() { return frameReady; }
   bool getRangingData(VL53L5CX_ResultsData *data) {
+    if (duringRangeRead) duringRangeRead();
     frameReady = false;
     *data = frame;
     return readOk;
@@ -169,6 +171,35 @@ int main(int argc, char **argv) {
     advance(5);
     loop();
     assertStopped();
+    onCmdVel(60, 0);
+    advance(5);
+    loop();
+    assertDriving();
+  } else if (scenario == "late range frame") {
+    while (nowMs - lastRangeMs < 240) {
+      advance(5);
+      ticksL++;
+      ticksR++;
+      loop();
+    }
+    assertDriving();
+    duringRangeRead = [] {
+      advance(9);
+      assertDriving();
+      advance(1);
+      assert(pins[PIN_STBY] == LOW);
+      assert(pwm[PIN_L_PWM] > 0 && pwm[PIN_R_PWM] > 0);
+    };
+    publishFrame();
+    duringRangeRead = nullptr;
+    assertStopped();
+    assert(readFlags() & 256);
+    assert(!(readFlags() & 2048));
+    onCmdVel(60, 0);
+    advance(5);
+    loop();
+    assertStopped();
+    assert(onResetFaults());
     onCmdVel(60, 0);
     advance(5);
     loop();
