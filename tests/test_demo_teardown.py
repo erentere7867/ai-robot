@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from robot.agent.api import SafetyStop
 from robot.interfaces import demo, voice
 from robot.interfaces.live import Live
 from robot.ros.real import RealRobot
@@ -17,7 +18,7 @@ class ApartmentRobot(RealRobot):
         self.shutdown = Mock()
 
 
-def round_trips(monkeypatch, *, fail=False):
+def round_trips(monkeypatch, *, fail=False, unconfirmed_stop=False):
     robots = []
     home = SimpleNamespace(reset=Mock(), close=Mock())
 
@@ -48,10 +49,20 @@ def round_trips(monkeypatch, *, fail=False):
     def swap(live, agent, holder, new_scene):
         counts.append(len(robots))
         if fail:
+            new_scene("living room")
+            previous = holder.sim
             home.reset.side_effect = RuntimeError("load failed")
             with pytest.raises(RuntimeError, match="load failed"):
                 new_scene("3D apartment")
-            assert holder.sim is robots[0]
+            assert holder.sim is previous
+        elif unconfirmed_stop:
+            robots[0].shutdown.side_effect = SafetyStop("restart Nav2")
+            for scene in ("3D apartment", "living room"):
+                with pytest.raises(RuntimeError, match="Restart the demo and Nav2"):
+                    new_scene(scene)
+                assert holder.sim is holder.home is None
+            home.reset.assert_called_once_with()
+            agent.forget.assert_not_called()
         else:
             for _ in range(2):
                 new_scene("living room")
@@ -76,10 +87,14 @@ def test_round_trips_tear_down_outgoing_robots_but_not_shared_home(monkeypatch):
 
 
 def test_failed_swap_keeps_current_robot_alive(monkeypatch):
-    robots, counts = round_trips(monkeypatch, fail=True)
-    assert counts == [1, 1]
-    robots[0].perception.stop.assert_not_called()
-    robots[0].shutdown.assert_not_called()
+    _, counts = round_trips(monkeypatch, fail=True)
+    assert counts == [1, 0]
+
+
+def test_scene_swap_requires_restart_if_previous_goal_is_unconfirmed(monkeypatch):
+    robots, counts = round_trips(monkeypatch, unconfirmed_stop=True)
+    assert counts == [1, 0]
+    robots[0].shutdown.assert_called_once_with()
 
 
 if __name__ == "__main__":
