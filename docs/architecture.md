@@ -48,10 +48,12 @@ Brain board: **Arduino VENTUNO Q** (Qualcomm Dragonwing IQ-8275: 8-core Kryo CPU
 The full trajectory rollout below currently drives the 2D simulator at a 20 Hz simulated timestep.
 In ROS, Nav2 owns path following; the API owns direct motion such as gestures. Both use one velocity gate
 (`robot/ros/motion.py`): Nav2 and direct motion cannot own it at the same time. The gate sends only the active
-owner's command to Collision Monitor and accepts only fresh, matching replies for `/cmd_vel`. The base, not
+owner's command to Collision Monitor and accepts only fresh, matching replies for `/sprocket/cmd_vel_wheels`.
+Nav2 docking and following publish on `/cmd_vel`, which the base does not consume. The base, not
 Nav2's velocity smoother, now limits acceleration. Stop closes the gate and sends zero before waiting on Nav2.
 A late goal response is canceled, and no new motion starts until that goal is terminal. The gate checks for
-missing replies at 40 Hz and sends zero once a checked command is more than 250 ms old in ROS time.
+missing replies at 40 Hz and sends zero once a checked command is more than 250 ms old at its source in ROS time.
+A ROS clock rewind requires restarting the motion process; an unconfirmed goal at shutdown requires restarting Nav2.
 
 The checked-in ROS wheel consumer is Habitat. There is no physical ROS-to-Ventuno bridge in this checkout, and
 physical stop timing has not been measured. This software stop is not a hardware e-stop.

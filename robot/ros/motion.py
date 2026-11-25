@@ -12,7 +12,7 @@ from typing import Any
 NAV = "/cmd_vel_nav"
 SELECTED = "/sprocket/cmd_vel_selected"
 CHECKED = "/sprocket/cmd_vel_checked"
-WHEELS = "/cmd_vel"
+WHEELS = "/sprocket/cmd_vel_wheels"  # Nav2 docking/following can still publish to /cmd_vel
 
 DONE, CANCELED, ABORTED = 4, 5, 6  # action_msgs/GoalStatus
 # Measured in ROS time, like the Nav2 controller and the simulated base.
@@ -42,13 +42,16 @@ class MotionGate:
         self._clock = now
         return now
 
-    def arm(self, owner: str) -> None:
+    def arm(self, owner: str) -> bool:
         with self.lock:
             now = self._time()
-            if not self._clock_fault and owner != self.owner:
+            if self._clock_fault:
+                return False
+            if owner != self.owner:
                 self.stop()
                 self.owner = owner
                 self._source_stamp = now
+            return True
 
     def stop(self) -> None:
         with self.lock:

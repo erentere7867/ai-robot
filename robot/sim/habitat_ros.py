@@ -1,7 +1,7 @@
 """Sprocket's hardware in a Habitat home, on ROS: what the real robot's drivers publish, made from the simulated world.
 
-The real robot has camera drivers (three colour cameras), an MCU (the motor controller that takes /cmd_vel, wheel
-odometry, the ToF grids) and an IMU. This node stands in for those and nothing else: the robot's own software (the
+The real robot has camera drivers (three colour cameras), an MCU (motor commands, wheel odometry, the ToF grids) and
+an IMU. This node stands in for those and nothing else: the robot's own software (the
 EKF, SLAM or AMCL, Nav2, the depth node, perception, the agent) runs on top unchanged and never sees the truth.
 
 It owns the clock. Simulated time runs at `rtf` times wall-clock time, so that software running slower here than on

@@ -118,7 +118,7 @@ def test_fault_closes_gate(motion, fault):
         clock.now = 0
         gate.expire()
         clock.now = 2_000_000_000
-        gate.arm("direct")
+        assert not gate.arm("direct")
     assert gate.owner is None and wheels[-1] == (0.0, 0.0)
 
 

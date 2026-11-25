@@ -176,7 +176,7 @@ class RosRobot(SimRobot):
                 self._interrupts()
                 if v or w:
                     self._motion_available()
-                    self._motion.arm(DIRECT)
+                    self._arm_motion(DIRECT)
                     self._motion.submit(DIRECT, v, w)
                 elif self._motion.owner == DIRECT:
                     self._halt()
@@ -235,6 +235,10 @@ class RosRobot(SimRobot):
         if self._goal is not None:
             raise SafetyStop("Nav2 has not released the previous motion goal")
 
+    def _arm_motion(self, owner: str) -> None:
+        if not self._motion.arm(owner):
+            raise SafetyStop("ROS time went backwards; restart the motion process before driving again")
+
     def _nav_tick(self, goal: NavGoal) -> None:
         if goal.cancelled:
             raise Preempted("stopped")
@@ -265,8 +269,12 @@ class RosRobot(SimRobot):
         with self._motion.lock:
             self._interrupts()
             self._motion_available()
-            pending = self._goal = NavGoal(client.send_goal_async(goal), self._motion.lock)
-            self._motion.arm(NAV)
+            self._arm_motion(NAV)
+            try:
+                pending = self._goal = NavGoal(client.send_goal_async(goal), self._motion.lock)
+            except BaseException:
+                self._halt()
+                raise
         try:
             while not pending.sent.done():
                 self._nav_tick(pending)
