@@ -22,6 +22,7 @@ from pathlib import Path
 import yaml
 
 from robot.ros.model import BODY_R, EKF, urdf
+from robot.ros.motion import CHECKED, SELECTED
 
 NAV2 = Path("/opt/ros/lyrical/share/nav2_bringup")
 SLAM_DEFAULTS = Path("/opt/ros/lyrical/share/slam_toolbox/config/mapper_params_online_sync.yaml")
@@ -70,11 +71,10 @@ def params(out: Path) -> Path:
     ctrl = p["controller_server"]["ros__parameters"]
     ctrl["FollowPath"].update(vx_max=CRUISE, wz_max=TURN)
     ctrl["transform_tolerance"] = 1.0
-    smoother = p["velocity_smoother"]["ros__parameters"]
-    smoother["max_velocity"], smoother["min_velocity"] = [CRUISE, 0.0, TURN], [-0.25, 0.0, -TURN]
     p["behavior_server"]["ros__parameters"]["transform_tolerance"] = 1.0
     cm = p["collision_monitor"]["ros__parameters"]
-    cm["transform_tolerance"], cm["source_timeout"] = 1.0, 5.0
+    cm.update(transform_tolerance=1.0, source_timeout=1.0, cmd_vel_in_topic=SELECTED, cmd_vel_out_topic=CHECKED,
+              enable_stamped_cmd_vel=True)
     slam = yaml.safe_load(SLAM_DEFAULTS.read_text())["slam_toolbox"]["ros__parameters"]
     # A cell is wall when this share of the beams through it end there: slam_toolbox's 0.1 suits a lidar, whose
     # rare stray reading is noise; a depth network's wrong readings come and go from frame to frame, a real wall's stay.
