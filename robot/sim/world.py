@@ -565,6 +565,7 @@ class SimRobot:
         """Execute waypoints as a kinematic test double for Nav2's FollowPath."""
         progress = Progress((self.x, self.y), self.t, 0.05, STALL_S)
         idx = 0
+        self.held = False
         while idx < len(points):
             self._interrupts()
             tx, ty = points[idx]
@@ -597,6 +598,7 @@ class SimRobot:
                 advance = self._clearance(1.0, yaw=next_yaw) >= STOP_ZONE
             if advance:
                 idx += 1
+                self.held = False
                 progress.stalled((self.x, self.y), self.t, advanced=True)
                 continue
 

@@ -42,6 +42,15 @@ def test_sim_orbit_continues_past_a_held_waypoint_without_contact():
     assert robot.trace.bumps == 0
 
 
+def test_sim_drive_path_attempts_short_final_leg_after_a_held_waypoint():
+    desk = Thing("desk", 0, 0, radius=0.5)
+    robot = SimRobot(Scene(10, 10, [desk], {}, start=Pose(1.5, 0, 90)))
+    final = (0.85, 0.3)
+    robot.drive_path([(0.85, 0), final])
+    assert math.dist((robot.x, robot.y), final) <= 0.08
+    assert robot.trace.bumps == 0
+
+
 @pytest.mark.parametrize("side", [-1, 1])
 def test_body_drives_through_doorway_from_off_center_without_contact(side):
     robot = SimRobot(two_rooms(start=Pose(-0.22, side * 0.36, 0)))
