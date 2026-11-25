@@ -86,13 +86,15 @@ def test_come_back_requires_arrival_before_return_and_a_still_finish(path, arriv
     assert problem in actual if problem else not actual
 
 
-def test_tv_approach_and_return_accept_the_same_monitor_destination():
+@pytest.mark.parametrize(("outbound_x", "passed"), [(1.8, False), (3.8, True), (5.8, True)])
+def test_tv_approach_and_return_accept_only_tv_or_stand(outbound_x, passed):
     monitor = {"id": 2, "label": "monitor", "x": 2.0, "y": 0.0, "radius": 0.3}
-    path = [(0, 0, 0, 0), (2, 1.8, 0, 0), (4, 0, 0, 0), (5, 0, 0, 0)]
-    objects = [TV, monitor]
+    stand = {"id": 3, "label": "tv stand", "x": 6.0, "y": 0.0, "radius": 0.3}
+    path = [(0, 0, 0, 0), (2, outbound_x, 0, 0), (4, 0, 0, 0), (5, 0, 0, 0)]
+    objects = [TV, monitor, stand]
     start = {"pose": path[0][1:], "ends": [path[1][1:], path[-1][1:]]}
-    assert not TASK["N5"].problem(referee(path[:2], objects=objects), start)
-    assert not TASK["R2"].problem(referee(path, objects=objects), start)
+    assert (not TASK["N5"].problem(referee(path[:2], objects=objects), start)) is passed
+    assert (not TASK["R2"].problem(referee(path, objects=objects), start)) is passed
 
 
 @pytest.mark.parametrize(("path", "problem"), [

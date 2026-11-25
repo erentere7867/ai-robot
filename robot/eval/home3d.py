@@ -128,10 +128,6 @@ def things(sim: Referee, label: str) -> list[TruthThing]:
     return [t for t in sim.things.values() if t.label == label or label == "tv" and t.label in ("tv", "tv stand")]
 
 
-def tv_destinations(sim: Referee) -> list[TruthThing]:
-    return things(sim, "tv") + things(sim, "monitor")
-
-
 def gap(source: tuple[float, float] | TruthThing, t: TruthThing) -> float:
     """Gap to a convex simulator hull; segments need a lengthwise axis to detect collinear separation."""
     if isinstance(source, TruthThing):
@@ -350,7 +346,7 @@ TASKS = [
     Task("N4", ("Go to the table that is closest to the sofa.",),
          lambda s, st: ends_near(s, nearest(things(s, "table"), things(s, "sofa")[0])),
          ("table", "sofa")),
-    Task("N5", ("Go to the TV.",), lambda s, st: ends_near(s, tv_destinations(s), 0.9), ("tv",)),
+    Task("N5", ("Go to the TV.",), lambda s, st: ends_near(s, things(s, "tv"), 0.9), ("tv",)),
     Task("N6", ("Go to the sofa, then to the TV, then come back here.",),
          lambda s, st: visited_in_order(s, [things(s, "sofa")[0], things(s, "tv")[0]]) and moved(s, st) < 0.8,
          ("sofa", "tv")),
@@ -383,7 +379,7 @@ TASKS = [
     # two requests in a row: context and memory
     Task("R1", ("Remember that my keys are on the sofa.", "Where are my keys?"),
          lambda s, st: mentions(said(s, last_only=True), "sofa")),
-    Task("R2", ("Go to the TV.", "Come back."), lambda s, st: out_and_back(s, st, tv_destinations(s), 0.9),
+    Task("R2", ("Go to the TV.", "Come back."), lambda s, st: out_and_back(s, st, things(s, "tv"), 0.9),
          ("tv",), observe_after=2 * STOP_DWELL),
     Task("R3", ("Go to the sofa.", "Now turn around."),
          lambda s, st: ends_near(s, things(s, "sofa"), 1.2) and abs(wrap(end(s)[2] - st["ends"][0][2])) >= 2.5,
