@@ -24,6 +24,16 @@ def test_nearest_table_task_requires_ending_near_the_table_nearest_the_start():
         assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
 
 
+def test_nearest_table_task_uses_the_footprint_instead_of_its_longest_half_side():
+    task = next(task for task in TASKS if task.id == "T1")
+    table = {"id": 1, "label": "table", "x": 0.0, "y": 0.0, "radius": 1.0,
+             "footprint": ((-0.2, -1.0), (0.2, -1.0), (0.2, 1.0), (-0.2, 1.0))}
+    home = SimpleNamespace(truth={"objects": [table]}, path=[(0.0, 2.0, 0.0, 0.0)])
+    for (x, y), passed in [((1.1, 0.0), False), ((0.9, 0.0), True), ((1.0, 1.3), False), ((0.0, 0.0), True)]:
+        home.path[1:] = [(5.0, x, y, 0.0)]
+        assert task.check(Referee(home), {"xy": (2.0, 0.0)}) is passed
+
+
 def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):
     nx, ny = 40, 20  # 4 x 2 m at 0.1 m
     truth = {"width": 4.0, "height": 2.0, "res": 0.1, "shape": (nx, ny),

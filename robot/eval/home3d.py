@@ -28,6 +28,7 @@ from typing import Any
 from robot.agent.api import wrap
 from robot.eval.suite import end, rocks, turned
 from robot.sim.stack import Home
+from robot.sim.world import Thing, Trace
 
 TUNE = ("apt_0", "v3_sc0_staging_00")  # the layouts tasks and harness are tuned on; hold others out
 WORDS = {"sofa": ("sofa", "couch"), "bike": ("bike", "bicycle"), "tv": ("tv", "television", "monitor", "screen")}
@@ -45,13 +46,17 @@ class Task:
     needs: tuple[str, ...] = ()  # labels the layout must have, or the task is skipped there
 
 
+@dataclass
+class TruthThing(Thing):
+    footprint: tuple[tuple[float, float], ...] = ()
+
+
 class Referee:
     """The run as the truth saw it: the home's objects, where the body really went, and what the robot said."""
 
     def __init__(self, home: Home, robot: Any = None, since: int = 0) -> None:
-        from robot.sim.world import Thing, Trace
-
-        self.things = {o["id"]: Thing(o["label"], o["x"], o["y"], o["radius"], solid=False, id=o["id"])
+        self.things = {o["id"]: TruthThing(o["label"], o["x"], o["y"], o["radius"], solid=False, id=o["id"],
+                                           footprint=tuple(o.get("footprint", ())))
                        for o in home.truth["objects"]}
         t0 = home.path[since][0] if since < len(home.path) else 0.0
         self.trace = Trace(poses=[(t - t0, x, y, yaw) for t, x, y, yaw in home.path[since:]])
@@ -116,8 +121,19 @@ def things(sim: Referee, label: str) -> list[Any]:
     return [t for t in sim.things.values() if t.label == label or label == "tv" and t.label in ("tv", "tv stand")]
 
 
-def gap(xy: tuple[float, float], t: Any) -> float:
-    return math.dist(xy, (t.x, t.y)) - t.radius
+def gap(xy: tuple[float, float], t: TruthThing) -> float:
+    points = t.footprint
+    if len(points) < 2:
+        return math.dist(xy, (t.x, t.y)) - t.radius
+    x, y = xy
+    inside, closest = len(points) >= 3, math.inf
+    for (ax, ay), (bx, by) in zip(points, (*points[1:], points[0]), strict=True):
+        dx, dy = bx - ax, by - ay
+        px, py = x - ax, y - ay
+        inside &= dx * py >= dy * px
+        u = max(0.0, min(1.0, (px * dx + py * dy) / (dx * dx + dy * dy)))
+        closest = min(closest, math.hypot(px - u * dx, py - u * dy))
+    return 0.0 if inside else closest
 
 
 def ends_near(sim: Referee, ts: list[Any] | Any, margin: float = 0.75) -> bool:
