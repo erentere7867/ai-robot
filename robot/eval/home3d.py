@@ -47,9 +47,6 @@ class Task:
     needs: tuple[str, ...] = ()  # labels the layout must have, or the task is skipped there
     observe_after: float = 0.0
 
-    def check(self, referee: Referee, start: dict) -> bool:
-        return not self.problem(referee, start)
-
     def problem(self, referee: Referee, start: dict) -> str:
         result = self.criterion(referee, start)
         return result if isinstance(result, str) else "" if result else "task criterion not met"
