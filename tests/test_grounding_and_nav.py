@@ -7,6 +7,7 @@ from concurrent.futures import Future
 from threading import Lock
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -28,6 +29,25 @@ def _make_scene(things: list[Thing] | None = None) -> Scene:
         rooms={"lounge": (-4.0, -4.0, 4.0, 4.0)},
         start=Pose(0.0, 0.0, 0.0),
     )
+
+
+def test_follow_waits_for_the_next_plan_when_a_visible_person_is_across_a_narrow_gap():
+    person = Thing("person", 2.5, 0.0)
+    scene = _make_scene([person])
+    scene.walls = [((1.0, -5.0), (1.0, -0.15)), ((1.0, 0.15), (1.0, 5.0))]
+    sim = SimRobot(scene)
+    assert person in sim._visible()
+    assert sim._plan((person.x, person.y), 1.0) is None
+    sim._plan = Mock(wraps=sim._plan)
+    control = sim._follower(person, 1.0)
+
+    assert control() == (0.0, 0.0)
+    sim.t += 0.25
+    assert control() == (0.0, 0.0)
+    assert sim._plan.call_count == 1
+    sim.t += 0.25
+    assert control() == (0.0, 0.0)
+    assert sim._plan.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1237,4 +1257,3 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     perc.tracker.tracks[25].present = True
     out_present = perc.render_annotated_view("front_camera", 640, 360, 5.0)
     assert out_present is not None and int(out_present.sum()) > 0
-

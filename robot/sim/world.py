@@ -996,12 +996,14 @@ class SimRobot:
                 state["route"] = []
                 return (-0.15 if d < distance - 0.3 else 0.0), 2.5 * wrap(math.atan2(p[1] - self.y, p[0] - self.x)
                                                                           - self.yaw)
-            if self.t >= state["replan"] or not state["route"]:
+            if self.t >= state["replan"]:
                 state["route"], state["replan"] = self._plan(p, distance) or [], self.t + 0.5
             route = state["route"]
             while route and math.dist(route[0], (self.x, self.y)) < 0.2:
                 route.pop(0)
-            tx, ty = route[0] if route else p
+            if not route:
+                return 0.0, 0.0
+            tx, ty = route[0]
             err = wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw)
             return (min(CRUISE, 0.8 * (d - distance)) if abs(err) < 0.7 else 0.0), 2.5 * err
         return control
