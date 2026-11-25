@@ -172,10 +172,11 @@ task), and 9/10 versus 8/10 on a small 3D set. The original 3D audit scored:
 | `audit5` | 23/27 | 25/27 | 48/54 |
 | `audit6` | 23/27 | 24/27 | 47/54 |
 
-`audit2` and `audit3` were interrupted by a server outage. Those runs used simulator object labels, a separate
-path follower and cameras 12 cm too high, so they cannot be compared to the real-stack baseline. `real1`
-scored 19/27 in `apt_0` (169 model calls, 751 s of model time, median 4.1 s per call). Four of its eight
-failures involved an ID disappearing between calls; merged IDs were subsequently resolved to the surviving track.
+`audit2` and `audit3` were interrupted by a server outage. Every audit above, completed or interrupted, used
+simulator object labels, a separate path follower and cameras 12 cm too high, so none is comparable to the
+real-stack baseline `real1`. It scored 19/27 in `apt_0` (169 model calls, 751 s of model time, median 4.1 s per
+call). Four of its eight failures involved an ID disappearing between calls; merged IDs were subsequently
+resolved to the surviving track.
 
 Lessons from those runs:
 
