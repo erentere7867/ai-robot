@@ -50,6 +50,34 @@ def test_nearest_object_tasks_choose_the_closest_edge_not_the_closest_centre(tas
         assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
 
 
+def _rect(i, label, x, y, half_x, half_y):
+    return {"id": i, "label": label, "x": x, "y": y, "radius": max(half_x, half_y),
+            "footprint": ((x - half_x, y - half_y), (x + half_x, y - half_y),
+                          (x + half_x, y + half_y), (x - half_x, y + half_y))}
+
+
+@pytest.mark.parametrize("task_id", ["N4", "P1"])
+def test_nearest_table_to_sofa_uses_both_footprints(task_id):
+    task = next(task for task in TASKS if task.id == task_id)
+    objects = [_rect(1, "sofa", 0.0, 0.0, 2.0, 0.2), _rect(2, "table", 0.0, 1.5, 0.2, 0.2),
+               _rect(3, "table", 2.5, 0.0, 0.2, 0.2)]
+    home = SimpleNamespace(truth={"objects": objects}, path=[(0.0, 0.0, 0.0, 0.0)])
+    for (x, y), passed in [((0.0, 0.8), False), ((2.2, 0.0), True)]:
+        home.path[1:] = [(5.0, x, y, 0.0)]
+        assert task.check(Referee(home), {"xy": (0.0, 0.0)}) is passed
+
+
+@pytest.mark.parametrize("task_id", ["Q4", "C2"])
+def test_sofa_vs_tv_uses_footprints_not_centres(task_id):
+    task = next(task for task in TASKS if task.id == task_id)
+    objects = [_rect(1, "sofa", 2.3, 0.0, 1.9, 0.2), _rect(2, "tv stand", 0.0, 1.0, 0.2, 0.1)]
+    home = SimpleNamespace(truth={"objects": objects}, path=[(0.0, 0.0, 0.0, 0.0)])
+    for label, (x, y), passed in [("TV", (0.0, 1.0), False), ("sofa", (2.3, 0.0), True)]:
+        home.path[1:] = [(5.0, x, y, 0.0)]
+        referee = Referee(home, SimpleNamespace(trace=Trace(said=[(5.0, f"The {label} is closer.")])))
+        assert task.check(referee, {"xy": (0.0, 0.0)}) is passed
+
+
 def test_a_task_page_shows_the_map_the_turns_and_what_was_false(tmp_path):
     nx, ny = 40, 20  # 4 x 2 m at 0.1 m
     truth = {"width": 4.0, "height": 2.0, "res": 0.1, "shape": (nx, ny),

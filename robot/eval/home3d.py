@@ -117,15 +117,32 @@ def mentions(text: str, label: str) -> bool:
     return any(re.search(rf"\b{re.escape(w)}", text) for w in WORDS.get(label, (label,)))
 
 
-def things(sim: Referee, label: str) -> list[Any]:
+def things(sim: Referee, label: str) -> list[TruthThing]:
     return [t for t in sim.things.values() if t.label == label or label == "tv" and t.label in ("tv", "tv stand")]
 
 
-def gap(xy: tuple[float, float], t: TruthThing) -> float:
+def gap(source: tuple[float, float] | TruthThing, t: TruthThing) -> float:
+    """Distance to the projected footprint from a point or another footprint; zero when they overlap."""
+    if isinstance(source, TruthThing):
+        a, b = source.footprint, t.footprint
+        if len(a) < 2:
+            return max(0.0, gap((source.x, source.y), t) - source.radius)
+        if len(b) < 2:
+            return gap(t, source)
+        for polygon in (a, b):
+            for (ax, ay), (bx, by) in zip(polygon, (*polygon[1:], polygon[0]), strict=True):
+                dx, dy = bx - ax, by - ay
+                axes = ((-dy, dx), (dx, dy)) if len(polygon) == 2 else ((-dy, dx),)
+                for nx, ny in axes:
+                    a_proj = [nx * x + ny * y for x, y in a]
+                    b_proj = [nx * x + ny * y for x, y in b]
+                    if max(a_proj) < min(b_proj) or max(b_proj) < min(a_proj):
+                        return min(*(gap(p, t) for p in a), *(gap(p, source) for p in b))
+        return 0.0
     points = t.footprint
     if len(points) < 2:
-        return math.dist(xy, (t.x, t.y)) - t.radius
-    x, y = xy
+        return max(0.0, math.dist(source, (t.x, t.y)) - t.radius)
+    x, y = source
     inside, closest = len(points) >= 3, math.inf
     for (ax, ay), (bx, by) in zip(points, (*points[1:], points[0]), strict=True):
         dx, dy = bx - ax, by - ay
@@ -141,8 +158,8 @@ def ends_near(sim: Referee, ts: list[Any] | Any, margin: float = 0.75) -> bool:
     return any(gap((x, y), t) <= margin for t in (ts if isinstance(ts, list) else [ts]))
 
 
-def nearest(ts: list[TruthThing], xy: tuple[float, float]) -> TruthThing:
-    return min(ts, key=lambda t: gap(xy, t))
+def nearest(ts: list[TruthThing], source: tuple[float, float] | TruthThing) -> TruthThing:
+    return min(ts, key=lambda t: gap(source, t))
 
 
 def visited_in_order(sim: Referee, targets: list[Any], margin: float = 0.75) -> bool:
@@ -201,18 +218,12 @@ def between(sim: Referee, a: str, b: str, margin: float = 1.0) -> bool:
     one to the other rather than off beyond either."""
     x, y, _ = end(sim)
     for ta in things(sim, a):
-        tb = nearest(things(sim, b), (ta.x, ta.y))
+        tb = nearest(things(sim, b), ta)
         dx, dy = tb.x - ta.x, tb.y - ta.y
         along = ((x - ta.x) * dx + (y - ta.y) * dy) / max(1e-6, dx * dx + dy * dy)
         if gap((x, y), ta) <= margin and gap((x, y), tb) <= margin and 0.0 < along < 1.0:
             return True
     return False
-
-
-def _closer(sim: Referee, start: dict, a: str, b: str) -> str:
-    da = min(math.dist((t.x, t.y), start["xy"]) for t in things(sim, a))
-    db = min(math.dist((t.x, t.y), start["xy"]) for t in things(sim, b))
-    return a if da <= db else b
 
 
 TASKS = [
@@ -230,7 +241,7 @@ TASKS = [
     Task("N3", ("Go to the nearest chair.",),
          lambda s, st: ends_near(s, nearest(things(s, "chair"), st["xy"])), ("chair",)),
     Task("N4", ("Go to the table that is closest to the sofa.",),
-         lambda s, st: ends_near(s, nearest(things(s, "table"), (things(s, "sofa")[0].x, things(s, "sofa")[0].y))),
+         lambda s, st: ends_near(s, nearest(things(s, "table"), things(s, "sofa")[0])),
          ("table", "sofa")),
     Task("N5", ("Go to the TV.",), lambda s, st: ends_near(s, things(s, "tv") + things(s, "monitor"), 0.9), ("tv",)),
     Task("N6", ("Go to the sofa, then to the TV, then come back here.",),
@@ -249,8 +260,9 @@ TASKS = [
              sum(st["pixels"].get(k, 0) >= CLEAR for k in st["ids"]["chair"]),  # counts either way
              st["seen"].count("chair") + 1)), ("chair",)),
     Task("Q4", ("Which is closer to you, the sofa or the TV?",),
-         lambda s, st: first_named(said(s, last_only=True), *(lambda c: (c, "tv" if c == "sofa" else "sofa"))(
-             _closer(s, st, "sofa", "tv"))), ("sofa", "tv")),
+         lambda s, st: first_named(said(s, last_only=True), *(
+             ("sofa", "tv") if nearest(things(s, "sofa") + things(s, "tv"), st["xy"]).label == "sofa"
+             else ("tv", "sofa"))), ("sofa", "tv")),
     Task("Q5", ("Is there a bike in the apartment?",), lambda s, st: bool(re.search(r"\byes\b", said(s))), ("bike",)),
     # finding things
     Task("S1", ("Find a plant and go to it.",), lambda s, st: ends_near(s, things(s, "plant")), ("plant",)),
@@ -261,7 +273,7 @@ TASKS = [
          lambda s, st: ends_near(s, things(s, "sofa")) if "sofa" in st["seen"] else abs(abs(turned(s)) - math.pi)
          < 0.35, ("sofa",)),
     Task("C2", ("If the TV is closer to you than the sofa, go to the TV. Otherwise go to the sofa.",),
-         lambda s, st: ends_near(s, things(s, _closer(s, st, "tv", "sofa"))), ("sofa", "tv")),
+         lambda s, st: ends_near(s, nearest(things(s, "sofa") + things(s, "tv"), st["xy"])), ("sofa", "tv")),
     # two requests in a row: context and memory
     Task("R1", ("Remember that my keys are on the sofa.", "Where are my keys?"),
          lambda s, st: mentions(said(s, last_only=True), "sofa")),
