@@ -295,6 +295,7 @@ class Tools:
         self._tools = {t.name: t for t in self._define()}
         self.began = robot.pose()  # where this request began
         self._search_views: dict[tuple[str, ...], list[Pose]] = {}
+        self._searched_landmarks: set[tuple[str, ...]] = set()
         self.done: list[str] = []  # each motion of this request, as it went
         self.turned = 0.0  # degrees of turning in all, either way
 
@@ -757,12 +758,16 @@ class Tools:
         near_key = near.strip().lower().replace("_", "-")
         if near_key in BEARINGS and not toward:
             toward, near = near_key, ""
-        attempts = self._search_views.setdefault((what.casefold(), area.casefold(), near.casefold(), toward), [])
+        key = (what.casefold(), area.casefold(), near.casefold(), toward)
+        if key in self._searched_landmarks:
+            raise ToolError("you already searched from that landmark. Try another landmark or search from here")
+        attempts = self._search_views.setdefault(key, [])
         before = self.robot.pose()
         if any(geom.dist(before, pose) < 0.25
                and (not toward or abs((before.yaw - pose.yaw + 180) % 360 - 180) < 30) for pose in attempts):
             raise ToolError("you made this exact call from here already. Try a new viewpoint or change the search area")
         approach = ""
+        approached = False
         if near and near_key not in {"here", "everywhere", "room"}:  # start beside a visible/known landmark if found
             try:
                 start = self._resolve(near, find=False, fuzzy_place=True)
@@ -774,6 +779,7 @@ class Tools:
                 except PathBlocked as exc:
                     approach = f"Could not reach {self._name(start)} before searching: {str(exc).rstrip('.')}."
                 else:
+                    approached = True
                     approach = f"Approached {self._name(start)} before searching."
         scope = self.robot.room() if area.casefold() == "here" else area
         context = f"Search scope: {scope}." + (f" {approach}" if approach else "")
@@ -786,6 +792,8 @@ class Tools:
             self.found = found = self.robot.search(what, area=area)
         after = self.robot.pose()
         attempts.extend((before, after))
+        if approached:
+            self._searched_landmarks.add(key)
         if found is None:
             trail = [(origin.x, origin.y), *((x, y) for _, x, y, _ in poses[trail_start:]), (after.x, after.y)]
             unvisited = [

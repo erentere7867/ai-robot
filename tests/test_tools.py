@@ -213,6 +213,21 @@ def test_search_does_not_count_travel_before_the_search_as_coverage(monkeypatch)
     assert ok and "Areas not visited closely yet: far counter." in result
 
 
+def test_repositioning_does_not_repeat_a_search_from_the_same_landmark(monkeypatch):
+    robot = SimRobot(two_rooms())
+    tools = Tools(robot)
+    monkeypatch.setattr(robot, "search", lambda *args, **kwargs: None)
+    args = {"what": "towel", "near": "kitchen"}
+    assert tools.run("search", args)[1]
+    robot.go_to(Pose(-1.3, 0.0, 0.0))
+    before = robot.pose()
+    drives = sum(e.name == "go_to" for e in robot.trace.events)
+    result, ok = tools.run("search", args)
+    assert not ok and "already searched from that landmark" in result
+    assert robot.pose() == before and sum(e.name == "go_to" for e in robot.trace.events) == drives
+    assert tools.run("search", {"what": "towel"})[1]
+
+
 def test_plan_revision_keeps_completed_steps_and_blocking_is_not_completion():
     tools = Tools(SimRobot(two_rooms()))
     assert tools.run("todo", {"steps": ["Reach the doorway", "Enter the room"]})[1]
