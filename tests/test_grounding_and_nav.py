@@ -853,6 +853,32 @@ def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_conf
     assert gp is not None and math.dist(gp[0], (passed.x - 0.8, passed.y)) < 0.2
 
 
+def test_visual_lidar_fallback_associates_and_maps_beams_at_capture_time(monkeypatch):
+    from collections import deque
+
+    from robot.ros import real as grounding
+
+    real = object.__new__(RealRobot)
+    SimRobot.__init__(real, _make_scene())
+    real.brain = None
+    rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+    stamp = SimpleNamespace(sec=1, nanosec=0)
+    ranges = np.full(360, np.inf)
+    ranges[90], ranges[180] = 2.0, 1.0
+    tracker = Tracker()
+    real.perception = SimpleNamespace(lock=Lock(), tracker=tracker, crops={},
+                                      frames={"front_camera": (stamp, rgb)},
+                                      scans=deque([(0.8, (ranges, -math.pi, math.tau / 360))]))
+    real._pose_at = lambda at: (0.0, 0.0, 0.0) if at is stamp else (0.0, 0.1, math.pi / 2)
+    monkeypatch.setattr(grounding, "see_probability", lambda *args, **kwargs: 1.0)
+    monkeypatch.setattr(grounding, "locate_in_picture", lambda *args: ((560, 100, 720, 400), False))
+
+    real._see_target("chair")
+
+    track, = tracker.objects()
+    assert (track.x, track.y) == pytest.approx((2.2, 0.1))
+
+
 def test_floor_flat_visual_object_drives_onto_free_floor():
     sim = SimRobot(_make_scene())
     rug = Object(1, "rug", (2.0, 0.0), 2.0, 0.0, "ahead", 0.0, "", 0.0)
@@ -1237,4 +1263,3 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     perc.tracker.tracks[25].present = True
     out_present = perc.render_annotated_view("front_camera", 640, 360, 5.0)
     assert out_present is not None and int(out_present.sum()) > 0
-

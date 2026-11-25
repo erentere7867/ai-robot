@@ -65,13 +65,19 @@ def lidar_range(scan: tuple[np.ndarray, float, float] | None, bearing: float, sp
 
 
 def _lidar_return(scan: tuple[np.ndarray, float, float] | None, bearing: float,
-                  spread: float) -> tuple[float, float] | None:
+                  spread: float, scan_in_camera: tuple[float, float, float] | None = None) -> tuple[float, float] | None:
     if scan is None:
         return None
     ranges, angle_min, step = scan
     angles = angle_min + np.arange(len(ranges)) * step
-    delta = np.arctan2(np.sin(angles - bearing), np.cos(angles - bearing))
-    valid = np.flatnonzero((np.abs(delta) <= spread) & np.isfinite(ranges) & (ranges > 0.05))
+    valid = np.flatnonzero(np.isfinite(ranges) & (ranges > 0.05))
+    headings = angles[valid]
+    if scan_in_camera is not None:
+        x, y, yaw = scan_in_camera
+        headings = np.arctan2(y + ranges[valid] * np.sin(headings + yaw),
+                              x + ranges[valid] * np.cos(headings + yaw))
+    delta = headings - bearing
+    valid = valid[np.abs(np.arctan2(np.sin(delta), np.cos(delta))) <= spread]
     if not valid.size:
         return None
     k = valid[ranges[valid].argmin()]
@@ -234,12 +240,14 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
 
 
 def locate_crop(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarray | None = None,
-                scan: tuple[np.ndarray, float, float] | None = None, on_floor: bool = False) -> Place | None:
+                scan: tuple[np.ndarray, float, float] | None = None, on_floor: bool = False, *,
+                scan_in_camera: tuple[float, float, float] | None = None) -> Place | None:
     """Range a coarse visual crop (x1, y1, x2, y2) into a robot-frame Place.
 
     Unlike `locate()` for tight detector boxes, a coarse crop can include foreground furniture near its side edges
     (sampling the middle half of columns and the 25th depth percentile cut `dock -> kitchen` edge error from 1.50 m
-    to 0.00 m). Floor-flat targets (rugs) are kept when at least 60% of below-horizon pixels lie on the floor and
+    to 0.00 m). With a scan pose relative to the RGB capture, associate beams in the RGB frame but return the lidar
+    hit in the scan's frame. Floor-flat targets (rugs) are kept when at least 60% of below-horizon pixels lie on the floor and
     weighted by r^2 (exact flat-floor Jacobian dr ∝ r^2 dv) over [0.4, 3.5] m: unweighted median fell at 0.72 m near
     the robot's feet, linear r stopped at 0.88 m, r^2 up to 3.0 m landed at 0.69 m (1.02 m after Nav2's 0.25 m goal
     tolerance), and r^2 up to 3.5 m landed the 2-camera centroid's nearest free cell at 0.56 m."""
@@ -279,7 +287,7 @@ def locate_crop(cam: Camera, box: tuple[float, float, float, float], depth: np.n
                 vals = r_patch[floor_px]
                 seen, how, floor_flat = float(np.average(vals, weights=vals ** 2)), "floor", True
     if seen is None and scan is not None:
-        hit = _lidar_return(scan, bearing, spread=max(0.06, span / 3.0))
+        hit = _lidar_return(scan, bearing, max(0.06, span / 3.0), scan_in_camera)
         if hit is not None:
             sr, beam = hit
             radius = 0.2
