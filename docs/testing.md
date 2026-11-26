@@ -115,31 +115,29 @@ the least that passes: task M1's first turn (3,500 tokens with the three picture
 
 ## On a Colab GPU
 
-A coding agent can run level 1 and level 2 on a free Colab GPU (an NVIDIA T4) through Google's
-[colab-mcp](https://github.com/googlecolab/colab-mcp), set up for Claude Code in `.mcp.json`. It is a bridge to a
-notebook open in your own browser, not a remote API: the server listens on `localhost` and the Colab tab it opens
-connects back to it. So run Claude Code on a computer with a browser (with `uv` installed: `pip install uv`), not in a
-cloud session, ask it to open the Colab connection, and in Colab pick *Runtime > Change runtime type > T4 GPU*.
-
-Level 3 is not written up here: ROS 2 lyrical is packaged for Ubuntu 26.04 only and Colab's runtime is an older
-Ubuntu with no Docker for the container above, so it needs its own setup (check `lsb_release -a` first). Each cell
-below is a shell cell (`%%bash`); Colab keeps `~` (`/root`) and background servers between cells until the runtime
-stops.
+Levels 1 and 2 run on a Colab GPU runtime through Google's [Colab CLI](https://github.com/googlecolab/google-colab-cli)
+(`uv tool install google-colab-cli`, Linux and macOS), from your machine or a coding agent's cloud session. It signs in
+by printing a link: open it anywhere and paste back the code Google shows. Without a system keyring (a container), add
+one so the sign-in is kept: `uv tool install --force google-colab-cli --with keyrings.alt`.
 
 ```bash
-git clone https://github.com/erentere7867/ai-robot ~/ai-robot && cd ~/ai-robot   # add -b <branch> to test a PR
-python3 -m venv --system-site-packages ~/sprocket-venv
-~/sprocket-venv/bin/pip install -e ".[eval,dev]"
-~/sprocket-venv/bin/python -m ruff check . && ~/sprocket-venv/bin/python -m pytest -q        # level 1
-git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/llama.cpp && cd ~/llama.cpp \
-  && cmake -B build-cuda -DGGML_CUDA=ON && cmake --build build-cuda -j --target llama-server  # the CUDA build
-cd ~/ai-robot && mkdir -p models/llm && for f in LFM3-VL-2B-QAD-Q4_0.gguf mmproj-LFM3-VL-2B-F16.gguf; do
-  curl -fL -o models/llm/$f https://huggingface.co/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/$f; done  # only the model
-bash tools/linux/brain.sh                                          # picks build-cuda, so the model is on the GPU
-~/sprocket-venv/bin/python -m robot.eval.suite --tag colab         # level 2; results in runs/colab.jsonl
+colab new -s sprocket --gpu T4                                   # the free GPU; colab usage shows the units left
+echo '!git clone -q https://github.com/erentere7867/ai-robot ~/ai-robot && bash ~/ai-robot/tools/colab/setup.sh' \
+  | colab exec -s sprocket --timeout 0                           # 5 minutes: venv, model, llama.cpp, model started
+echo '!cd ~/ai-robot && ~/sprocket-venv/bin/python -m pytest -q' | colab exec -s sprocket --timeout 0   # level 1
+echo '!cd ~/ai-robot && ~/sprocket-venv/bin/python -m robot.eval.suite --tag colab' \
+  | colab exec -s sprocket --timeout 0                           # level 2
+colab download -s sprocket /root/ai-robot/runs/colab.jsonl runs/colab.jsonl
+colab stop -s sprocket                                           # it bills until stopped
 ```
 
-Copy `runs/` out of the runtime before it stops (download it, or mount Google Drive): nothing on Colab is kept.
+To test a pull request beside `main`: `git -C ~/ai-robot fetch origin pull/<n>/head:pr<n> && git -C ~/ai-robot
+worktree add ~/pr<n> pr<n>`, then run the suite from `~/pr<n>` (the venv and the model are shared). `colab exec` fails
+after 30 s without output unless given `--timeout 0`; for a long run, start it with `nohup` and read its log. A runtime
+started this way is not listed in Colab's *Manage sessions*: `colab sessions` lists it and `colab stop` ends it.
+
+Level 3 does not run there as it is: ROS 2 lyrical is packaged for Ubuntu 26.04 only, and the runtime is Ubuntu 24.04
+(T4, 2 cores, 12 GB) with no Docker for the container above.
 
 ## Level 2: the 2D suite
 

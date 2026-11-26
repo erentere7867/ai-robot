@@ -3,6 +3,7 @@
 # source, make the vision server's ONNX files, and check what is there.
 #   bash tools/linux/setup_models.sh                  # fetch what is missing, make models/vision, then check
 #   bash tools/linux/setup_models.sh --check          # only check (exit status: how many are missing)
+#   bash tools/linux/setup_models.sh --llm            # only the language model (a Colab GPU: tools/colab/setup.sh)
 #   bash tools/linux/setup_models.sh --export <dir>   # copy all models to <dir>/sprocket-models (links followed)
 #   bash tools/linux/setup_models.sh --import <dir>   # copy them back from <dir>/sprocket-models
 # Sources: LiquidAI/LFM3-VL-2B-GGUF and onnx-community/depth-anything-v2-base on Hugging Face,
@@ -16,9 +17,10 @@ MODE="setup"; DIR=""
 case "${1:-}" in
   "") ;;
   --check) MODE="check" ;;
+  --llm) MODE="llm" ;;
   --export|--import) [ $# -ge 2 ] || { echo "error: $1 needs a folder" >&2; exit 2; }
     MODE="${1#--}"; DIR="$2" ;;
-  -h|--help) sed -n 2,10p "$0"; exit 0 ;;
+  -h|--help) sed -n 2,11p "$0"; exit 0 ;;
   *) echo "error: unknown option '$1'" >&2; exit 2 ;;
 esac
 
@@ -29,9 +31,13 @@ get() {  # get <url> <file>: download unless present (resumes a partial download
   curl -fL --retry 3 -C - -o "$2.part" "$1" && mv "$2.part" "$2"
 }
 
-fetch() {
+fetch_llm() {
   get "$HF/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/LFM3-VL-2B-QAD-Q4_0.gguf" "$MODELS_DIR/llm/LFM3-VL-2B-QAD-Q4_0.gguf"
   get "$HF/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/mmproj-LFM3-VL-2B-F16.gguf" "$MODELS_DIR/llm/mmproj-LFM3-VL-2B-F16.gguf"
+}
+
+fetch() {
+  fetch_llm
   get "$HF/onnx-community/depth-anything-v2-base/resolve/main/onnx/model.onnx" "$MODELS_DIR/vision/depth_base.onnx"
   [ -x "$VENV_PY" ] || { echo "no $VENV_PY: run tools/linux/setup.sh first"; exit 1; }
   for asset in yoloe-26l-seg.pt yolo26n-pose.pt mobileclip2_b.ts; do  # from models/: ultralytics looks there
@@ -62,6 +68,7 @@ check() {
 
 case "$MODE" in
   setup) fetch ;;
+  llm) fetch_llm; exit 0 ;;
   export) mkdir -p "$DIR/sprocket-models"; cp -rL "$MODELS_DIR/." "$DIR/sprocket-models/"; echo "exported to $DIR" ;;
   import) cp -rL "$DIR/sprocket-models/." "$MODELS_DIR/"; echo "imported into $MODELS_DIR" ;;
 esac
