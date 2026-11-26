@@ -220,7 +220,7 @@ def locate(cam: Camera, box: tuple[float, float, float, float], depth: np.ndarra
                     coords = np.stack([xb_pts, yb_pts], axis=1)
                     cov = np.cov(coords, rowvar=False)
                     if cov.shape == (2, 2) and np.isfinite(cov).all():
-                        eigvals, eigvecs = np.linalg.eigh(cov)
+                        _, eigvecs = np.linalg.eigh(cov)
                         main_vec = eigvecs[:, 1]
                         ori_yaw = float(math.atan2(main_vec[1], main_vec[0]))
                         proj1 = coords @ main_vec
