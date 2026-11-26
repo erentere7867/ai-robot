@@ -596,6 +596,17 @@ Measured 3D verification (`apt_0`, `think=low`, 0.33x):
   `go_to('chair')` before clarifying (3 turns, `16.7 s`) — consistent with `view-goal-Q5jq` above (2B model
   instruction-following limit on unsupported under-furniture requests, not routed around in code).
 
+#### A three-leg errand and the TV (`runs/n6r1` to `-3`, 26 November, models on a Colab T4)
+
+"Go to the sofa, then to the TV, then come back here." failed 3 of 3 while N1 ("Go to the sofa.") passed 3 of 3,
+and none of the failures was the harness: each run did every leg (sofa, a "TV", back to the start, 3 to 9 calls)
+and replied truthfully about what it believed. Not one "tv" it knew was the real TV, which is 6.5 m from the start:
+YOLOE named a rug, two wall cabinets and the coffee table "tv", the vision model's yes on the crop kept them
+(every one is `verified` in memory.db), and in runs 2 and 3 `look`/`search` for "TV" placed it on the sofa's side;
+the real TV, seen twice, was kept as a "sofa". Request progress now lists a failed leg as "go_to(sofa) not
+completed: target lost", and the model went on to retry each one; this task cannot show it until "tv" is told
+apart from dark furniture, a perception limit of the 2B model's yes/no and YOLOE's open vocabulary.
+
 ## Hazards found
 
 - **Under the stairs.** Exploring `apt_0`, the robot drove under the open staircase, whose underside slopes down
