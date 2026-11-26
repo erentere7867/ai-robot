@@ -41,7 +41,7 @@ passing in 6 minutes at `--rtf 0.1`.
 | Level | Catches | Needs | Time |
 | :--- | :--- | :--- | :--- |
 | 1. Lint and unit tests | Broken logic, tool argument checks, the agent loop with a scripted model, perception maths, reports | Python only | seconds |
-| 2. The 2D suite | The model choosing tools well in drawn rooms (50 instructions) | + the language model | minutes |
+| 2. The 2D suite | The model choosing tools well in drawn rooms (50 instructions); kinematic waypoint execution, not Nav2 | + the language model | minutes |
 | 3. The 3D apartment | Everything together: the model, perception, depth, Nav2, the body, in a real-looking home | + ROS 2, Habitat, the vision server | minutes per task |
 
 Level 1 runs on GitHub for every pull request and push to `main` (`.github/workflows/tests.yml`) and must pass before a
