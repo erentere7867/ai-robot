@@ -148,6 +148,13 @@ def test_the_same_call_again_and_again_is_refused_with_a_note():
     assert tool_results(brain.seen[3])[-1].startswith("Not run: you made this exact call 2 times")
 
 
+def test_the_same_search_again_and_again_is_refused_like_any_other_call():
+    search = call("search", what="plant")
+    brain = Scripted(search, search, search, say("ok"), say("ok"))
+    Agent(brain).do("How many plants are here?", SimRobot(living_room()))
+    assert tool_results(brain.seen[3])[-1].startswith("Not run: you made this exact call 2 times")
+
+
 def test_observation_marks_only_tracks_from_attached_exposures_and_bounds_the_list(monkeypatch):
     sim = SimRobot(living_room())
     frame = np.zeros((20, 20, 3), dtype=np.uint8)

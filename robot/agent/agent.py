@@ -439,7 +439,9 @@ class Agent:
                                       "or move somewhere else to see new views."), False
                         blocked_tools.update(("look", "look_back"))
                         record.problems.append("look: already looked around here")
-                    elif (repeats > REPEATS and call.name not in ("look", "search")
+                    # search too: 24 cases in 20 2D passes sent the same search 3+ times in a row, 132 calls, every
+                    # one refused by search's own check, which left the tool offered (S3 used all 16 turns).
+                    elif (repeats > REPEATS and call.name != "look"
                           or call.name == "look" and seen_calls[key] > REPEATS + 1):
                         n_prev = (seen_calls[key] if call.name == "look" else repeats) - 1
                         result, ok = (f"Not run: you made this exact call {n_prev} times. Do something "
