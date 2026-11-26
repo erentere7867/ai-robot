@@ -140,8 +140,39 @@ worktree add ~/pr<n> pr<n>`, then run the suite from `~/pr<n>` (the venv and the
 after 30 s without output unless given `--timeout 0`; for a long run, start it with `nohup` and read its log. A runtime
 started this way is not listed in Colab's *Manage sessions*: `colab sessions` lists it and `colab stop` ends it.
 
-Level 3 does not run there as it is: ROS 2 lyrical is packaged for Ubuntu 26.04 only, and the runtime is Ubuntu 24.04
-(T4, 2 cores, 12 GB) with no Docker for the container above.
+Level 3 does not run on the runtime itself (Ubuntu 24.04, 2 cores, 12 GB, no Docker for ROS 2 lyrical's 26.04), but
+it runs on any Linux machine with Docker, in the 26.04 container above, with the language model and the vision server
+on the runtime through an SSH tunnel. Measured on 26 November on a 4-core cloud VM: task M1 in 3 minutes at
+`--rtf 0.1`, YOLOE 174 ms and depth 203 ms a frame on the T4, 8 MB/s up the tunnel. With the vision server on the VM's
+CPU instead it took 3 of the 4 cores, the robot's control loop ran late, and M1 failed.
+
+```bash
+mkdir -p ~/.ssh && ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/id_ed25519      # once; colab ssh sends this key
+cat >> ~/.ssh/config <<'END'
+Host colab-sprocket
+  User root
+  ProxyCommand colab ssh --proxy-mode -s sprocket
+  ControlMaster auto
+  ControlPath ~/.ssh/colab-%r@%h
+  ControlPersist yes
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+END
+# the runtime takes one ssh connection at a time; ControlMaster lets later commands share it
+ssh colab-sprocket 'mkdir -p ~/ai-robot/models/vision && cat > ~/ai-robot/models/vision/yoloe26l_8.onnx' \
+  < models/vision/yoloe26l_8.onnx                                # made by setup_models.sh; too big for colab upload
+ssh colab-sprocket 'cd ~/ai-robot && curl -sfL -o models/vision/depth_base.onnx \
+  https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model.onnx \
+  && uv pip uninstall -q --python ~/sprocket-venv/bin/python onnxruntime \
+  && uv pip install -q --python ~/sprocket-venv/bin/python "onnxruntime-gpu[cuda,cudnn]" \
+  && SPROCKET_VISION_PROVIDER=CUDAExecutionProvider bash tools/linux/vision.sh'
+ssh -fN -L 127.0.0.1:8081:localhost:8081 -L 127.0.0.1:8090:localhost:8090 colab-sprocket
+docker exec -it sprocket bash -c '. tools/linux/env.sh && python -m robot.eval.doctor --3d --rtf 0.1'
+```
+
+Behind an HTTPS proxy that re-signs traffic, the container needs the proxy's CA (copied into
+`/usr/local/share/ca-certificates/`, then `update-ca-certificates`) and the proxy variables passed to `docker exec`, or
+`setup.sh` stops at the ROS repository with "certificate signer not trusted".
 
 ## Level 2: the 2D suite
 
