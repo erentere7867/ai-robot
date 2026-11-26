@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -69,6 +70,39 @@ def test_a_command_with_text_is_queued(dashboard, path, body, queued):
     assert live.inbox.get_nowait() == queued
 
 
+@pytest.mark.parametrize("path", ["/instruct", "/stop", "/scene", "/voice", "/voice?recording=1"])
+@pytest.mark.parametrize("body", [b'{"text": "office"}', b""])
+def test_read_only_case_refuses_commands(dashboard, path, body):
+    live, url = dashboard
+    live.state.read_only = True
+    live.update(scenes=["office"])
+    live.ears = Mock()
+    status, reply = post(url + path, body)
+    assert status == 409
+    assert reply["ok"] is False
+    assert "suite case" in reply["error"] and "without --case" in reply["error"]
+    assert live.inbox.empty()
+    assert live.state.scene_loading == ""
+    live.ears.hear.assert_not_called()
+
+
+def test_interactive_voice_is_queued(dashboard):
+    live, url = dashboard
+    live.ears = Mock()
+    live.ears.hear.return_value = "Look around"
+    assert post(url + "/voice", b"recording") == (200, {"ok": True})
+    assert live.inbox.get(timeout=2) == ("instruct", "Look around")
+    live.ears.hear.assert_called_once_with(b"recording")
+
+
+def test_read_only_is_exposed_in_state(dashboard):
+    live, url = dashboard
+    assert json.loads(live.snapshot())["read_only"] is False
+    live.update(read_only=True)
+    with urllib.request.urlopen(url + "/state", timeout=5) as response:
+        assert json.load(response)["read_only"] is True
+
+
 @pytest.mark.skipif(NODE is None, reason="Node.js is needed to syntax-check the 3D viewer JS")
 def test_viewer3d_js_is_served_and_valid_js(dashboard):
     _, url = dashboard
@@ -80,8 +114,10 @@ def test_viewer3d_js_is_served_and_valid_js(dashboard):
     assert check.returncode == 0, check.stderr
 
 
-def test_scene3d_and_whitelisted_assets(dashboard, tmp_path):
+@pytest.mark.parametrize("read_only", [False, True])
+def test_scene3d_and_whitelisted_assets(dashboard, tmp_path, read_only):
     live, url = dashboard
+    live.update(read_only=read_only)
     with urllib.request.urlopen(f"{url}/scene3d", timeout=5) as response:
         assert json.load(response) == {"mode": "2d"}
 
