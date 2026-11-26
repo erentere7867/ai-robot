@@ -87,11 +87,13 @@ def recalled_facts(memory: Any, query: str, extra: Iterable[str] = ()) -> list[s
 
 
 def _turn_span(robot: Any, pose_idx: int, before: Pose, after: Pose, commanded: float) -> float | None:
-    """Measured degrees turned since `pose_idx` (handles multi-turn spins via trace poses)."""
+    """Measured degrees turned since `pose_idx` (handles multi-turn spins via trace poses). The net of the signed steps:
+    adding up their sizes counted every wobble and localisation correction as turning, so a 3D turn of 90 degrees that
+    the apartment's truth put within 17 degrees of 90 was reported as 126, and the model turned again."""
     poses = getattr(getattr(robot, "trace", None), "poses", ())
     if len(poses) > pose_idx:
         yaws = [math.radians(before.yaw), *(p[3] for p in poses[pose_idx:])]
-        return math.degrees(sum(abs(wrap(b - a)) for a, b in zip(yaws, yaws[1:], strict=False)))
+        return abs(math.degrees(sum(wrap(b - a) for a, b in zip(yaws, yaws[1:], strict=False))))
     if commanded < 180:
         return abs((after.yaw - before.yaw + 180) % 360 - 180)
     return None

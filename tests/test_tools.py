@@ -291,3 +291,18 @@ def test_plan_revision_keeps_completed_steps_and_blocking_is_not_completion():
         "1. [x] Reach the doorway", "2. [ ] Ask the user to open the door", "3. [ ] Enter the room",
     ]
     assert tools.todo.done_steps() == ["Reach the doorway"]
+
+
+def test_turn_span_is_the_net_rotation_not_every_wobble():
+    import math as m
+    from types import SimpleNamespace
+
+    from robot.agent.api import Pose
+    from robot.agent.tools import _turn_span
+    # a 90 degree turn whose samples wobble by 5 degrees on the way, and a two-turn spin
+    wobbly = [m.radians(d) for d in (20, 15, 40, 35, 60, 55, 90)]
+    robot = SimpleNamespace(trace=SimpleNamespace(poses=[(0.0, 0.0, 0.0, y) for y in wobbly]))
+    assert abs(_turn_span(robot, 0, Pose(0, 0, 0.0), Pose(0, 0, 90.0), 90) - 90) < 1e-6
+    spin = [m.radians(d) for d in range(30, 721, 30)]
+    robot = SimpleNamespace(trace=SimpleNamespace(poses=[(0.0, 0.0, 0.0, y) for y in spin]))
+    assert abs(_turn_span(robot, 0, Pose(0, 0, 0.0), Pose(0, 0, 0.0), 720) - 720) < 1e-6
