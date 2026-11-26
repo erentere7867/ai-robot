@@ -131,6 +131,10 @@ colab download -s sprocket /root/ai-robot/runs/colab.jsonl runs/colab.jsonl
 colab stop -s sprocket                                           # it bills until stopped
 ```
 
+A pass of the suite takes 12 to 17 minutes on the T4 (two can run at once: `brain.sh` gives the model two
+slots), about 0.3 compute units. Repeat before comparing: on 26 November the same `main` scored 17/50 and then
+23/50, and the 23 November code 23/50.
+
 To test a pull request beside `main`: `git -C ~/ai-robot fetch origin pull/<n>/head:pr<n> && git -C ~/ai-robot
 worktree add ~/pr<n> pr<n>`, then run the suite from `~/pr<n>` (the venv and the model are shared). `colab exec` fails
 after 30 s without output unless given `--timeout 0`; for a long run, start it with `nohup` and read its log. A runtime
