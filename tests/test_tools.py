@@ -306,3 +306,8 @@ def test_turn_span_is_the_net_rotation_not_every_wobble():
     spin = [m.radians(d) for d in range(30, 721, 30)]
     robot = SimpleNamespace(trace=SimpleNamespace(poses=[(0.0, 0.0, 0.0, y) for y in spin]))
     assert abs(_turn_span(robot, 0, Pose(0, 0, 0.0), Pose(0, 0, 0.0), 720) - 720) < 1e-6
+
+
+def test_a_negative_size_is_explained_with_the_call_to_make_instead():
+    res = Tools(SimRobot(living_room())).execute("move", {"metres": -1, "direction": "backward"})
+    assert "metres is a size and is never negative. Call it again with metres=1" in res.text

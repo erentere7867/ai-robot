@@ -218,6 +218,11 @@ def _check(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
             else:
                 raise ToolError(f"{tool.name}: {name} must be one of {', '.join(spec['enum'])}, not {value!r}")
         lo, hi = spec.get("minimum"), spec.get("maximum")
+        if lo is not None and value < 0 <= lo and "direction" in tool.params:
+            # move(metres=-1, direction='backward') 31 times in the 2D runs; told only the range, R1 then moved
+            # 0.1 m backward for "back up one metre".
+            raise ToolError(f"{tool.name}: {name} is a size and is never negative. Call it again with {name}={-value:g} "
+                            "and the way to go in direction")
         if lo is not None and value < lo or hi is not None and value > hi:
             raise ToolError(f"{tool.name}: {name} must be between {lo} and {hi}, not {value:g}")
         out[name] = value
@@ -321,6 +326,7 @@ class Tools:
             moved_m = math.dist((now.x, now.y), (before.x, before.y))
             return f" (moved {moved_m:.1f} m before stopping)" if moved_m > 0.05 else ""
 
+        checked: dict[str, Any] | None = None
         try:
             checked = _check(tool, args)
             raw = tool.run(**checked)
@@ -330,31 +336,31 @@ class Tools:
             if tool.moves:
                 self.moved = True
         except ToolError as exc:
-            return ActionResult(f"Error: {exc}.{motion_note()}", False, "error", moved_m)
+            res = ActionResult(f"Error: {exc}.{motion_note()}", False, "error", moved_m)
         except NotFound as exc:
-            return ActionResult(f"Not found: {exc}. Use search() to look for it, or ask the user.", False, "not_found")
+            res = ActionResult(f"Not found: {exc}. Use search() to look for it, or ask the user.", False, "not_found")
         except PathBlocked as exc:
-            return ActionResult(
+            res = ActionResult(
                 f"Blocked: {exc}{motion_note()}. Try another way, a different target, or ask the user for help.",
                 False, "blocked", moved_m,
             )
         except TargetLost as exc:
             self.looked.extend(CAMERAS["around"])
-            return ActionResult(
+            res = ActionResult(
                 f"Target lost: {exc}{motion_note()}. Inspect the current views before choosing another ID.",
                 False, "target_lost", moved_m,
             )
         except Timeout as exc:
-            return ActionResult(f"Timed out: {exc}{motion_note()}.", False, "timeout", moved_m)
+            res = ActionResult(f"Timed out: {exc}{motion_note()}.", False, "timeout", moved_m)
         except (ValueError, TypeError) as exc:
-            return ActionResult(f"Error: {exc}.", False, "error")
+            res = ActionResult(f"Error: {exc}.", False, "error")
         finally:
             if before is not None and not self.moved:
                 now = self.robot.pose()
                 if (math.dist((now.x, now.y), (before.x, before.y)) > 0.02
                         or abs((now.yaw - before.yaw + 180) % 360 - 180) > 2.0):
                     self.moved = True
-        if tool.moves:
+        if tool.moves and checked is not None:
             progress = self._progress(name, checked, res)
             if progress:
                 res = replace(res, text=res.text + "\n" + progress)
@@ -363,7 +369,14 @@ class Tools:
     def _progress(self, name: str, args: dict[str, Any], res: ActionResult) -> str:
         """Keep motion progress compact: always report for repetition-prone steps (turn/move/drive/orbit) or after
         multiple motions, while omitting boilerplate on a single-step go_to/search to keep context lean."""
-        if name == "turn":
+        if not res.ok:
+            # A failed leg left out of this list read as done: "go to the sofa, then the TV, then come back"
+            # was reported finished after go_to(tv) was blocked, the list showing only the sofa and the return.
+            what = ", ".join(str(v) for v in args.values())
+            outcome = res.text.split(":")[0].split(" (")[0].rstrip(".").lower() if res.status == "partial" \
+                else res.status.replace("_", " ")  # "drove 1.0 m right", "blocked", "target lost"
+            self.done.append(f"{name}({what}) not completed: {outcome}")
+        elif name == "turn":
             degrees = round(res.turned_deg)
             self.turned += abs(degrees)
             self.done.append(f"turned {degrees:g} degrees {args['direction']}")
@@ -372,7 +385,7 @@ class Tools:
             self.done.append(f"moved {metres:g} m {args['direction']}")
         else:
             self.done.append(res.text.split(":")[0].split(",")[0].rstrip(".").lower())  # "arrived", "drove for 2 s"
-        if name not in ("turn", "move", "drive", "orbit") and len(self.done) <= 1:
+        if res.ok and name not in ("turn", "move", "drive", "orbit") and len(self.done) <= 1:
             return ""
         now = self.robot.pose()
         heading = (now.yaw - self.began.yaw + 180) % 360 - 180
@@ -768,7 +781,14 @@ class Tools:
         before = self.robot.pose()
         if any(geom.dist(before, pose) < 0.25
                and (not toward or abs((before.yaw - pose.yaw + 180) % 360 - 180) < 30) for pose in attempts):
-            raise ToolError("you made this exact call from here already. Try a new viewpoint or change the search area")
+            # 94% of 205 repeats in the 2D runs came right after the same search had found the thing; the old
+            # "try a new viewpoint" sent the model on searching. Give the answer back and the step after it.
+            known = self.robot.where(what, area=self.robot.room() if area.casefold() == "here" else area)
+            if known:
+                raise ToolError(f"you already ran this search from here. It found {self._choices(known)} Use that "
+                                "ID with go_to or face, or reply to the user")
+            raise ToolError("you made this exact call from here already and found nothing. Try a new viewpoint or "
+                            "change the search area")
         approach = ""
         approached = False
         if near and near_key not in {"here", "everywhere", "room"}:  # start beside a visible/known landmark if found

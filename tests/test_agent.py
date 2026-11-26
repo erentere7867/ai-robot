@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from robot.agent.agent import Agent
-from robot.agent.api import NotFound, Object, Pose, Preempted
+from robot.agent.api import NotFound, Object, PathBlocked, Pose, Preempted
 from robot.agent.tools import Tools
 from robot.eval.suite import living_room, office
 from robot.mind.brain import Reply, ToolCall
@@ -1035,6 +1035,27 @@ def test_coming_to_the_user_is_an_arrival_not_too_close():
     robot = SimRobot(living_room())
     result = Tools(robot).go_to("user")
     assert result.ok and "closer than asked" not in result.text, result.text
+
+
+def test_repeating_a_search_that_found_it_gives_the_find_back():
+    tools = Tools(SimRobot(living_room()))
+    assert tools.execute("search", {"what": "plant"}).ok
+    again = tools.execute("search", {"what": "plant"})
+    assert not again.ok and "you already ran this search from here. It found plant" in again.text
+    assert "Use that ID with go_to or face, or reply to the user" in again.text
+
+
+def test_progress_lists_a_leg_that_failed_so_it_does_not_read_as_done():
+    robot = SimRobot(living_room())
+    tools = Tools(robot)
+    tools.execute("go_to", {"target": "sofa"})
+
+    def blocked(*_args, **_kwargs):
+        raise PathBlocked("no path")
+
+    robot.go_to = blocked
+    res = tools.execute("go_to", {"target": "lamp"})
+    assert not res.ok and "go_to(lamp) not completed: blocked" in res.text
 
 
 def test_progress_counts_repeated_steps_beyond_the_listed_ones():
