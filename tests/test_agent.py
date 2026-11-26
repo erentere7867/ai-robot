@@ -700,19 +700,6 @@ def test_each_new_partial_motion_gets_one_review_even_after_an_earlier_review(mo
     assert [text for _, text in robot.trace.said] == ["I turned but could not move forward."]
 
 
-def test_say_waits_for_review_after_partial_motion(monkeypatch):
-    robot = SimRobot(living_room())
-    monkeypatch.setattr(robot, "move", lambda *args, **kwargs: None)
-    brain = Scripted(call("move", metres=1, direction="forward"), call("say", text="I made it."),
-                     say("I made it."), say("I stopped short."))
-
-    Agent(brain, cameras="none").do("Move forward 1 m.", robot)
-
-    assert tool_results(brain.seen[2])[-1].startswith("Not run: the last motion ended short.")
-    assert "Unfinished motion:" in brain.seen[3][-1]["content"]
-    assert [text for _, text in robot.trace.said] == ["I stopped short."]
-
-
 def test_last_model_turn_keeps_the_reply_after_partial_motion(monkeypatch):
     robot = SimRobot(living_room())
     monkeypatch.setattr(robot, "move", lambda *args, **kwargs: None)

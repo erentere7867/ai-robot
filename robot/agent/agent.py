@@ -424,11 +424,7 @@ class Agent:
                     if call.name == "look":
                         seen_calls[key] = seen_calls.get(key, 0) + 1
                     move_cams: tuple[str, ...] = ()
-                    if call.name == "say" and partial_motion:
-                        result, ok = ("Not run: the last motion ended short. Try to finish it or report what "
-                                      "happened in your final reply.", False)
-                        blocked_tools.add("say")
-                    elif call.name == "say" and repeats > 1:
+                    if call.name == "say" and repeats > 1:
                         result, ok = ("Not run: you already spoke. If the request is finished, end with plain text "
                                       "and no tool call."), False
                         blocked_tools.add("say")
