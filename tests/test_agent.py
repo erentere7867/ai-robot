@@ -683,6 +683,23 @@ def test_partial_action_stops_remaining_batched_calls() -> None:
     assert [text for _, text in robot.trace.said] == ["Stopped short."]
 
 
+def test_each_new_partial_motion_gets_one_review_even_after_an_earlier_review(monkeypatch):
+    robot = SimRobot(living_room())
+    monkeypatch.setattr(robot, "move", lambda *args, **kwargs: None)
+    brain = Scripted(call("turn", degrees=90, direction="left"), say("Finished."),
+                     call("move", metres=1, direction="forward"), say("Finished again."),
+                     call("move", metres=1, direction="forward"), say("Definitely finished."),
+                     say("I turned but could not move forward."))
+
+    Agent(brain, review=True, cameras="none").do("Turn left and move forward 1 m.", robot)
+
+    assert "Before you finish" in brain.seen[2][-1]["content"]
+    assert "Unfinished motion:" not in brain.seen[2][-1]["content"]
+    assert "Unfinished motion:" in brain.seen[4][-1]["content"]
+    assert "Unfinished motion:" in brain.seen[6][-1]["content"]
+    assert [text for _, text in robot.trace.said] == ["I turned but could not move forward."]
+
+
 def test_a_successful_retry_does_not_review_resolved_motion(monkeypatch):
     robot = SimRobot(living_room())
     move = robot.move

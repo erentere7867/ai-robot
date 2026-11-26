@@ -382,12 +382,14 @@ class Agent:
                                          "call a tool for your next step, or reply to the user."})
                         think = self.think
                         continue
-                    if not reviewed and (partial_motion or tools.todo.open_steps()
-                                         or (self.review and any(s.calls for s in record.steps))):
+                    if partial_motion or (not reviewed and (
+                        tools.todo.open_steps() or (self.review and any(s.calls for s in record.steps))
+                    )):
                         reviewed = True
                         messages.append({"role": "user", "content": self._review(
                             instruction, record, tools, partial_motion[1] if partial_motion else "",
                         )})
+                        partial_motion = None
                         think = self._budget(news=False)
                         continue
                     open_steps = tools.todo.open_steps()
