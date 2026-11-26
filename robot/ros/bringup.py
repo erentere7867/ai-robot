@@ -108,7 +108,7 @@ class Running:
         clear()  # Nav2's container does not always leave with its launch
 
 
-def start(out: Path, *, map_yaml: Path | None = None, depth_threads: int = 2) -> Running:
+def start(out: Path, *, map_yaml: Path | None = None) -> Running:
     """The robot's software, logging to out/robot.log: mapping with slam_toolbox when there is no `map_yaml`, else
     localising in it with AMCL from the dock (the map's origin, where the robot starts)."""
     out.mkdir(parents=True, exist_ok=True)
@@ -127,6 +127,6 @@ def start(out: Path, *, map_yaml: Path | None = None, depth_threads: int = 2) ->
                  ["ros2", "run", "robot_state_publisher", "robot_state_publisher", "--ros-args", "--params-file",
                   str(description)],
                  ["ros2", "run", "robot_localization", "ekf_node", "--ros-args", "--params-file", str(ekf)],
-                 [sys.executable, "-u", "-m", "robot.ros.perceive", "--depth", "--threads", str(depth_threads)],
+                 [sys.executable, "-u", "-m", "robot.ros.perceive", "--depth"],
                  nav)]
     return Running(procs, log)

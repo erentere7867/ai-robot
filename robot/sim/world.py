@@ -527,16 +527,7 @@ class SimRobot:
         return short
 
     def _check_hazard(self) -> Any:
-        try:
-            from robot.perception.depth import StepHazard
-        except ImportError:
-
-            @dataclass
-            class StepHazard:
-                kind: str
-                delta_z: float
-                distance: float
-                torque_boost: bool = False
+        from robot.perception.depth import StepHazard
 
         for cx, cy, r in self.scene.cliffs:
             d = math.hypot(cx - self.x, cy - self.y)
