@@ -121,7 +121,8 @@ notebook open in your own browser, not a remote API: the server listens on `loca
 connects back to it. So run Claude Code on a computer with a browser (with `uv` installed: `pip install uv`), not in a
 cloud session, ask it to open the Colab connection, and in Colab pick *Runtime > Change runtime type > T4 GPU*.
 
-Level 3 does not run there: ROS 2 lyrical needs Ubuntu 26.04 and Colab is an older Ubuntu without Docker. Each cell
+Level 3 is not written up here: ROS 2 lyrical is packaged for Ubuntu 26.04 only and Colab's runtime is an older
+Ubuntu with no Docker for the container above, so it needs its own setup (check `lsb_release -a` first). Each cell
 below is a shell cell (`%%bash`); Colab keeps `~` (`/root`) and background servers between cells until the runtime
 stops.
 
