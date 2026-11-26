@@ -149,6 +149,52 @@ in view at all ("false"); YOLOE at the robot's threshold, 0.22:
   tokens a second, so a decision that thinks up to its 512-token cap adds up to about 4 s. The model card's video
   input is a whole clip sampled at 2 frames a second, with no streaming mode. The board will be slower.
 
+### Early harness baselines (18 and 19 November 2026)
+
+These are historical measurements, not scores for the current stack. The 50-task 2D runs used LFM3-VL-2B Q4_0
+on the development PC GPU at temperature 0.1:
+
+| Harness | Passed | Median first model turn |
+| :--- | ---: | ---: |
+| Seven-line intent form with keyword and regex routing | 16/50 | 0.94 s |
+| Native calls, front camera / all cameras / fresh pictures after moves | 22/50 / 24/50 / 22/50 | 0.70 / 1.20 / 0.62 s |
+| Split `go_to`, `go_to_side`, `stop_near`: front / all cameras | 26/50 / 25/50 | 0.77 / 1.20 s |
+| Front camera with search and approach guidance | 28/50 | 0.64 s |
+| Same plus 768 px images, plain badges, colours and finish review | 27/50 | 0.8–2.8 s (cache hit or miss) |
+
+On identical code, a 512-token thinking cap gave 32/50 versus 26/50 without thinking (16.3 versus 5.0 s per
+task). Relative-motion tasks improved from 3/8 without thinking to 6/8 with it. The small 3D set scored
+9/10 with thinking versus 8/10 without it. The original 3D audit scored:
+
+| Run | `apt_0` | `v3_sc0_staging_00` | Total |
+| :--- | ---: | ---: | ---: |
+| `audit1` | 23/27 | 18/27 | 41/54 |
+| `audit4` | 23/27 | 21/27 | 44/54 |
+| `audit5` | 23/27 | 25/27 | 48/54 |
+| `audit6` | 23/27 | 24/27 | 47/54 |
+
+`audit2` and `audit3` were interrupted by a server outage. Every audit above, completed or interrupted, used
+simulator object labels, a separate path follower and cameras 12 cm too high, so none is comparable to the
+real-stack baseline `real1`. It scored 19/27 in `apt_0` (169 model calls, 751 s of model time, median 4.1 s per
+call). Four of its eight failures involved an ID disappearing between calls; merged IDs were subsequently
+resolved to the surviving track.
+
+Lessons from those runs:
+
+- A seven-line form, keyword routing and Python code blocks were dropped in favour of native tool calls. Optional
+  `go_to` side/gap and `face` keep-facing arguments made the 2B model add actions the user never asked for.
+- Coloured boxes biased colour answers. On the red-bike comparison, confidence rose from 0.73 with jagged
+  512 px images to 1.00 at 768 px; raising 768 to 1024 px did not change the chair-count answer.
+- Treating snapshots as new user messages dropped the task's reasoning in the chat template and sometimes made
+  it repeat the original action. Tool-result images preserved the reasoning; previous tasks were summarized
+  instead of replaying their chat. The model-card repeat penalty scored 7/10 versus 6/10 on a small A/B.
+- A waypoint blend that cut across furniture was restricted to clear shortcuts. A body-only run reached
+  140 of 142 objects across both layouts (one stall and one without a path) in the old simulator.
+- A finish review led to more tool calls in 34 of 220 audited requests and no further action in 186, at about
+  3.4 s each. In 682 audited model calls, 27% of time was on the initial turn, 44% after successful tools,
+  2% after failed tools and 26% on review. These runs did not establish that a review or selective thinking
+  improved the real-stack score.
+
 ### What the harness learned from running it (19 November, apt_0)
 
 - **The fridge is no test.** ReplicaCAD draws it as a flat panel that reads as a cabinet; YOLOE-26l scored it 0 for
