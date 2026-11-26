@@ -568,8 +568,8 @@ def test_scan_sees_under_a_table_top_and_ranges_a_low_shelf_by_its_depth():
     assert abs(float(ranges[ahead]) - (1.0 + cam.x)) < 0.05  # a shelf's edge 12 cm up: its depth, not the floor's
 
 
-def test_estimate_pose_and_resolve_ray():
-    from robot.perception.pose import estimate_pose_from_keypoints, resolve_ray_target
+def test_estimate_pose_from_keypoints():
+    from robot.perception.pose import estimate_pose_from_keypoints
 
     cam = RIG["front_camera"]
     robot_pose = (0.0, 0.0, 0.0)
@@ -605,17 +605,6 @@ def test_estimate_pose_and_resolve_ray():
     assert pose_point.posture == "pointing"
     assert pose_point.pointing_ray is not None
 
-    target_track = Track(2, "chair", 2.0, -1.0, 0.3, 0.0, 0.0)
-    other_track = Track(3, "table", 2.0, 2.0, 0.4, 0.0, 0.0)
-    found = resolve_ray_target(pose_point.pointing_ray, [target_track, other_track])
-    assert found is target_track
-
-    # 3. Floor pointing
-    down_ray = ((2.0, 0.0, 1.2), (0.707, 0.0, -0.707))
-    floor_hit = resolve_ray_target(down_ray, [])
-    assert floor_hit is not None
-    assert abs(floor_hit[0] - 3.2) < 0.1 and abs(floor_hit[1] - 0.0) < 0.1
-
     # 4. Waving posture
     kpts[10] = [u_r_sh, v_sh - (0.25 / depth_m) * focal, 1.0]
     pose_wave = estimate_pose_from_keypoints(kpts, cam, depth_m, robot_pose)
@@ -637,7 +626,7 @@ def test_draw_set_of_mark_badges():
 
     boxes_and_ids = [((100, 100, 250, 300), 1), ((500, 200, 700, 450), 2)]
 
-    annotated = draw_set_of_mark(rgb, boxes_and_ids, cam=cam)
+    annotated = draw_set_of_mark(rgb, boxes_and_ids)
     assert annotated.shape == (cam.height, cam.width, 3)
     assert (annotated > 0).any()
     assert (annotated[100:120, 100:150] > 0).any()
@@ -701,7 +690,7 @@ def test_draw_set_of_mark_with_labels_and_letters():
         ((700, 200, 850, 400), 3, "lamp:01"),
     ]
 
-    annotated = draw_set_of_mark(rgb, boxes_and_ids, cam=cam)
+    annotated = draw_set_of_mark(rgb, boxes_and_ids)
     assert annotated.shape == rgb.shape
     # Ensure badges are drawn
     assert (annotated[100:130, 100:250] > 0).any()

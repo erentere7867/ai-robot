@@ -830,12 +830,8 @@ class Perception:
             lbl = labels_by_id.get(tid, "")
             boxes_with_labels.append((scaled_box, tid, lbl))
 
-        cam = RIG.get(camera)
-        if cam is not None and (target_w != orig_w or target_h != orig_h):
-            cam = replace(cam, width=target_w, height=target_h)
-
         marks = frozenset(tid for _, tid, _ in boxes_with_labels)
-        return draw_set_of_mark(img, boxes_with_labels, cam=cam), marks, stamp
+        return draw_set_of_mark(img, boxes_with_labels), marks, stamp
 
     def objects(self) -> list[Track]:
         with self.lock:
@@ -899,9 +895,6 @@ def main() -> None:
     """The depth node: monocular depth for the three cameras, and the synthetic /scan made from it."""
     parser = argparse.ArgumentParser(description="Sprocket's depth node: depth estimates and synthetic /scan")
     parser.add_argument("--depth", action="store_true", help="run the depth node")
-    parser.add_argument("--on", choices=("gpu", "cpu"), default="gpu",
-                        help="gpu: the GPU vision server (tools/vision_server.py); cpu: here, with --threads")
-    parser.add_argument("--threads", type=int, default=2, help="CPU threads for the depth network")
     args = parser.parse_args()
     if not args.depth:
         parser.error("pass --depth to run the depth node")
@@ -911,15 +904,11 @@ def main() -> None:
     from rclpy.parameter import Parameter
 
     from robot.perception.depth import MonoDepth
+    from robot.perception.gpu import VisionServer
 
     rclpy.init()
     node = rclpy.create_node("sprocket_depth", parameter_overrides=[Parameter("use_sim_time", value=True)])
-    if args.on == "gpu":
-        from robot.perception.gpu import VisionServer
-
-        depth = DepthNode(node, MonoDepth(server=VisionServer()))
-    else:
-        depth = DepthNode(node, MonoDepth(threads=args.threads))
+    depth = DepthNode(node, MonoDepth(VisionServer()))
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     threading.Thread(target=executor.spin, daemon=True).start()
