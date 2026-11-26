@@ -113,6 +113,33 @@ the least that passes: task M1's first turn (3,500 tokens with the three picture
 `--rtf 0.1` and at `0.05` alike, with the model on 2 of the cores (`brain.sh` gives it half; on all 4 it took over
 180 s).
 
+## On a Colab GPU
+
+A coding agent can run level 1 and level 2 on a free Colab GPU (an NVIDIA T4) through Google's
+[colab-mcp](https://github.com/googlecolab/colab-mcp), set up for Claude Code in `.mcp.json`. It is a bridge to a
+notebook open in your own browser, not a remote API: the server listens on `localhost` and the Colab tab it opens
+connects back to it. So run Claude Code on a computer with a browser (with `uv` installed: `pip install uv`), not in a
+cloud session, ask it to open the Colab connection, and in Colab pick *Runtime > Change runtime type > T4 GPU*.
+
+Level 3 does not run there: ROS 2 lyrical needs Ubuntu 26.04 and Colab is an older Ubuntu without Docker. Each cell
+below is a shell cell (`%%bash`); Colab keeps `~` (`/root`) and background servers between cells until the runtime
+stops.
+
+```bash
+git clone https://github.com/erentere7867/ai-robot ~/ai-robot && cd ~/ai-robot   # add -b <branch> to test a PR
+python3 -m venv --system-site-packages ~/sprocket-venv
+~/sprocket-venv/bin/pip install -e ".[eval,dev]"
+~/sprocket-venv/bin/python -m ruff check . && ~/sprocket-venv/bin/python -m pytest -q        # level 1
+git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/llama.cpp && cd ~/llama.cpp \
+  && cmake -B build-cuda -DGGML_CUDA=ON && cmake --build build-cuda -j --target llama-server  # the CUDA build
+cd ~/ai-robot && mkdir -p models/llm && for f in LFM3-VL-2B-QAD-Q4_0.gguf mmproj-LFM3-VL-2B-F16.gguf; do
+  curl -fL -o models/llm/$f https://huggingface.co/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/$f; done  # only the model
+bash tools/linux/brain.sh                                          # picks build-cuda, so the model is on the GPU
+~/sprocket-venv/bin/python -m robot.eval.suite --tag colab         # level 2; results in runs/colab.jsonl
+```
+
+Copy `runs/` out of the runtime before it stops (download it, or mount Google Drive): nothing on Colab is kept.
+
 ## Level 2: the 2D suite
 
 ```bash

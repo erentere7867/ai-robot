@@ -7,7 +7,8 @@ For people and coding agents changing this repository.
 1. [README.md](README.md): what the robot is, **where each behaviour lives in the code** (a table), how to run it, and
    **how to debug a 3D run** (live page, per-task reports, logs).
 2. [docs/testing.md](docs/testing.md): how to test, and how to set up your own Linux machine for it
-   (`bash tools/linux/setup.sh`, then `python -m robot.eval.doctor --start --3d`).
+   (`bash tools/linux/setup.sh`, then `python -m robot.eval.doctor --start --3d`), or on a Colab GPU through
+   `.mcp.json` (levels 1 and 2 only).
 3. [docs/usage.md](docs/usage.md): setup on the Windows + WSL development PC, and every command.
 4. [docs/architecture.md](docs/architecture.md): the design; section 6 is the agent as it is.
 5. [docs/simulation_3d.md](docs/simulation_3d.md): what has been measured, including what did not work and why (read
