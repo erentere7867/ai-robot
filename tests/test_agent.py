@@ -1029,3 +1029,18 @@ def test_look_accepts_an_object_id_for_what_to_mark():
     cup = next(iter(robot.where("cup")))
     assert f"cup {cup.id}" in tools.look("front", f"cup {cup.id}")
     assert f"cup {cup.id}" in tools.look("front", str(cup.id))
+
+
+def test_coming_to_the_user_is_an_arrival_not_too_close():
+    robot = SimRobot(living_room())
+    result = Tools(robot).go_to("user")
+    assert result.ok and "closer than asked" not in result.text, result.text
+
+
+def test_progress_counts_repeated_steps_beyond_the_listed_ones():
+    robot = SimRobot(living_room())
+    tools = Tools(robot)
+    for _ in range(5):
+        tools.execute("turn", {"degrees": 90, "direction": "left"})
+        res = tools.execute("turn", {"degrees": 90, "direction": "right"})
+    assert "turned 90 degrees left x5" in res.text and "turned 90 degrees right x5" in res.text

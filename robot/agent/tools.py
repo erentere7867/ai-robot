@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -377,8 +378,12 @@ class Tools:
         facing = "facing the way it began" if abs(heading) < 5 else \
             f"facing {abs(heading):.0f} degrees {'left' if heading > 0 else 'right'} of the way it began"
         turning = f"; {self.turned:g} degrees of turning in all" if self.turned and name == "turn" else ""
-        return (f"This request so far: {'; '.join(self.done[-8:])}{turning}. You are {away:.1f} m from where it "
-                f"began, {facing}.")
+        # Counts, since only the last 8 steps are listed: "patrol three times" went on to the 16-turn limit
+        # (F6 in 5 of 6 passes), alternating door and sofa with no way to see how many trips were done.
+        repeats = [f"{step} x{n}" for step, n in Counter(self.done).items() if n > 1]
+        counted = f" Repeated so far: {'; '.join(repeats)}." if repeats else ""
+        return (f"This request so far: {'; '.join(self.done[-8:])}{turning}.{counted} You are {away:.1f} m from where "
+                f"it began, {facing}.")
 
     # ---- targets ------------------------------------------------------------------------------------------------
     def _choices(self, matches: list[Object]) -> str:
@@ -617,7 +622,7 @@ class Tools:
                 return ActionResult(f"Already at {self._name(t)}: you did not move.", True, "already_there", moved)
             return ActionResult(f"Arrived at {self._name(t)}.", True, "reached", moved)
         expected_gap = distance if distance is not None else (0.8 if person else 0.2 if side else 0.0)
-        result = self._arrived(t, expected_gap=expected_gap, moved_m=moved)
+        result = self._arrived(t, expected_gap=expected_gap, moved_m=moved, asked=distance)
         return replace(result, arrival_goal=(t.id, expected_gap, side))
 
     def go_to_side(self, target: str, side: str, distance: float | None = None) -> str | ActionResult:
@@ -626,7 +631,10 @@ class Tools:
     def stop_near(self, target: str, metres: float) -> str | ActionResult:
         return self.go_to(target, distance=metres)
 
-    def _arrived(self, t: Any, *, expected_gap: float = 0.0, moved_m: float = 0.0) -> ActionResult:
+    def _arrived(self, t: Any, *, expected_gap: float = 0.0, moved_m: float = 0.0,
+                 asked: float | None = None) -> ActionResult:
+        """`asked` is a gap the model asked for; the defaults are not (0.8 m for a person is to their centre, so
+        judging "come here" against it as a gap called every arrival at the user too close)."""
         if isinstance(t, Object):
             try:
                 self.robot.face(t)
@@ -643,9 +651,9 @@ class Tools:
                     True, "reached", moved_m,
                 )
             gap = max(0.0, fresh.distance - fresh.radius - ROBOT_RADIUS)
-            if gap < expected_gap - 0.3:
+            if asked is not None and gap < asked - 0.3:
                 return ActionResult(
-                    f"Ended closer than asked: facing {self._name(fresh)} with gap {gap:.1f} m, not {expected_gap:g} m.",
+                    f"Ended closer than asked: facing {self._name(fresh)} with gap {gap:.1f} m, not {asked:g} m.",
                     False, "partial", moved_m,
                 )
             if gap <= 0.6:
@@ -818,6 +826,9 @@ class Tools:
         self.robot.go_to(self.robot.toward(direction, metres))
         after = self.robot.pose()
         went = math.dist((before.x, before.y), (after.x, after.y))
+        if went < 0.1:  # "could not be reached" was retried: front 5 m drove 0.0 m four times in one O9 run
+            return ActionResult(f"Did not move: no open floor {direction} of you from here. Try another direction.",
+                                False, "partial", went)
         if went < 0.8 * metres - 0.2:
             return ActionResult(
                 f"Drove {went:.1f} m {direction} (ended short: the floor {metres:g} m that way could not be reached).",

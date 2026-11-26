@@ -80,7 +80,7 @@ def test_honest_move_turn_and_go_toward_partial_outcomes() -> None:
     # Short go_toward reports partial (ok=False)
     robot.go_to = lambda *a, **kw: None  # type: ignore[method-assign]
     res = tools.execute("go_toward", {"direction": "front", "metres": 2.0})
-    assert not res.ok and res.status == "partial" and "ended short" in res.text
+    assert not res.ok and res.status == "partial" and "Did not move: no open floor front" in res.text
 
 
 def test_successful_motion_progress_reports_measured_distance_and_turn(monkeypatch) -> None:
