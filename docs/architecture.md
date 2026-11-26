@@ -51,7 +51,6 @@ If software e-stop is set, call the Router Bridge RPC `estop(false)`. Then call 
 
 ## 3. Layer 1: The Living Body Engine (`robot/body/controller.py`)
 
-The full trajectory rollout below currently drives the 2D simulator at a 20 Hz simulated timestep.
 In ROS, Nav2 owns path following; the API owns direct motion such as gestures. Both use one velocity gate
 (`robot/ros/motion.py`): Nav2 and direct motion cannot own it at the same time. The gate sends only the active
 owner's command to Collision Monitor and accepts only fresh, matching replies for `/sprocket/cmd_vel_wheels`.
@@ -65,17 +64,8 @@ A ROS clock rewind requires restarting the motion process; an unconfirmed goal a
 The checked-in ROS wheel consumer is Habitat. There is no physical ROS-to-Ventuno bridge in this checkout, and
 physical stop timing has not been measured. This software stop is not a hardware e-stop.
 
-### 3.1 Driverless-Car Trajectory Rollout & Scoring
-At every control tick while navigating toward a goal or moving track:
-1. Roll out **7 smooth constant-curvature / spline candidate arcs** (`"A"`..`"G"`) over a $1.5\text{ s}$ horizon.
-2. Penalize occupied arcs. If every arc is blocked within 0.15 m, check tighter arcs at half speed before holding
-   forward motion. In the 2D doorway regression, both off-center approaches crossed without contact.
-3. Score remaining trajectories by:
-   - Obstacle clearance margin
-   - Progress toward target (or predicted future position `track.predict(dt)`)
-   - Curvature smoothness (minimizing angular jerk)
-   - **Predictive Social Yielding:** Projects every tracked person's velocity vector $(v_x, v_y)$ $2.0\text{ s}$ ahead. In narrow passages with an approaching person, penalizes blocking trajectories and rewards pulling cleanly to the right wall while slightly angling toward the passerby.
-4. **Non-Stop Waypoint Pursuit:** Advances through waypoint paths using a `0.28 m` blend radius so Sprocket curves smoothly between segments without stopping (`v > 0`) until final arrival.
+### 3.1 2D Path Following
+The ROS-free 2D simulator turns toward each waypoint and drives straight to it; Habitat uses Nav2 instead.
 
 ### 3.2 Wake-Word-Locked DOA Spinal Reflex
 - `DOARingBuffer` maintains a 2.5 s sliding window of `(timestamp, audio, doa_rad)`.

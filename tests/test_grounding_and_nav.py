@@ -43,7 +43,6 @@ def test_sim_pursuit_only_credits_new_ground(monkeypatch, detour):
         sim.t += 1.0
 
     monkeypatch.setattr(sim, "_step", step)
-    monkeypatch.setattr(sim.body, "step_pursuit", lambda *_, **kw: (0.1, 0.0, 0, False))
     if detour:
         sim._pursue([(3.0, 0.0)], 0.1, goal=(3.0, 0.0))
         assert sim.x == 3.0

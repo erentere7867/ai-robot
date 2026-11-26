@@ -96,8 +96,8 @@ audit1's 13 failures were 7 harness or body, 4 model, 2 my checks:
 - **A sofa the tools could not see (4 failures).** 5.5 m away and plain in the picture, but never in the object list:
   the 2D world's 4.5 m "see range" capped detection. Detection now goes by size in the picture only.
 - **Stuck in a corner.** After a search left the robot facing a wall beside the TV stand, every route stalled at its
-  first waypoint: the path follower only drove forward arcs, with a forced minimum speed. It now turns on the spot to
-  face a waypoint more than 45° off (in `robot/body/controller.py`, which the real robot uses too).
+  first waypoint: the path follower only drove forward arcs, with a forced minimum speed. The 2D follower turns on
+  the spot to face the waypoint before driving.
 - **"Come back here" with nothing pointing back.** The place list reached the model only with pictures, so after two
   `go_to`s it never saw where the request began. Motion results now end with the room and the places, each with
   distance and direction.

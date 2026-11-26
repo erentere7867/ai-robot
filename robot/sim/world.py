@@ -428,9 +428,10 @@ class SimRobot:
             self.ended_by = "budget"
             raise BudgetSpent(f"used {self.max_time:.0f} s of simulated time")
 
-    def _clearance(self, direction: float) -> float:
+    def _clearance(self, direction: float, *, yaw: float | None = None) -> float:
         """Free distance from the robot's edge to the nearest obstacle in the direction of travel."""
-        c, s = math.cos(self.yaw) * direction, math.sin(self.yaw) * direction
+        heading = self.yaw if yaw is None else yaw
+        c, s = math.cos(heading) * direction, math.sin(heading) * direction
         people = [p for _, p in self._people()]
         for d in np.arange(0.0, SLOW_ZONE + RES, RES):
             for lat in (-RADIUS, 0.0, RADIUS):
@@ -453,7 +454,7 @@ class SimRobot:
                 v *= 0.5
         yaw = self.yaw + w * dt
         nx, ny = self.x + v * dt * math.cos(yaw), self.y + v * dt * math.sin(yaw)
-        if v and any(self._occ(nx + RADIUS * math.cos(a), ny + RADIUS * math.sin(a)) for a in np.linspace(0, 6.28, 12)):
+        if v and self._would_bump(nx, ny):
             self.trace.bumps += 1
             v, nx, ny = 0.0, self.x, self.y
         self.x, self.y, self.yaw = nx, ny, wrap(yaw)
@@ -463,6 +464,9 @@ class SimRobot:
         self._perceive()
         if self.realtime:
             time.sleep(dt)
+
+    def _would_bump(self, x: float, y: float) -> bool:
+        return any(self._occ(x + RADIUS * math.cos(a), y + RADIUS * math.sin(a)) for a in np.linspace(0, 6.28, 12))
 
     def _rotate(self, angle: float, rate: float = TURN_RATE) -> None:
         n = max(1, math.ceil(abs(angle) / (rate * DT)))
@@ -546,19 +550,18 @@ class SimRobot:
         self,
         points: list[Point],
         speed: float,
-        end_tol: float = 0.1,
         goal: Point | None = None,
         reach: float = 0.0,
     ) -> None:
-        """Drive through points in order using BodyController.step_pursuit (non-stop waypoint spline pursuit)."""
+        """Execute waypoints as a kinematic test double for Nav2's FollowPath."""
         progress = Progress((self.x, self.y), self.t, 0.05, STALL_S)
         idx = 0
-        waypoints = [(float(p[0]), float(p[1])) for p in points]
-        while idx < len(waypoints):
+        self.held = False
+        while idx < len(points):
             self._interrupts()
-            tx, ty = waypoints[idx]
+            tx, ty = points[idx]
             d = math.hypot(tx - self.x, ty - self.y)
-            last = idx == len(waypoints) - 1
+            last = idx == len(points) - 1
             if (goal is not None and math.dist(goal, (self.x, self.y)) <= reach) or (last and self.held and d < 0.5):
                 break
 
@@ -579,35 +582,32 @@ class SimRobot:
                 self._halt()
                 raise PathBlocked("cable snag detected, backed off")
 
-            # Extract moving people for predictive social yielding
-            people = []
-            for t, p in self._people():
-                vx = vy = 0.0
-                if t.route and t.speed > 0:
-                    p_next = t.at(self.t + 0.5)
-                    if p_next:
-                        vx = (p_next[0] - p[0]) / 0.5
-                        vy = (p_next[1] - p[1]) / 0.5
-                people.append((p[0], p[1], vx, vy))
+            advance = d <= (0.08 if last else 1e-6)
+            if not advance and not last and self.held and d <= 0.28:
+                nx, ny = points[idx + 1]
+                next_yaw = math.atan2(ny - self.y, nx - self.x)
+                advance = self._clearance(1.0, yaw=next_yaw) >= STOP_ZONE
+            if advance:
+                idx += 1
+                self.held = False
+                progress.stalled((self.x, self.y), self.t, advanced=True)
+                continue
 
-            v_cmd, w_cmd, next_idx, arrived = self.body.step_pursuit(
-                (self.x, self.y, self.yaw),
-                waypoints,
-                idx,
-                blend_r=0.28,
-                v_cruise=speed,
-                occupied_fn=lambda x, y: self._occ(x, y, self.inflated),
-                people=people,
-            )
-            if arrived:
-                break
-
-            if progress.stalled((self.x, self.y), self.t, advanced=next_idx > idx):
+            if progress.stalled((self.x, self.y), self.t):
                 self._halt()
                 raise PathBlocked(f"no progress toward ({tx:.1f}, {ty:.1f}) for {STALL_S:.0f} s")
 
-            idx = next_idx
-            self._step(v_cmd * torque, w_cmd)
+            turn = wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw)
+            if abs(turn) > 1e-6:
+                self._step(0.0, turn / DT)
+            else:
+                v = min(V_MAX, speed * torque, d / DT)
+                nx = self.x + v * DT * math.cos(self.yaw)
+                ny = self.y + v * DT * math.sin(self.yaw)
+                if self._would_bump(nx, ny):
+                    self._halt()
+                    raise PathBlocked(f"the path toward ({tx:.1f}, {ty:.1f}) is obstructed")
+                self._step(v, 0.0)
         self._halt()
 
     def _route(self, target: Point | Pose | Object, goal: Point, reach: float) -> list[Point] | None:
@@ -808,7 +808,7 @@ class SimRobot:
             if not isinstance(target, Object) and not self._occ(*goal, self.inflated):
                 path.append(goal)  # the grid gets close; the last stretch goes to the exact point
             try:
-                self._pursue(path, CRUISE, end_tol=0.08, goal=goal, reach=reach)
+                self._pursue(path, CRUISE, goal=goal, reach=reach)
                 break
             except PathBlocked:  # something moved into the way: plan again around it, once
                 attempts += 1
