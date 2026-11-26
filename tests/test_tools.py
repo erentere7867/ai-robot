@@ -311,3 +311,10 @@ def test_turn_span_is_the_net_rotation_not_every_wobble():
 def test_a_negative_size_is_explained_with_the_call_to_make_instead():
     res = Tools(SimRobot(living_room())).execute("move", {"metres": -1, "direction": "backward"})
     assert "metres is a size and is never negative. Call it again with metres=1" in res.text
+
+
+def test_going_to_the_thing_you_are_at_says_you_did_not_move():
+    tools = Tools(SimRobot(living_room()))
+    assert "Reached box" in tools.execute("go_to", {"target": "box"}).text
+    again = tools.execute("go_to", {"target": "box"})
+    assert again.ok and again.status == "already_there" and "Already at box" in again.text

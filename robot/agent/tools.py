@@ -671,6 +671,11 @@ class Tools:
                     f"Ended closer than asked: facing {self._name(fresh)} with gap {gap:.1f} m, not {asked:g} m.",
                     False, "partial", moved_m,
                 )
+            if gap <= 0.6 and moved_m < 0.1:
+                # 300 of 1675 arrivals in 20 2D passes were at the thing just reached, each read "Reached" again
+                # (C3 drove to box 1 eight times); a saved place already said "Already at".
+                return ActionResult(f"Already at {self._name(fresh)}, facing it (gap {gap:.1f} m): you did not move.",
+                                    True, "already_there", moved_m)
             if gap <= 0.6:
                 return ActionResult(
                     f"Drive finished. Reached {self._name(fresh)}, facing it "
