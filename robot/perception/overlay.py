@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from robot.perception.rig import Camera
-
 # 5x7 bitmap font for ASCII characters
 _FONT_5X7: dict[str, list[int]] = {
     " ": [0, 0, 0, 0, 0, 0, 0],
@@ -104,9 +102,10 @@ def _place_badge(bx0: int, by0: int, bw: int, bh: int, w: int, h: int,
     return max(0, min(w - bw, bx0)), max(0, min(h - bh, by0))
 
 
-def draw_set_of_mark(rgb: np.ndarray,
-                     boxes_and_ids: list[tuple[tuple[int, int, int, int], int] | tuple[tuple[int, int, int, int], int, str]],
-                     cam: Camera | None = None) -> np.ndarray:
+Box = tuple[int, int, int, int]
+
+
+def draw_set_of_mark(rgb: np.ndarray, boxes_and_ids: list[tuple[Box, int] | tuple[Box, int, str]]) -> np.ndarray:
     """Draw the tracker's id badges on the boxes of what was detected."""
     out = np.array(rgb, copy=True)
     h, w = out.shape[:2]
