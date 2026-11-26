@@ -90,13 +90,14 @@ repository folder or the venv.
    apartment; about 650 MB). On a machine without a GPU it renders with Mesa on the CPU: slower, but it works.
 4. **Models** in `models/` (ignored by git): `bash tools/linux/setup_models.sh` fetches the language model
    (LiquidAI's LFM3-VL-2B GGUF and its vision projector, into `models/llm/`), YOLOE-26l, the pose model, MobileCLIP's
-   text encoder, the depth network, the voice and Whisper, and makes the vision server's two ONNX files in
+   text encoder, Depth Anything V2 Base FP32, the voice and Whisper, and makes the vision server's two ONNX files in
    `models/vision/`.
 5. **The language model's server**: llama.cpp build 11960 or newer, built in `~/llama.cpp` (`cmake -B build && cmake
    --build build -j`; with `-DGGML_CUDA=ON` into `build-cuda` for an NVIDIA GPU), then `bash tools/linux/brain.sh`
    (port 8081).
-6. **The vision server**: `bash tools/linux/vision.sh` (port 8090; `--stop` to stop). On the CPU by default; with
-   `onnxruntime-gpu` installed, `SPROCKET_VISION_PROVIDER=CUDAExecutionProvider` puts it on an NVIDIA GPU.
+6. **The vision server**: `bash tools/linux/vision.sh` (port 8090; `--stop` to stop). The ROS depth node always
+   uses this server, which runs on the CPU by default. With `onnxruntime-gpu` installed,
+   `SPROCKET_VISION_PROVIDER=CUDAExecutionProvider` puts it on an NVIDIA GPU.
 
 How fast the pieces are, so runs can be planned:
 
@@ -127,8 +128,10 @@ python -m robot.eval.home3d --tag mine --rtf 0.5 --live 8765 --only N1 S1
 bash tools/linux/stop.sh                       # stops everything a run started
 ```
 
-The first run in a layout explores it for about 30 minutes and saves the map in `maps/`. Each task's results go to
-`runs/<tag>.jsonl`, and its report to `runs/<tag>/<scene>/<task>/report.html`.
+An unmapped layout is explored once and saved to `maps/` (default budget: 600 simulated seconds).
+`apt_0` ships with a map. Each task's results go to `runs/<tag>.jsonl`, and its report to
+`runs/<tag>/<scene>/<task>/report.html`. Eval memory is isolated in each task's `memory.db`. Use `--only R1R`
+to check recall after a correction and restart, or `--no-memory` for a run without a durable store.
 
 ## How we test a change
 
