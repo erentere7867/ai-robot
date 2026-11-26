@@ -670,6 +670,7 @@ def test_partial_action_stops_remaining_batched_calls() -> None:
             ToolCall("c1", "move", {"metres": 1.0, "direction": "forward"}),
             ToolCall("c2", "turn", {"degrees": 90, "direction": "left"}),
         ]),
+        say("Finished both."),
         say("Stopped short."),
     )
     record = Agent(brain).do("Move forward 1 m then turn left.", robot)
@@ -678,6 +679,21 @@ def test_partial_action_stops_remaining_batched_calls() -> None:
     results = tool_results(brain.seen[1])
     assert "ended short" in _text(results[0])
     assert "Not run:" in _text(results[1])
+    assert "Unfinished motion:" in brain.seen[2][-1]["content"]
+    assert [text for _, text in robot.trace.said] == ["Stopped short."]
+
+
+def test_a_successful_retry_does_not_review_resolved_motion(monkeypatch):
+    robot = SimRobot(living_room())
+    move = robot.move
+    attempts = iter([False, True])
+    monkeypatch.setattr(robot, "move", lambda *args, **kwargs: move(*args, **kwargs) if next(attempts) else None)
+    move_call = call("move", metres=1, direction="forward")
+    brain = Scripted(move_call, move_call, say("Moved forward."))
+    record = Agent(brain).do("Move forward 1 m.", robot)
+    assert record.outcome == "done"
+    assert len(brain.seen) == 3
+    assert [text for _, text in robot.trace.said] == ["Moved forward."]
 
 
 def test_correction_during_thinking_cancels_stale_tool_calls() -> None:
@@ -696,6 +712,7 @@ def test_correction_during_thinking_cancels_stale_tool_calls() -> None:
         call("turn", degrees=90, direction="left"),
         call("turn", degrees=90, direction="right"),
         say("Turned right instead."),
+        say("I couldn't complete the turn."),
     )
     agent = Agent(brain)
     record = agent.do("Turn left 90 degrees.", robot)

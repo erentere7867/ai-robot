@@ -331,6 +331,7 @@ class Agent:
         seen_calls: dict[tuple[str, ...], int] = {}
         looks_here = 0
         blocked_tools: set[str] = set()
+        partial_motion: tuple[tuple[str, ...], str] | None = None
         schemas = tools.schemas()
         think = self.think  # the request is news
         sorry = "Sorry, I couldn't finish that. Could you tell me another way?"
@@ -381,9 +382,12 @@ class Agent:
                                          "call a tool for your next step, or reply to the user."})
                         think = self.think
                         continue
-                    if not reviewed and (tools.todo.open_steps() or (self.review and any(s.calls for s in record.steps))):
+                    if not reviewed and (partial_motion or tools.todo.open_steps()
+                                         or (self.review and any(s.calls for s in record.steps))):
                         reviewed = True
-                        messages.append({"role": "user", "content": self._review(instruction, record, tools)})
+                        messages.append({"role": "user", "content": self._review(
+                            instruction, record, tools, partial_motion[1] if partial_motion else "",
+                        )})
                         think = self._budget(news=False)
                         continue
                     open_steps = tools.todo.open_steps()
@@ -451,8 +455,14 @@ class Agent:
                                 for old, new in zip(prior_steps, revised, strict=False)
                             )
                         if res.status == "partial":
+                            # C1 reported success on the T4 even after stopping 1.08 m from the sofa.
+                            partial_motion = key, result
                             barrier = ("Not run: an earlier call in this turn ended short; inspect the result before "
                                        "deciding the next action.")
+                        elif partial_motion and key == partial_motion[0] and ok and res.status in (
+                            "reached", "already_there",
+                        ):
+                            partial_motion = None
                         if self.see_after_moves is True and tools.moved:
                             move_cams = self.cameras
                         elif (self.see_after_moves == "front" and self.cameras and call.name in FRONT_CHECK
@@ -552,7 +562,7 @@ class Agent:
                                  camera_limit=max(1, MAX_IMAGES - recorded))
 
     @staticmethod
-    def _review(instruction: str, record: TaskRecord, tools: Tools) -> str:
+    def _review(instruction: str, record: TaskRecord, tools: Tools, partial_motion: str = "") -> str:
         """Before a task ends: the request, what was done, and what remains."""
         calls = [line for line in record.lines() if not line.startswith("reply:")]
         done = ("\n".join(f"- {line}" for line in calls[-12:]) if calls else
@@ -566,6 +576,8 @@ class Agent:
             todo += f"\nBlocked to-do steps: {'; '.join(blocked_steps)}."
         if open_steps:
             todo += f"\nOpen to-do steps: {'; '.join(open_steps)}."
+        if partial_motion:
+            todo += f"\nUnfinished motion: {partial_motion} Do not describe it as complete unless you finish it."
         return (f'Before you finish, check every part of the request: "{instruction}"\nWhat you did:\n{done}{todo}\n'
                 "Use the user's later corrections if they changed the request. "
                 "If you can finish a remaining step, use tools now. Otherwise reply briefly with what you finished "
