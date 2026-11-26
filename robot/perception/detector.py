@@ -121,15 +121,14 @@ class Detector:
         pose_res = self._pose_model.predict(rgb[:, :, ::-1], conf=0.25, imgsz=size, verbose=False)[0]
         if pose_res.boxes is None or pose_res.keypoints is None:
             return
-        pose_boxes = _to_numpy(pose_res.boxes.xyxy)
-        pose_kpts = _extract_keypoints(pose_res.keypoints)
-        if pose_kpts is None or pose_boxes.ndim != 2 or len(pose_boxes) == 0 or len(pose_kpts) == 0:
+        pose_boxes = pose_res.boxes.xyxy.cpu().numpy()
+        pose_kpts = pose_res.keypoints.data.cpu().numpy().astype(np.float32)  # (people, 17, 3): u, v, confidence
+        if not len(pose_boxes):
             return
-        count = min(len(pose_boxes), len(pose_kpts))
         for s in people:
-            best_idx = max(range(count), key=lambda i: _box_iou(s.box, pose_boxes[i]))
+            best_idx = max(range(len(pose_boxes)), key=lambda i: _box_iou(s.box, pose_boxes[i]))
             if _box_iou(s.box, pose_boxes[best_idx]) > 0.2:
-                s.keypoints = np.asarray(pose_kpts[best_idx, :, :3], dtype=np.float32)
+                s.keypoints = pose_kpts[best_idx]
 
 
 def _box_mask(patch: np.ndarray, cover: Any, box: tuple[float, float, float, float]) -> np.ndarray | None:
@@ -186,46 +185,11 @@ def _resolve_weights(weights: str | None) -> str | None:
 
 def _load_yolo(weights: str | None) -> Any:
     resolved = _resolve_weights(weights)
-    if not resolved:
+    if not resolved or not Path(resolved).is_file():
         return None
-    try:
-        from ultralytics import YOLO
-    except ImportError:
-        return None
-    if not Path(resolved).is_file() and getattr(YOLO, "__module__", "").startswith("ultralytics"):
-        return None
+    from ultralytics import YOLO
+
     return YOLO(resolved)
-
-
-def _to_numpy(value: Any) -> np.ndarray:
-    if hasattr(value, "detach"):
-        value = value.detach()
-    if hasattr(value, "cpu"):
-        value = value.cpu()
-    if hasattr(value, "numpy"):
-        value = value.numpy()
-    return np.asarray(value, dtype=np.float32)
-
-
-def _extract_keypoints(keypoints_obj: Any) -> np.ndarray | None:
-    data = getattr(keypoints_obj, "data", None)
-    if data is not None:
-        arr = _to_numpy(data)
-        return arr if arr.ndim == 3 and arr.shape[-1] >= 3 else None
-    xy = getattr(keypoints_obj, "xy", None)
-    if xy is not None:
-        xy_arr = _to_numpy(xy)
-        if xy_arr.ndim != 3:
-            return None
-        conf = getattr(keypoints_obj, "conf", None)
-        if conf is not None:
-            conf_arr = _to_numpy(conf)
-            if conf_arr.ndim == 2:
-                conf_arr = conf_arr[..., None]
-        else:
-            conf_arr = np.ones((*xy_arr.shape[:2], 1), dtype=np.float32)
-        return np.concatenate([xy_arr, conf_arr], axis=-1).astype(np.float32)
-    return None
 
 
 def _box_iou(a: tuple[float, float, float, float], b: Any) -> float:

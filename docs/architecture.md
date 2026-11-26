@@ -134,7 +134,6 @@ Every posture is paired with non-verbal procedural audio (`chime()` in `robot/in
    - Associates people across cameras using clothing appearance histograms + `MobileCLIP2` visual vectors + `WeSpeaker` voiceprint IDs.
 4. **Human Pose, Gaze & Pointing (`pose.py`):**
    - `estimate_pose_from_keypoints()` turns 2D skeleton keypoints + depth into 3D `HumanPose` (`facing_yaw`, `head_yaw`, `posture`: `standing`/`sitting`/`crouching`/`waving`/`pointing`, `pointing_ray`, `gaze_ray`).
-   - `resolve_ray_target()` resolves *"that"*, *"over there"*, or joint-attention *"look at that"* by finding the nearest tracked object inside the ray cone or intersecting the ray with the floor ($z = 0$).
 5. **Places that are not one thing (`go_toward`):** the model says the direction of the picture the place is in and
    about how far ("behind-left, 2 m"); Nav2 drives there, stopping before anything in the way. Numbered dots on the
    floor for the model to pick were tried and dropped: the 2B model took the last number nearly every time.
