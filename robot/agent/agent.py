@@ -331,7 +331,7 @@ class Agent:
         seen_calls: dict[tuple[str, ...], int] = {}
         looks_here = 0
         blocked_tools: set[str] = set()
-        partial_motion: tuple[tuple[str, ...], str] | None = None
+        partial_motion: tuple[tuple[str, ...], ActionResult] | None = None
         schemas = tools.schemas()
         think = self.think  # the request is news
         sorry = "Sorry, I couldn't finish that. Could you tell me another way?"
@@ -387,7 +387,7 @@ class Agent:
                     )):
                         reviewed = True
                         messages.append({"role": "user", "content": self._review(
-                            instruction, record, tools, partial_motion[1] if partial_motion else "",
+                            instruction, record, tools, partial_motion[1].text if partial_motion else "",
                         )})
                         partial_motion = None
                         think = self._budget(news=False)
@@ -458,13 +458,14 @@ class Agent:
                             )
                         if res.status == "partial":
                             # C1 reported success on the T4 even after stopping 1.08 m from the sofa.
-                            partial_motion = key, result
+                            partial_motion = key, res
                             barrier = ("Not run: an earlier call in this turn ended short; inspect the result before "
                                        "deciding the next action.")
-                        elif partial_motion and key == partial_motion[0] and ok and res.status in (
-                            "reached", "already_there",
-                        ):
-                            partial_motion = None
+                        elif partial_motion and ok and res.status in ("reached", "already_there"):
+                            previous_key, previous_result = partial_motion
+                            goal = previous_result.arrival_goal
+                            if (res.arrival_goal == goal if goal is not None else key == previous_key):
+                                partial_motion = None
                         if self.see_after_moves is True and tools.moved:
                             move_cams = self.cameras
                         elif (self.see_after_moves == "front" and self.cameras and call.name in FRONT_CHECK

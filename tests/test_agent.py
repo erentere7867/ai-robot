@@ -713,6 +713,34 @@ def test_a_successful_retry_does_not_review_resolved_motion(monkeypatch):
     assert [text for _, text in robot.trace.said] == ["Moved forward."]
 
 
+@pytest.mark.parametrize("retry_id", [3, 4])
+def test_partial_arrival_is_resolved_by_target_identity_not_spelling(monkeypatch, retry_id):
+    robot = SimRobot(living_room())
+    sofa = Object(3, "sofa", (2.0, 0.0), 2.0, 0.0, "ahead", 0.3, "", 0.0)
+    other = replace(sofa, id=4)
+    drives = []
+
+    def obj(oid):
+        target = sofa if oid == 3 else other
+        return replace(target, distance=0.5) if len(drives) == 2 else target
+
+    monkeypatch.setattr(robot, "where", lambda _: [sofa])
+    monkeypatch.setattr(robot, "obj", obj)
+    monkeypatch.setattr(robot, "go_to", lambda target, **kwargs: drives.append(target.id))
+    monkeypatch.setattr(robot, "face", lambda _: None)
+    monkeypatch.setattr(robot, "sees_now", lambda _: True)
+    brain = Scripted(call("go_to", target="sofa"), call("go_to", target=f"sofa {retry_id}"),
+                     say("Arrived."), say("Only reached the other sofa."))
+
+    record = Agent(brain, cameras="none").do("Go to the sofa.", robot)
+
+    assert record.outcome == "done"
+    assert drives == [3, retry_id]
+    assert len(brain.seen) == (3 if retry_id == 3 else 4)
+    if retry_id == 4:
+        assert "Unfinished motion:" in brain.seen[3][-1]["content"]
+
+
 def test_correction_during_thinking_cancels_stale_tool_calls() -> None:
     robot = SimRobot(living_room())
     ran = []
