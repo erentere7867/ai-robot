@@ -158,7 +158,8 @@ Host colab-sprocket
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
 END
-# the runtime takes one ssh connection at a time; ControlMaster lets later commands share it
+# the runtime takes one ssh connection at a time; ControlMaster lets later commands share it, but a tunnel
+# loop must not go through it: the client exits at once, so the loop retries every few seconds and is refused
 ssh colab-sprocket 'mkdir -p ~/ai-robot/models/vision && cat > ~/ai-robot/models/vision/yoloe26l_8.onnx' \
   < models/vision/yoloe26l_8.onnx                                # made by setup_models.sh; too big for colab upload
 ssh colab-sprocket 'cd ~/ai-robot && curl -sfL -o models/vision/depth_base.onnx \
@@ -166,7 +167,9 @@ ssh colab-sprocket 'cd ~/ai-robot && curl -sfL -o models/vision/depth_base.onnx 
   && uv pip uninstall -q --python ~/sprocket-venv/bin/python onnxruntime \
   && uv pip install -q --python ~/sprocket-venv/bin/python "onnxruntime-gpu[cuda,cudnn]" \
   && SPROCKET_VISION_PROVIDER=CUDAExecutionProvider bash tools/linux/vision.sh'
-ssh -fN -L 127.0.0.1:8081:localhost:8081 -L 127.0.0.1:8090:localhost:8090 colab-sprocket
+ssh -O exit colab-sprocket   # free the one connection for the tunnel, which reconnects: one drop failed every later task
+(while :; do ssh -N -o ControlMaster=no -o ControlPath=none -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
+   -L 127.0.0.1:8081:localhost:8081 -L 127.0.0.1:8090:localhost:8090 colab-sprocket; sleep 5; done) &
 docker exec -it sprocket bash -c '. tools/linux/env.sh && python -m robot.eval.doctor --3d --rtf 0.1'
 ```
 
