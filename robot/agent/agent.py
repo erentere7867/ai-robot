@@ -337,7 +337,7 @@ class Agent:
         sorry = "Sorry, I couldn't finish that. Could you tell me another way?"
 
         try:
-            for _ in range(self.max_turns):
+            for turn in range(self.max_turns):
                 if self._stopped.is_set():
                     return self._finish(robot, record, "preempted", last_said)
                 self._trim_images(messages)
@@ -382,9 +382,10 @@ class Agent:
                                          "call a tool for your next step, or reply to the user."})
                         think = self.think
                         continue
-                    if partial_motion or (not reviewed and (
+                    needs_review = partial_motion is not None or (not reviewed and (
                         tools.todo.open_steps() or (self.review and any(s.calls for s in record.steps))
-                    )):
+                    ))
+                    if needs_review and turn + 1 < self.max_turns:
                         reviewed = True
                         messages.append({"role": "user", "content": self._review(
                             instruction, record, tools, partial_motion[1].text if partial_motion else "",
