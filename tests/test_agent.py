@@ -670,6 +670,7 @@ def test_partial_action_stops_remaining_batched_calls() -> None:
             ToolCall("c1", "move", {"metres": 1.0, "direction": "forward"}),
             ToolCall("c2", "turn", {"degrees": 90, "direction": "left"}),
         ]),
+        say("Finished both."),
         say("Stopped short."),
     )
     record = Agent(brain).do("Move forward 1 m then turn left.", robot)
@@ -678,6 +679,89 @@ def test_partial_action_stops_remaining_batched_calls() -> None:
     results = tool_results(brain.seen[1])
     assert "ended short" in _text(results[0])
     assert "Not run:" in _text(results[1])
+    assert "Unfinished motion:" in brain.seen[2][-1]["content"]
+    assert [text for _, text in robot.trace.said] == ["Stopped short."]
+
+
+def test_each_new_partial_motion_gets_one_review_even_after_an_earlier_review(monkeypatch):
+    robot = SimRobot(living_room())
+    monkeypatch.setattr(robot, "move", lambda *args, **kwargs: None)
+    brain = Scripted(call("turn", degrees=90, direction="left"), say("Finished."),
+                     call("move", metres=1, direction="forward"), say("Finished again."),
+                     call("move", metres=1, direction="forward"), say("Definitely finished."),
+                     say("I turned but could not move forward."))
+
+    Agent(brain, review=True, cameras="none").do("Turn left and move forward 1 m.", robot)
+
+    assert "Before you finish" in brain.seen[2][-1]["content"]
+    assert "Unfinished motion:" not in brain.seen[2][-1]["content"]
+    assert "Unfinished motion:" in brain.seen[4][-1]["content"]
+    assert "Unfinished motion:" in brain.seen[6][-1]["content"]
+    assert [text for _, text in robot.trace.said] == ["I turned but could not move forward."]
+
+
+def test_partial_motion_review_can_correct_earlier_speech(monkeypatch):
+    robot = SimRobot(living_room())
+    monkeypatch.setattr(robot, "move", lambda *args, **kwargs: None)
+    brain = Scripted(call("move", metres=1, direction="forward"), call("say", text="I made it."),
+                     say("I made it."), say("I stopped short."))
+
+    Agent(brain, cameras="none").do("Move forward 1 m.", robot)
+
+    assert "Unfinished motion:" in brain.seen[3][-1]["content"]
+    assert [text for _, text in robot.trace.said] == ["I made it.", "I stopped short."]
+
+
+def test_last_model_turn_keeps_the_reply_after_partial_motion(monkeypatch):
+    robot = SimRobot(living_room())
+    monkeypatch.setattr(robot, "move", lambda *args, **kwargs: None)
+    brain = Scripted(call("move", metres=1, direction="forward"), say("I stopped before reaching the full metre."))
+
+    record = Agent(brain, cameras="none", max_turns=2).do("Move forward 1 m.", robot)
+
+    assert record.outcome == "done"
+    assert [text for _, text in robot.trace.said] == ["I stopped before reaching the full metre."]
+
+
+def test_a_successful_retry_does_not_review_resolved_motion(monkeypatch):
+    robot = SimRobot(living_room())
+    move = robot.move
+    attempts = iter([False, True])
+    monkeypatch.setattr(robot, "move", lambda *args, **kwargs: move(*args, **kwargs) if next(attempts) else None)
+    move_call = call("move", metres=1, direction="forward")
+    brain = Scripted(move_call, move_call, say("Moved forward."))
+    record = Agent(brain).do("Move forward 1 m.", robot)
+    assert record.outcome == "done"
+    assert len(brain.seen) == 3
+    assert [text for _, text in robot.trace.said] == ["Moved forward."]
+
+
+@pytest.mark.parametrize("retry_id", [3, 4])
+def test_partial_arrival_is_resolved_by_target_identity_not_spelling(monkeypatch, retry_id):
+    robot = SimRobot(living_room())
+    sofa = Object(3, "sofa", (2.0, 0.0), 2.0, 0.0, "ahead", 0.3, "", 0.0)
+    other = replace(sofa, id=4)
+    drives = []
+
+    def obj(oid):
+        target = sofa if oid == 3 else other
+        return replace(target, distance=0.5) if len(drives) == 2 else target
+
+    monkeypatch.setattr(robot, "where", lambda _: [sofa])
+    monkeypatch.setattr(robot, "obj", obj)
+    monkeypatch.setattr(robot, "go_to", lambda target, **kwargs: drives.append(target.id))
+    monkeypatch.setattr(robot, "face", lambda _: None)
+    monkeypatch.setattr(robot, "sees_now", lambda _: True)
+    brain = Scripted(call("go_to", target="sofa"), call("go_to", target=f"sofa {retry_id}"),
+                     say("Arrived."), say("Only reached the other sofa."))
+
+    record = Agent(brain, cameras="none").do("Go to the sofa.", robot)
+
+    assert record.outcome == "done"
+    assert drives == [3, retry_id]
+    assert len(brain.seen) == (3 if retry_id == 3 else 4)
+    if retry_id == 4:
+        assert "Unfinished motion:" in brain.seen[3][-1]["content"]
 
 
 def test_correction_during_thinking_cancels_stale_tool_calls() -> None:
@@ -696,6 +780,7 @@ def test_correction_during_thinking_cancels_stale_tool_calls() -> None:
         call("turn", degrees=90, direction="left"),
         call("turn", degrees=90, direction="right"),
         say("Turned right instead."),
+        say("I couldn't complete the turn."),
     )
     agent = Agent(brain)
     record = agent.do("Turn left 90 degrees.", robot)

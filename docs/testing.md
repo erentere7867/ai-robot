@@ -95,8 +95,9 @@ repository folder or the venv.
 5. **The language model's server**: llama.cpp build 11960 or newer, built in `~/llama.cpp` (`cmake -B build && cmake
    --build build -j`; with `-DGGML_CUDA=ON` into `build-cuda` for an NVIDIA GPU), then `bash tools/linux/brain.sh`
    (port 8081).
-6. **The vision server**: `bash tools/linux/vision.sh` (port 8090; `--stop` to stop). On the CPU by default; with
-   `onnxruntime-gpu` installed, `SPROCKET_VISION_PROVIDER=CUDAExecutionProvider` puts it on an NVIDIA GPU.
+6. **The vision server**: `bash tools/linux/vision.sh` (port 8090; `--stop` to stop). The ROS depth node always
+   uses this server, which runs on the CPU by default. With `onnxruntime-gpu` installed,
+   `SPROCKET_VISION_PROVIDER=CUDAExecutionProvider` puts it on an NVIDIA GPU.
 
 How fast the pieces are, so runs can be planned:
 
