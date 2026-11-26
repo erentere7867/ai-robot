@@ -47,6 +47,7 @@ tools/        start the model (brain.ps1, wsl/brain.sh) and the GPU vision serve
 | :--- | :--- |
 | What the model is told, and the agent loop | `robot/agent/agent.py` (`SYSTEM`, `Agent.do`) |
 | The tools the model can call, their descriptions and checks | `robot/agent/tools.py` |
+| Which skill is running and when it ends | `robot/agent/skill.py` (`SkillMachine`) |
 | What a tool does in the world: `search`, `go_to`, `follow`, ... | `robot/sim/world.py` (`SimRobot`), overridden on the real stack in `robot/ros/real.py` (`RealRobot`) |
 | Driving through Nav2 | `robot/ros/robot.py` (`RosRobot`) |
 | What YOLOE looks for, tracking, the model's check of each detection | `robot/perception/detector.py`, `robot/perception/tracker.py`, `robot/ros/perceive.py` |
