@@ -1049,7 +1049,7 @@ def test_locate_crop_ignores_unplaceable_returns(usable_range):
     cam = RIG["front_camera"]
     box = (560, 550, 720, 700)
     ranges = np.full(360, np.inf)
-    ranges[1], ranges[359] = 7.0, usable_range
+    ranges[1], ranges[359] = 9.5, usable_range
     place = locate_crop(cam, box, scan=(ranges, -math.pi, math.tau / 360), scan_in_camera=(8.0, 0.0, 0.0))
     assert place is not None
     if np.isfinite(usable_range):

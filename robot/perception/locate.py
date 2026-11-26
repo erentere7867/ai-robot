@@ -35,7 +35,9 @@ import numpy as np
 from robot.perception.rig import Camera, to_map
 
 SCAN_Z = 0.25  # beam height for scan refinement (replaces legacy spinning lidar)
-PLACE_RANGE = (0.15, 6.0)
+# Beyond 6 m nothing was mapped: apt_0's wall TV, ranged 8.1 m by depth from across the room, never reached the map
+# and the robot drove to a desk monitor, the only TV it knew. Depth is read out to 8 m along the lens axis.
+PLACE_RANGE = (0.15, 9.0)
 LIDAR_AGREES = 0.12  # the lidar is trusted within this fraction of the floor estimate (its middle half was within 7%)
 # A person's middle lies this far beyond their nearest point: their arms make their box wide, but the body is about a
 # quarter metre deep (the lidar found a standing person's legs 0.12 m nearer than their middle).
