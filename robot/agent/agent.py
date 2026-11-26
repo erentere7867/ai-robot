@@ -104,9 +104,8 @@ class _CallHistory:
     blocked_tools: set[str] = field(default_factory=set)
     spoke_since_action: bool = False
 
-    def refuse(self, call: ToolCall) -> tuple[str, str] | None:
+    def refuse(self, call: ToolCall, key: tuple[str, ...]) -> tuple[str, str] | None:
         name = call.name
-        key = ("say",) if name == "say" else (name, json.dumps(call.args, sort_keys=True))
         self.repeats = self.repeats + 1 if key == self.last_call else 1
         self.last_call = key
         if name == "look":
@@ -379,13 +378,14 @@ class Agent:
         retried_empty = False
         last_said = ""
         history = _CallHistory()
+        partial_motion: tuple[tuple[str, ...], ActionResult] | None = None
         schemas = tools.schemas()
         think = self.think  # the request is news
         sorry = "Sorry, I couldn't finish that. Could you tell me another way?"
         active_call: ToolCall | None = None
 
         try:
-            for _ in range(self.max_turns):
+            for turn in range(self.max_turns):
                 self._check_stopped()
                 self._trim_images(messages)
                 self._push(thought="(thinking...)")
@@ -429,9 +429,16 @@ class Agent:
                                          "call a tool for your next step, or reply to the user."})
                         think = self.think
                         continue
-                    if not reviewed and (tools.todo.open_steps() or (self.review and any(s.calls for s in record.steps))):
+                    needs_review = partial_motion is not None or (not reviewed and (
+                        tools.todo.open_steps() or (self.review and any(s.calls for s in record.steps))
+                    ))
+                    if needs_review and turn + 1 < self.max_turns:
                         reviewed = True
-                        messages.append({"role": "user", "content": self._review(instruction, record, tools)})
+                        messages.append({"role": "user", "content": self._review(
+                            instruction, record, tools, partial_motion[1].text if partial_motion else "",
+                        )})
+                        history.spoke_since_action = history.spoke_since_action and partial_motion is None
+                        partial_motion = None
                         think = self._budget(news=False)
                         continue
                     open_steps = tools.todo.open_steps()
@@ -459,7 +466,8 @@ class Agent:
                         messages.append({"role": "tool", "tool_call_id": call.id, "content": skipped})
                         continue
                     move_cams: tuple[str, ...] = ()
-                    if refusal := history.refuse(call):
+                    key = ("say",) if call.name == "say" else (call.name, json.dumps(call.args, sort_keys=True))
+                    if refusal := history.refuse(call, key):
                         result, problem = refusal
                         ok = False
                         record.problems.append(problem)
@@ -478,8 +486,15 @@ class Agent:
                                 for old, new in zip(prior_steps, revised, strict=False)
                             )
                         if res.status == "partial":
+                            # C1 reported success on the T4 even after stopping 1.08 m from the sofa.
+                            partial_motion = key, res
                             barrier = ("Not run: an earlier call in this turn ended short; inspect the result before "
                                        "deciding the next action.")
+                        elif partial_motion and ok and res.status in ("reached", "already_there"):
+                            previous_key, previous_result = partial_motion
+                            goal = previous_result.arrival_goal
+                            if (res.arrival_goal == goal if goal is not None else key == previous_key):
+                                partial_motion = None
                         if self.see_after_moves is True and tools.moved:
                             move_cams = self.cameras
                         elif (self.see_after_moves == "front" and self.cameras and call.name in FRONT_CHECK
@@ -581,7 +596,7 @@ class Agent:
                                  camera_limit=max(1, MAX_IMAGES - recorded))
 
     @staticmethod
-    def _review(instruction: str, record: TaskRecord, tools: Tools) -> str:
+    def _review(instruction: str, record: TaskRecord, tools: Tools, partial_motion: str = "") -> str:
         """Before a task ends: the request, what was done, and what remains."""
         calls = [line for line in record.lines() if not line.startswith("reply:")]
         done = ("\n".join(f"- {line}" for line in calls[-12:]) if calls else
@@ -595,6 +610,8 @@ class Agent:
             todo += f"\nBlocked to-do steps: {'; '.join(blocked_steps)}."
         if open_steps:
             todo += f"\nOpen to-do steps: {'; '.join(open_steps)}."
+        if partial_motion:
+            todo += f"\nUnfinished motion: {partial_motion} Do not describe it as complete unless you finish it."
         return (f'Before you finish, check every part of the request: "{instruction}"\nWhat you did:\n{done}{todo}\n'
                 "Use the user's later corrections if they changed the request. "
                 "If you can finish a remaining step, use tools now. Otherwise reply briefly with what you finished "
