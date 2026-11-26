@@ -163,7 +163,7 @@ def test_observation_marks_only_tracks_from_attached_exposures_and_bounds_the_li
     marked, known = first.split("Last known")
     assert "Marked at capture:\n  9 track 9, 9.0 m ahead, seen <1 s ago" in marked
     assert "2 track 2, 2.0 m ahead, seen 9 s ago" in known
-    assert "10 person (the user)" in known and "(+2 more)" in known
+    assert "10 person (the user)" in known and "(+2 more: 7 track 7, 8 track 8)" in known
     assert len([line for line in first.splitlines() if line.strip()[:1].isdigit()]) == 8
     latest = tool_results(brain.seen[1])[-1]
     assert "2 track 2, seen 9 s ago" in latest[1]["text"]
@@ -199,7 +199,7 @@ def test_picture_caption_includes_drawn_badges_beyond_the_object_text_cap(monkey
     brain = Scripted(say("Done."))
     Agent(brain, cameras="front").do("What can you see?", sim)
     scene, caption, picture = brain.seen[0][1]["content"][:3]
-    assert "9 track 9" not in scene["text"] and "(+1 more)" in scene["text"]
+    assert "  9 track 9" not in scene["text"] and "(+1 more: 9 track 9)" in scene["text"]
     assert caption["text"] == "front camera (badges 1, 2, 3, 4, 5, 6, 7, 8, 9):"
     assert picture["type"] == "image_url"
 
@@ -1002,3 +1002,30 @@ def test_home3d_r1r_restart_passes_with_memory_and_fails_without(monkeypatch, tm
     assert r1r.criterion(None, {"said_by_turn": ["", "", "", "not on the couch; they're on the dining table."]})
     assert not r1r.criterion(None, {"said_by_turn": ["", "", "", "i don't know whether they're on the table."]})
     assert not r1r.criterion(None, {"said_by_turn": ["", "", "", "they aren't on the table; they're on the couch."]})
+
+
+def test_object_list_names_the_room_of_things_elsewhere():
+    keys = Object(10, "keys", (3.7, 1.6), 6.4, 0.0, "ahead", 0.05, "silver", 60.0, "kitchen")
+    sofa = Object(2, "sofa", (-3.0, 1.5), 2.2, 140.0, "behind-left", 0.6, "grey", 0.0, "living")
+    text = Agent._objects_text({"objects": [keys, sofa], "room": "living"}, None, True)
+    assert "keys, silver, 6.4 m ahead, in the kitchen" in text
+    assert "sofa, grey, 2.2 m behind-left\n" in text + "\n"
+
+
+def test_stop_near_backs_off_to_the_asked_gap_when_already_closer():
+    robot = SimRobot(living_room())
+    tools = Tools(robot)
+    tools.go_to("backpack")
+    near = robot.obj(next(o.id for o in robot.where("backpack")))
+    assert near.distance - near.radius - 0.15 < 0.5
+    result = tools.stop_near("backpack", 1.0)
+    after = robot.obj(near.id)
+    assert result.ok and 0.8 <= after.distance - after.radius - 0.15 <= 1.3, (result.text, after.distance)
+
+
+def test_look_accepts_an_object_id_for_what_to_mark():
+    robot = SimRobot(office())
+    tools = Tools(robot)
+    cup = next(iter(robot.where("cup")))
+    assert f"cup {cup.id}" in tools.look("front", f"cup {cup.id}")
+    assert f"cup {cup.id}" in tools.look("front", str(cup.id))

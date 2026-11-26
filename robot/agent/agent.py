@@ -23,6 +23,7 @@ from robot.perception.camera import data_url
 
 MAX_TURNS = 16  # model replies per task
 MAX_OBJECTS = 8  # nearest objects listed in full; keep context lean and let look/search/recall fetch specifics
+MAX_HIDDEN_NAMES = 12  # the rest by name only, a few tokens each
 MAX_IMAGES = 3  # pictures kept in the conversation (older ones replaced by a note; saves ~1100 tokens/image)
 IMAGE_WIDTH = 768  # pixels across each picture; at 512 the 2B model misjudged colours of small things (a red bike)
 THINK = {"off": 0, "low": 128, "medium": 512, "high": 2048}  # most tokens of reasoning before each turn
@@ -155,7 +156,7 @@ class Agent:
             user_obj = next((o for o in everything if o.id == user_id), None)
             if user_obj is not None:
                 objects = [*objects[:MAX_OBJECTS - 1], user_obj]
-        rest = len(everything) - len(objects)
+        rest = [o for o in everything if o not in objects]
         if not objects:
             return "Objects: none seen yet."
         groups: dict[str, list[str]] = {}
@@ -166,6 +167,8 @@ class Agent:
                 if o.color and o.id != user_id:
                     row += f", {o.color}"
                 row += f", {o.distance:.1f} m {o.side}"
+                if o.room not in ("", "room", snap.get("room")):
+                    row += f", in the {o.room}"
             age = marks.get(o.id, o.last_seen)
             if marked_ages is not None or age >= 2:
                 row += ", seen <1 s ago" if age < 1 else f", seen {age:.0f} s ago"
@@ -174,8 +177,9 @@ class Agent:
             groups.setdefault(group, []).append(row)
         sep = "\n  " if full else "; "
         lines = [f"{group}:{sep}{sep.join(rows)}" for group, rows in groups.items()]
-        if rest > 0:
-            lines.append(f"(+{rest} more)")
+        if rest:  # names only: "how many chairs" was answered 4 when the second of 2 chairs was cut off
+            names = ", ".join(f"{o.id} {o.label}" for o in rest[:MAX_HIDDEN_NAMES])
+            lines.append(f"(+{len(rest)} more: {names}{', ...' if len(rest) > MAX_HIDDEN_NAMES else ''})")
         return "\n".join(lines)
 
     @staticmethod

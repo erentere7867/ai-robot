@@ -27,6 +27,7 @@ class Object:
     radius: float
     color: str
     last_seen: float  # seconds ago
+    room: str = ""  # the room its position is in, when the robot knows rooms
 
 
 class PathBlocked(Exception):

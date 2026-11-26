@@ -643,6 +643,11 @@ class Tools:
                     True, "reached", moved_m,
                 )
             gap = max(0.0, fresh.distance - fresh.radius - ROBOT_RADIUS)
+            if gap < expected_gap - 0.3:
+                return ActionResult(
+                    f"Ended closer than asked: facing {self._name(fresh)} with gap {gap:.1f} m, not {expected_gap:g} m.",
+                    False, "partial", moved_m,
+                )
             if gap <= 0.6:
                 return ActionResult(
                     f"Drive finished. Reached {self._name(fresh)}, facing it "
@@ -832,6 +837,8 @@ class Tools:
     def look(self, direction: str, what: str = "") -> str:
         matches = ""
         if what:
+            if (oid := _object_id(what)) is not None:  # 51 of 2292 calls in seven 2D passes were refused for an ID
+                what = self.robot.obj(oid).label
             _check_visual_name(what)
             found = list(self.robot.detect(what))
             matches = (" Seen: " + "; ".join(f"{o.label} {o.id} ({_where_words(o)})" for o in found[:6]) + "."

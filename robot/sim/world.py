@@ -403,7 +403,8 @@ class SimRobot:
         p = where or self._where(t) or (t.x, t.y)
         bearing = round(math.degrees(wrap(math.atan2(p[1] - self.y, p[0] - self.x) - self.yaw)), 1)
         return Object(t.id, t.label, (round(p[0], 3), round(p[1], 3)), round(math.dist(p, (self.x, self.y)), 3),
-                      bearing, side(bearing), t.radius, t.color, round(self.t - (self.t if seen_at is None else seen_at), 1))
+                      bearing, side(bearing), t.radius, t.color, round(self.t - (self.t if seen_at is None else seen_at), 1),
+                      self._room_at(*p))
 
     # ---- time and motion ----------------------------------------------------------------------------------------
     def _halt(self) -> None:
@@ -791,7 +792,14 @@ class SimRobot:
         self._go(self._target(target), float(distance), side=side)
 
     def _destination(self, target: Point | Pose | Object, distance: float, side: str) -> tuple:
-        return (self.spot(target, side, distance), 0.0) if side else (target, distance)
+        """Where to drive, and how near is near enough. Closer to an object than a requested distance (its centre to
+        the robot's), stand back at that gap on this side of it: "stop one metre from the backpack" after going to it
+        stayed 0.3 m away, since being within a metre already counted as arrived."""
+        if side:
+            return self.spot(target, side, distance), 0.0
+        if isinstance(target, Object) and distance > 0 and math.dist(xy(target), (self.x, self.y)) < distance - 0.3:
+            return self.spot(target, "front", distance - target.radius - RADIUS), 0.0
+        return target, distance
 
     def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
         target, distance = self._destination(target, distance, side)
