@@ -82,8 +82,9 @@ guard, also crediting waypoint advances. The 2D rollout is not the ROS path foll
   detections from the same camera and exposure. Stable IDs are drawn on the matching pictures; the model can
   answer about the pictures directly, even when YOLOE has no label. Room segmentation uses the robot's map;
   vision can propose room names, while named tour places take precedence.
-- **Depth and scan.** Depth Anything V2 Base FP32 estimates relative inverse depth. `fit_to_floor` uses camera
-  geometry and tilt to fit a metric scale. Each camera scan ranges floor edges and uses depth for overhangs;
+- **Depth and scan.** Depth Anything V2 Base FP32 runs on the vision server, including on CPU-only hosts.
+  The ROS depth node uses `fit_to_floor` to turn its relative inverse depth into metres using camera geometry
+  and tilt. Each camera scan ranges floor edges and uses depth for overhangs;
   odometry compensates for different exposure times when joining the sectors. Nav2 receives the fused `/scan`
   with ToF and contact-based obstacles. The agent's four range sectors come from the contact-free
   `/scan_measured` and label stale or missing readings rather than calling them clear.
@@ -136,6 +137,7 @@ An agentic loop, as in coding agents, around the robot's vision-language model. 
    distinguish completion from a blocker. Read new step numbers before marking them after a revision.
    Repeated calls and the overall turn budget are guarded. An empty reply gets one repair turn. A plain reply
    can finish the task after a review of actions and plan state; open steps are reported, not silently passed.
+   Unresolved partial motion triggers a review before the final reply if another turn is available.
 5. **Interrupt.** Stop and wait bypass the model. Other words during a task stop the current action and join
    the conversation with fresh observations. The loop discards superseded tool calls and stale plain or
    truncated replies rather than acting on them. The dashboard exposes the tool results and model turns.
