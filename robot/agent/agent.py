@@ -390,6 +390,7 @@ class Agent:
                         messages.append({"role": "user", "content": self._review(
                             instruction, record, tools, partial_motion[1].text if partial_motion else "",
                         )})
+                        spoke_since_action = spoke_since_action and partial_motion is None
                         partial_motion = None
                         think = self._budget(news=False)
                         continue
