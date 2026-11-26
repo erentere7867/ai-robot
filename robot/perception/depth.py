@@ -337,25 +337,12 @@ def tof_scan(grid: np.ndarray, side: str, num_beams: int = 360, pitch_rad: float
 
 
 class MonoDepth:
-    """Metric depth from one colour picture. Depth Anything V2 Base (ONNX) gives
-    relative inverse depth, and `fit_to_floor` makes it metres. Its input is `height` pixels tall; the result is at
-    the size of a `width`-wide copy of the frame."""
+    """Metric depth from one colour picture. Depth Anything V2 Base on the vision server (tools/vision_server.py, on
+    the CPU too with tools/linux/vision.sh) gives relative inverse depth, and `fit_to_floor` makes it metres. Its input
+    is `height` pixels tall; the result is at the size of a `width`-wide copy of the frame."""
 
-    def __init__(self, weights: str = "vision/depth_base.onnx", height: int = 364, width: int = 640,
-                 threads: int = 0, server: Any = None) -> None:
-        """Use the vision server when supplied, otherwise run the network on the CPU with `threads`."""
+    def __init__(self, server: Any, height: int = 364, width: int = 640) -> None:
         self.server, self.height, self.width = server, height, width
-        if server is not None:
-            return
-        import onnxruntime as ort
-
-        from robot.perception.detector import _resolve_weights
-
-        options = ort.SessionOptions()
-        if threads:
-            options.intra_op_num_threads = threads
-        self.net = ort.InferenceSession(_resolve_weights(weights), options, providers=["CPUExecutionProvider"])
-        self.input = self.net.get_inputs()[0].name
 
     def __call__(self, rgb: np.ndarray, cam: Camera, pitch_rad: float = 0.0,
                  roll_rad: float = 0.0) -> np.ndarray | None:
@@ -365,14 +352,6 @@ class MonoDepth:
         out_w, out_h = self.width, round(self.width * h / w)
         w_in = int(round(w * self.height / h / 14)) * 14  # the network works in 14-pixel patches
         small = cv2.resize(rgb, (w_in, self.height), interpolation=cv2.INTER_AREA)
-        if self.server is not None:
-            raw = self.server.depth(small)
-        else:
-            x = ((small.astype(np.float32) / 255.0 - _MEAN) / _STD).transpose(2, 0, 1)[None]
-            raw = self.net.run(None, {self.input: x})[0][0]
+        raw = self.server.depth(small)
         inverse = cv2.resize(raw, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
         return fit_to_floor(inverse, cam, pitch_rad, roll_rad)
-
-
-_MEAN = np.array([0.485, 0.456, 0.406], np.float32)  # the network's input normalisation (ImageNet)
-_STD = np.array([0.229, 0.224, 0.225], np.float32)
