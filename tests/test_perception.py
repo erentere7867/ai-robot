@@ -372,6 +372,35 @@ def test_frontiers_are_open_edges_of_the_map_with_room_for_the_robot():
     assert min(math.hypot(x, y) for x, y, _ in goals) > 0.5  # on the ring, not in its middle where the robot is
 
 
+def test_extract_frontier_clusters_groups_separate_boundaries_and_splits_wide_rings():
+    from robot.ros.explore import extract_frontier_clusters
+
+    # Two disconnected unknown openings on opposite sides of a free corridor -> 2 distinct clusters + noise ignored.
+    free = np.zeros((40, 80), dtype=bool)
+    free[10:30, 15:65] = True
+    unknown = np.zeros((40, 80), dtype=bool)
+    unknown[12:28, 0:15] = True   # left opening
+    unknown[12:28, 65:80] = True  # right opening
+    unknown[9, 40:42] = True      # 2-cell noise speck (< min_cells=4)
+    clusters = extract_frontier_clusters(free, unknown, 0.05, (0.0, 0.0), min_cells=4)
+    assert len(clusters) == 2
+    xs = sorted(f.x for f in clusters)
+    assert xs[0] < 1.0 and xs[1] > 3.0
+    left_f = min(clusters, key=lambda f: f.x)
+    right_f = max(clusters, key=lambda f: f.x)
+    assert abs(left_f.yaw) > 2.5   # faces left (-pi / +pi) into left unknown
+    assert abs(right_f.yaw) < 0.6  # faces right (0) into right unknown
+
+    # Wide ring (radius 2.5 m, diameter 5.0 m > max_span 2.5 m) splits into multiple directional clusters on the ring.
+    yy, xx = np.mgrid[:160, :160]
+    r2 = (yy - 80) ** 2 + (xx - 80) ** 2
+    ring_free = r2 < 50 ** 2
+    ring_unknown = ~ring_free
+    ring_clusters = extract_frontier_clusters(ring_free, ring_unknown, 0.05, (-4.0, -4.0), min_cells=4, max_span=2.5)
+    assert len(ring_clusters) >= 4
+    assert all(math.hypot(f.x, f.y) > 2.0 for f in ring_clusters)
+
+
 def test_a_saved_map_becomes_the_planners_grid_in_the_house_frame(tmp_path):
     from robot.ros.explore import load_grid, read_map
 

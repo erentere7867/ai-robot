@@ -1259,34 +1259,48 @@ class SimRobot:
                 return round(float(d - RADIUS), 2)
         return 12.0
 
+    def _search_blocked(self) -> np.ndarray:
+        """Occupancy mask of cells the robot cannot drive onto during search."""
+        return self.inflated
+
     def _unseen(self, region: str = "room") -> list[Pose]:
-        """Reachable viewpoints next to floor the cameras have not covered, nearest first."""
+        """Clustered reachable frontier boundaries next to floor the cameras have not covered, nearest first."""
+        from robot.ros.explore import extract_frontier_clusters
+
         region = self._room_at(self.x, self.y) if region == "room" else region
         bounds = self.scene.rooms.get(region) if region != "all" else None
+        blocked = self._search_blocked()
         reach = self._reachable()
         nx, ny = self.coverage.shape
-        blocks: dict[tuple[int, int], list[tuple[int, int]]] = {}
-        size = round(1.0 / RES)
+        reach_full = reach[
+            np.minimum(reach.shape[0] - 1, np.arange(nx) // PLAN)[:, None],
+            np.minimum(reach.shape[1] - 1, np.arange(ny) // PLAN)[None, :],
+        ]
+        free = ~blocked & reach_full
+        unknown = ~self.coverage & ~blocked & reach_full
         people = [p for _, p in self._people()]
-        for i, j in zip(*np.nonzero(~self.coverage & ~self.inflated), strict=True):
-            x, y = self._centre(i, j)
-            if bounds and not (bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3]):
-                continue
-            if any(math.dist((x, y), q) < 0.8 for q in people):  # never send the robot to stand on someone
-                continue
-            blocks.setdefault((i // size, j // size), []).append((i, j))
-        views = []
-        for cells in blocks.values():
-            if len(cells) < 40:
-                continue
-            cx = sum(self._centre(i, j)[0] for i, j in cells) / len(cells)
-            cy = sum(self._centre(i, j)[1] for i, j in cells) / len(cells)
-            ok = [(i, j) for i, j in cells if reach[min(nx // PLAN - 1, i // PLAN), min(ny // PLAN - 1, j // PLAN)]]
-            if not ok:
-                continue
-            i, j = min(ok, key=lambda c: math.dist(self._centre(*c), (cx, cy)))
-            vx, vy = self._centre(i, j)
-            views.append(Pose(round(float(vx), 2), round(float(vy), 2), round(math.degrees(math.atan2(cy - vy, cx - vx)), 1)))
+        if people:
+            xs = -self.scene.width / 2 + (np.arange(nx) + 0.5) * RES
+            ys = -self.scene.height / 2 + (np.arange(ny) + 0.5) * RES
+            for px, py in people:
+                near_person = (xs[:, None] - px) ** 2 + (ys[None, :] - py) ** 2 < 0.8**2
+                free &= ~near_person
+                unknown &= ~near_person
+        region_mask = None
+        if bounds:
+            xs = -self.scene.width / 2 + (np.arange(nx) + 0.5) * RES
+            ys = -self.scene.height / 2 + (np.arange(ny) + 0.5) * RES
+            region_mask = (
+                (xs[:, None] >= bounds[0]) & (xs[:, None] <= bounds[2])
+                & (ys[None, :] >= bounds[1]) & (ys[None, :] <= bounds[3])
+            ).T
+        origin = (-self.scene.width / 2, -self.scene.height / 2)
+        found = extract_frontier_clusters(
+            free.T, unknown.T, RES, origin,
+            min_cells=4, max_span=2.5, reach=0.5, min_gain=20,
+            region_mask=region_mask,
+        )
+        views = [Pose(round(f.x, 2), round(f.y, 2), round(math.degrees(f.yaw), 1)) for f in found]
         return sorted(views, key=lambda p: math.dist((p.x, p.y), (self.x, self.y)))[:12]
 
     def _reachable(self) -> np.ndarray:
