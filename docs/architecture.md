@@ -124,6 +124,9 @@ An agentic loop, as in coding agents, around the robot's vision-language model. 
    displacement or turn and distinguishes an action that ended short from success. A truncated model reply
    runs no tools. Within a batch, a failure, clarification, search result or requested visual update stops
    the batch so the model can act on the result. Pictures come back inside the tool result.
+   For skill-bearing calls, `Tools` gives `SkillMachine` an immutable goal and runs one skill at a time:
+   searching, navigating, following or waiting. Success and preemption return it to `IDLE`; failure enters
+   `FAILED`, which can accept another skill. Other tools do not change the state; motion ticks stay in the body/Nav2.
 3. **Find and navigate.** Tools include `go_to`, `go_to_side`, `go_toward`, `follow`, `search`, `look` and
    `look_back` (schemas in `robot/agent/tools.py`). An ambiguous target returns candidates, with a picture if
    it can show them distinctly, instead of moving. Search reports whether the requested landmark was reached
@@ -136,6 +139,8 @@ An agentic loop, as in coding agents, around the robot's vision-language model. 
    Repeated calls and the overall turn budget are guarded. An empty reply gets one repair turn. A plain reply
    can finish the task after a review of actions and plan state; open steps are reported, not silently passed.
    Unresolved partial motion triggers a review before the final reply if another turn is available.
-5. **Interrupt.** Stop and wait bypass the model. Other words during a task stop the current action and join
-   the conversation with fresh observations. The loop discards superseded tool calls and stale plain or
-   truncated replies rather than acting on them. The dashboard exposes the tool results and model turns.
+5. **Interrupt.** Stop and wait bypass the model. Other words during a task cancel the running skill, if any,
+   and join the conversation with fresh observations. The agent checks for corrections before preparing the
+   tool call. After validation and any skill-state transition, `Tools` checks again before running the tool.
+   The loop also discards stale plain or truncated replies.
+   The dashboard exposes the tool results and model turns.
