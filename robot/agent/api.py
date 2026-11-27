@@ -118,9 +118,12 @@ class geom:  # noqa: N801
 
     @staticmethod
     def between(a: Point | Pose | Object, b: Point | Pose | Object) -> Point:
-        """The point halfway."""
+        """The middle of the gap between their edges (halfway between centres put a spot inside a big sofa)."""
         (ax, ay), (bx, by) = xy(a), xy(b)
-        return (ax + bx) / 2, (ay + by) / 2
+        ra, rb = (t.radius if isinstance(t, Object) else 0.0 for t in (a, b))
+        d = math.hypot(bx - ax, by - ay)
+        s = (ra + (d - ra - rb) / 2) / d if d > ra + rb else 0.5
+        return ax + s * (bx - ax), ay + s * (by - ay)
 
     @staticmethod
     def circle(

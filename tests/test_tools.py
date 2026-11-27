@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from robot.agent.api import Pose
@@ -343,3 +345,13 @@ def test_a_room_asked_for_as_a_thing_says_to_go_there():
 def test_a_search_of_this_room_that_finds_nothing_names_the_rooms_left():
     res = Tools(SimRobot(two_rooms())).execute("search", {"what": "giraffe"})
     assert "Not searched: kitchen" in res.text
+
+
+def test_go_between_parks_in_the_middle_of_the_gap():
+    sim = SimRobot(living_room())
+    res = Tools(sim).execute("go_between", {"first": "sofa", "second": "table"})
+    sofa, table = (next(t for t in sim.things.values() if t.label == name) for name in ("sofa", "table"))
+    p = sim.pose()
+    assert res.ok and "Arrived between sofa" in res.text
+    gaps = [math.dist((p.x, p.y), (t.x, t.y)) - t.radius for t in (sofa, table)]
+    assert abs(gaps[0] - gaps[1]) < 0.3

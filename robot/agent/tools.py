@@ -463,7 +463,7 @@ class Tools:
             raise ToolError(f"{text!r} mixes an object and a place or spot. To find a thing in an area or beside a "
                             "landmark, pass just the object name to search(what=..., near=...) (or go_to the area "
                             "first). To drive to a visible floor spot use go_toward; for a side of a thing use "
-                            "go_to_side; to stop some metres from it use stop_near")
+                            "go_to_side; between two things, go_between; to stop some metres from it use stop_near")
         if VIEW_ORDER.search(text):  # name lookup matches shared words; "right chair" must not pick any chair
             raise ToolError("a left/right selection needs a viewpoint. Use look(direction, what) with the "
                             "visual name, then choose the matching ID in the marked picture")
@@ -542,6 +542,8 @@ class Tools:
                   "distance": {"type": "number", "minimum": 0.3, "maximum": 5,
                                "description": "Only if requested: gap in metres from the object's edge."}},
                  ("target", "side"), self.go_to_side, moves=True),
+            Tool("go_between", "Drive to the floor between two targets, when the user says between.",
+                 {"first": target, "second": target}, ("first", "second"), self.go_between, moves=True),
             Tool("stop_near", "Drive toward a target and stop with some metres of space between you and it, when the "
                               "user says how far.",
                  {"target": target, "metres": {"type": "number", "minimum": 0.3, "maximum": 5}},
@@ -651,6 +653,21 @@ class Tools:
 
     def go_to_side(self, target: str, side: str, distance: float | None = None) -> str | ActionResult:
         return self.go_to(target, side=side, distance=distance)
+
+    def go_between(self, first: str, second: str) -> ActionResult:
+        # "Park between the sofa and the table" had no tool: O4 used all 16 turns in 6 of 6 passes, groping with
+        # go_toward, and go_to("between ...") is refused as a phrase.
+        a, b = self._resolve(first), self._resolve(second)
+        goal = geom.between(a, b)
+        before = self.robot.pose()
+        self.robot.go_to(goal)
+        after = self.robot.pose()
+        moved, off = geom.dist(before, after), geom.dist(after, goal)
+        where = f"between {self._name(a)} and {self._name(b)}"
+        if off > 0.4:
+            return ActionResult(f"Ended {off:.1f} m from the middle of the floor {where}: the middle is taken.",
+                                False, "partial", moved)
+        return ActionResult(f"Arrived {where}.", True, "reached", moved)
 
     def stop_near(self, target: str, metres: float) -> str | ActionResult:
         return self.go_to(target, distance=metres)
