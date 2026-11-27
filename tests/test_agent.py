@@ -156,6 +156,15 @@ def test_the_same_search_again_and_again_is_refused_like_any_other_call():
     assert tool_results(brain.seen[3])[-1].startswith("Not run: you made this exact call 2 times")
 
 
+def test_only_the_newest_reasoning_is_shown_again():
+    turns = [Reply("", tool_calls=[ToolCall(f"t{i}", "turn", {"degrees": 10 * (i + 1), "direction": "left"})],
+                   thought=f"plan {i}") for i in range(3)]
+    brain = Scripted(*turns, say("ok"))
+    Agent(brain, cameras="none").do("Turn a little, three times.", SimRobot(living_room()))
+    shown = [m.get("reasoning_content") for m in brain.seen[3] if m["role"] == "assistant"]
+    assert shown == [None, None, "plan 2"]
+
+
 def test_the_turns_left_are_told_from_halfway():
     turns = [call("turn", degrees=10 * (i + 1), direction="left") for i in range(3)]
     brain = Scripted(*turns, say("ok"))

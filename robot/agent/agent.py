@@ -366,6 +366,8 @@ class Agent:
                     break
                 self._push(steps=record.lines(thoughts=True), thought=step.thought or "(no reasoning this turn)")
                 assistant: dict[str, Any] = {"role": "assistant", "content": reply.text}
+                for earlier in messages:  # only the newest turn's reasoning: shown all of them, the model copied the
+                    earlier.pop("reasoning_content", None)  # last word for word for 8 turns (F6, R5) and so its call
                 if step.thought:  # kept with its tool calls, as LFM3's template expects within a task
                     assistant["reasoning_content"] = step.thought
                 if reply.tool_calls:
