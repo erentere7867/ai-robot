@@ -562,7 +562,8 @@ class Tools:
                                 "description": "degrees per second, + left, - right"},
                   "seconds": {"type": "number", "minimum": 0.1, "maximum": 60}},
                  ("speed", "turn_rate", "seconds"), self.drive, moves=True),
-            Tool("orbit", "Drive in circles around a target.",
+            Tool("orbit", "Go round a target in a circle, for as many laps as asked. One call does every lap "
+                          "(go_toward was called 15 times instead, step by step, and never closed a loop).",
                  {"target": target, "laps": {"type": "number", "minimum": 0.25, "maximum": 10},
                   "direction": {"type": "string", "enum": ["clockwise", "anticlockwise"]},
                   "gap": {"type": "number", "minimum": 0.1, "maximum": 2,
