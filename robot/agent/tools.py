@@ -245,6 +245,13 @@ def _check_visual_name(text: str, *, allow_relation: bool = False) -> None:
     if _object_id(text) is not None:
         raise ToolError(f"{text!r} is an object ID, not a plain object name. Pass just the object name in "
                         "what=..., or pass the ID directly to go_to/face")
+    low = text.strip().lower()
+    # M4 sent go_to("behind-right") five times, told it "mixes an object and a place"; C4 sent face("rear-right camera
+    # view") four times, told "a left/right selection needs a viewpoint".
+    way = next((w for w in re.findall(r"[a-z]+(?:-[a-z]+)*", low) if w in BEARINGS and ("-" in w or w == low)), None)
+    if way:
+        raise ToolError(f"{text!r} names a direction, not a thing. To drive that way, call go_toward(direction={way!r}, "
+                        "metres=...); to face or reach something seen there, pass its ID")
     if RANGE_ORDER.search(text):
         raise ToolError("a distance comparison is not a camera label. Call search with just the object name, "
                         "then choose an ID by its measured distance")
@@ -452,9 +459,6 @@ class Tools:
             if key in rooms:
                 return key
         _check_visual_name(text, allow_relation=True)
-        if low in BEARINGS:  # M4 sent go_to("behind-right") five times, told only that it "mixes an object and a place"
-            raise ToolError(f"{text!r} is a direction, not a target. To drive that way, call go_toward(direction="
-                            f"{low!r}, metres=...)")
         if RELATION.search(low):  # "behind the sofa" or "chair in living room" would otherwise pollute YOLOE
             raise ToolError(f"{text!r} mixes an object and a place or spot. To find a thing in an area or beside a "
                             "landmark, pass just the object name to search(what=..., near=...) (or go_to the area "
@@ -785,8 +789,15 @@ class Tools:
         while True:  # until "stop", or words from the user, preempt it
             self.robot.wait(1.0)
 
-    def search(self, what: str, area: str = "here", near: str = "", toward: str = "") -> str:
+    def _check_thing(self, what: str) -> None:
+        """A visual name, and not a room: A3 searched and looked for "kitchen" nine times behind a closed door."""
         _check_visual_name(what)
+        room = what.strip().lower().removesuffix(" room")
+        if room in {str(r).lower() for r in self.robot.snapshot().get("rooms", [])}:
+            raise ToolError(f"{what!r} is a room, not a thing the cameras can find. To go there, call go_to({room!r})")
+
+    def search(self, what: str, area: str = "here", near: str = "", toward: str = "") -> str:
+        self._check_thing(what)
         area = area or "here"
         near_key = near.strip().lower().replace("_", "-")
         if near_key in BEARINGS and not toward:
@@ -892,7 +903,7 @@ class Tools:
         if what:
             if (oid := _object_id(what)) is not None:  # 51 of 2292 calls in seven 2D passes were refused for an ID
                 what = self.robot.obj(oid).label
-            _check_visual_name(what)
+            self._check_thing(what)
             found = list(self.robot.detect(what))
             matches = (" Seen: " + "; ".join(f"{o.label} {o.id} ({_where_words(o)})" for o in found[:6]) + "."
                        if found else f" No {what} detected.")

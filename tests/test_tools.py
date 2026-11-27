@@ -327,9 +327,17 @@ def test_a_blocked_move_says_how_near_the_thing_in_the_way_is():
     assert res.status == "blocked" and "the nearest thing ahead is 0.20 m away" in res.text
 
 
-def test_a_direction_given_as_a_target_names_the_call_for_it():
-    res = Tools(SimRobot(living_room())).execute("go_to", {"target": "behind-right"})
-    assert "go_toward(direction='behind-right'" in res.text
+def test_a_direction_given_as_a_thing_names_the_call_for_it():
+    tools = Tools(SimRobot(two_rooms()))
+    assert "go_toward(direction='behind-right'" in tools.execute("go_to", {"target": "behind-right"}).text
+    assert "names a direction" in tools.execute("face", {"target": "rear-right camera view"}).text
+    assert "Reached door" in tools.execute("go_to", {"target": "front door"}).text
+
+
+def test_a_room_asked_for_as_a_thing_says_to_go_there():
+    tools = Tools(SimRobot(two_rooms()))
+    for name, args in (("search", {"what": "kitchen"}), ("look", {"direction": "front", "what": "kitchen room"})):
+        assert "call go_to('kitchen')" in tools.execute(name, args).text
 
 
 def test_a_search_of_this_room_that_finds_nothing_names_the_rooms_left():
