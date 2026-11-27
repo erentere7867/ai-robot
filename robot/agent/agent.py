@@ -172,7 +172,9 @@ class Agent:
             age = marks.get(o.id, o.last_seen)
             if marked_ages is not None or age >= 2:
                 row += ", seen <1 s ago" if age < 1 else f", seen {age:.0f} s ago"
-            group = ("Objects" if marked_ages is None else "Marked at capture" if o.id in marks
+            # "Objects:" read as all there is: asked "is there a cat in the kitchen?" from the living room, the model
+            # answered "the scene only contains the listed objects" (S4 passed 2 of 6, S1 0 of 6, never leaving).
+            group = ("Objects seen so far" if marked_ages is None else "Marked at capture" if o.id in marks
                      else "Last known (not marked at capture)")
             groups.setdefault(group, []).append(row)
         sep = "\n  " if full else "; "

@@ -1079,4 +1079,4 @@ def test_progress_counts_repeated_steps_beyond_the_listed_ones():
     for _ in range(5):
         tools.execute("turn", {"degrees": 90, "direction": "left"})
         res = tools.execute("turn", {"degrees": 90, "direction": "right"})
-    assert "turned 90 degrees left x5" in res.text and "turned 90 degrees right x5" in res.text
+    assert "turned 90 degrees left 5 times" in res.text and "turned 90 degrees right 5 times" in res.text

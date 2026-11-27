@@ -318,3 +318,20 @@ def test_going_to_the_thing_you_are_at_says_you_did_not_move():
     assert "Reached box" in tools.execute("go_to", {"target": "box"}).text
     again = tools.execute("go_to", {"target": "box"})
     assert again.ok and again.status == "already_there" and "Already at box" in again.text
+
+
+def test_a_blocked_move_says_how_near_the_thing_in_the_way_is():
+    tools = Tools(SimRobot(living_room()))
+    tools.execute("move", {"metres": 3, "direction": "forward"})
+    res = tools.execute("move", {"metres": 1, "direction": "forward"})
+    assert res.status == "blocked" and "the nearest thing ahead is 0.20 m away" in res.text
+
+
+def test_a_direction_given_as_a_target_names_the_call_for_it():
+    res = Tools(SimRobot(living_room())).execute("go_to", {"target": "behind-right"})
+    assert "go_toward(direction='behind-right'" in res.text
+
+
+def test_a_search_of_this_room_that_finds_nothing_names_the_rooms_left():
+    res = Tools(SimRobot(two_rooms())).execute("search", {"what": "giraffe"})
+    assert "Not searched: kitchen" in res.text

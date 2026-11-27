@@ -384,7 +384,8 @@ class Tools:
             metres = round(res.moved_m, 2)
             self.done.append(f"moved {metres:g} m {args['direction']}")
         else:
-            self.done.append(res.text.split(":")[0].split(",")[0].rstrip(".").lower())  # "arrived", "drove for 2 s"
+            # "arrived", "drove for 2 s", "reached door 1" (not "drive finished. reached door 1", six times over)
+            self.done.append(res.text.split(":")[0].split(",")[0].rstrip(".").split(". ")[-1].lower())
         if res.ok and name not in ("turn", "move", "drive", "orbit") and len(self.done) <= 1:
             return ""
         now = self.robot.pose()
@@ -395,7 +396,7 @@ class Tools:
         turning = f"; {self.turned:g} degrees of turning in all" if self.turned and name == "turn" else ""
         # Counts, since only the last 8 steps are listed: "patrol three times" went on to the 16-turn limit
         # (F6 in 5 of 6 passes), alternating door and sofa with no way to see how many trips were done.
-        repeats = [f"{step} x{n}" for step, n in Counter(self.done).items() if n > 1]
+        repeats = [f"{step} {n} times" for step, n in Counter(self.done).items() if n > 1]
         counted = f" Repeated so far: {'; '.join(repeats)}." if repeats else ""
         return (f"This request so far: {'; '.join(self.done[-8:])}{turning}.{counted} You are {away:.1f} m from where "
                 f"it began, {facing}.")
@@ -451,6 +452,9 @@ class Tools:
             if key in rooms:
                 return key
         _check_visual_name(text, allow_relation=True)
+        if low in BEARINGS:  # M4 sent go_to("behind-right") five times, told only that it "mixes an object and a place"
+            raise ToolError(f"{text!r} is a direction, not a target. To drive that way, call go_toward(direction="
+                            f"{low!r}, metres=...)")
         if RELATION.search(low):  # "behind the sofa" or "chair in living room" would otherwise pollute YOLOE
             raise ToolError(f"{text!r} mixes an object and a place or spot. To find a thing in an area or beside a "
                             "landmark, pass just the object name to search(what=..., near=...) (or go_to the area "
@@ -521,7 +525,8 @@ class Tools:
             Tool("go_to", "Go to and face a named target, searching if needed. For a requested side or gap use "
                           "go_to_side or stop_near.",
                  {"target": target}, ("target",), self.go_to, moves=True),
-            Tool("go_toward", "Drive roughly the given distance toward an unnamed spot, avoiding obstacles.",
+            Tool("go_toward", "Drive roughly the given distance toward an unnamed spot, avoiding obstacles. The "
+                             "direction is from you: behind is behind you, not behind a thing.",
                  {"direction": {"type": "string", "enum": list(BEARINGS)},
                   "metres": {"type": "number", "minimum": 0.3, "maximum": 6}},
                  ("direction", "metres"), self.go_toward, moves=True),
@@ -697,7 +702,14 @@ class Tools:
 
     def move(self, metres: float, direction: str) -> ActionResult:
         before = self.robot.pose()
-        self.robot.move(metres, direction=direction)
+        try:
+            self.robot.move(metres, direction=direction)
+        except PathBlocked as exc:
+            # "Drive forward until something is less than half a metre in front of you" was blocked 13 times in a
+            # row in one F3 run, each told only the metres still to go, never how near the thing that stopped it was.
+            where = "ahead" if direction == "forward" else "behind"
+            free = self.robot.clearance(where)
+            raise PathBlocked(f"{exc}; the nearest thing {where} is {free:.2f} m away") from exc
         after = self.robot.pose()
         went = math.dist((before.x, before.y), (after.x, after.y))
         if went < 0.8 * metres - 0.1:
@@ -836,6 +848,9 @@ class Tools:
                 and all(math.dist((place.x, place.y), point) > 2.2 for point in trail)
             ]
             hint = f" Areas not visited closely yet: {'; '.join(unvisited[:4])}." if unvisited else ""
+            if area.casefold() == "here":  # "is there a backpack anywhere in here?" was answered no from one room
+                rooms = [r for r in self.robot.snapshot().get("rooms", []) if r and r != scope]
+                hint += f" Not searched: {', '.join(rooms)} (area='everywhere' searches them too)." if rooms else ""
             return miss + hint
         crop = getattr(self.robot, "target_crop", lambda _: None)(found.id)
         if crop is not None:
