@@ -523,7 +523,8 @@ class Agent:
                     messages[-1]["content"] += f"\nTo-do list now:\n{tools.todo.text()}"
                 if turn + 1 >= self.max_turns // 2:
                     # 47 of 150 cases in three 2D passes used every turn without a word to the user; C3 reached the
-                    # right box first, then drove box to box for 14 more turns, never told how many it had.
+                    # right box first, then drove box to box for 14 more turns, never told how many it had. Told,
+                    # 42 of 150 did, 9 replied in turns 9-15 instead of 5 (4 passing, not 1), passes 69 vs 68: small.
                     messages[-1]["content"] += f"\n{self.max_turns - turn - 1} of {self.max_turns} turns are left."
                 if tools.moved:
                     seen_calls.clear()
