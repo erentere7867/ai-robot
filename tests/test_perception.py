@@ -737,7 +737,7 @@ def test_the_vision_models_no_drops_a_detection():
     crop = np.zeros((50, 50, 3), dtype=np.uint8)
     perc.crops[1] = crop
 
-    def says_no_then_stop(*args, **kwargs):  # "Is there a chair in the middle of this picture?" mostly no
+    def says_no_then_stop(*args, **kwargs):  # "Is the thing in the middle of this picture a chair?" mostly no
         perc._stop = True
         return 0.3
 
@@ -868,7 +868,7 @@ def test_a_thing_the_detector_stops_finding_is_gone_only_when_the_vision_model_a
         assert bike.present and list(perc.doubts) == [1]  # the detector's misses alone do not make it gone
         assert perc.doubts[1][1].shape[0] >= 16  # the model is shown the part of the picture where it should be
         perc._verify_loop()
-        assert asked == ["Is there a bike in the middle of this picture? Answer yes or no."]
+        assert asked == ["Is the thing in the middle of this picture a bike? Answer yes or no."]
         assert bike.present is present and not perc.doubts
 
 

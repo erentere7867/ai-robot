@@ -1174,7 +1174,7 @@ def test_an_arrival_is_confirmed_by_the_detector_or_the_vision_model_on_the_thin
     real.brain = SimpleNamespace(yes_probability=yes_probability)
     beanbag = Object(3, "beanbag", (1.0, 0.0), 1.0, 0.0, "ahead", 0.5, "grey", seen_ago)  # parked facing it, 1 m off
     assert real.sees_now(beanbag) is confirmed
-    assert asked == ([] if answer is None else ["Is there a beanbag in the middle of this picture? Answer yes or no."])
+    assert asked == ([] if answer is None else ["Is the thing in the middle of this picture a beanbag? Answer yes or no."])
 
 
 def test_detect_falls_back_to_vision_model_places_visual_track_and_sees_now_confirms_or_drops():

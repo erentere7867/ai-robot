@@ -79,8 +79,11 @@ def _only(rgb: np.ndarray, box: tuple[int, int, int, int], others: list[tuple[in
 
 
 def is_there(brain: Any, picture: np.ndarray, label: str) -> bool:
-    """The vision model's yes to a thing in the middle of a picture."""
-    question = f"Is there a {label} in the middle of this picture? Answer yes or no."
+    """The vision model's yes to a thing in the middle of a picture. Asked of 265 YOLOE crops from 80 apt_0 views
+    with the truth under each (runs/crops.py), "Is the thing in the middle ... a chair?" kept 100 of 114 real things
+    and 67 of 151 false ones; "Is there a chair in the middle ...?" kept 98 and 86, saying yes to a chair beside a
+    table or a shoe. Neither told an armchair from a sofa or a monitor from a TV."""
+    question = f"Is the thing in the middle of this picture a {label}? Answer yes or no."
     return brain.yes_probability(_with_image(data_url(picture), question)) >= 0.5
 
 
