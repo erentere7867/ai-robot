@@ -364,3 +364,10 @@ def test_the_same_side_asked_again_is_the_same_spot():
     first = sim.pose()
     again = tools.execute("go_to_side", {"target": "table", "side": "left"})
     assert again.ok and math.dist((first.x, first.y), (sim.pose().x, sim.pose().y)) < 0.2
+
+
+def test_request_progress_names_what_each_step_did():
+    tools = Tools(SimRobot(two_rooms()))
+    tools.execute("search", {"what": "giraffe"})
+    res = tools.execute("go_to", {"target": "door"})
+    assert "This request so far: no giraffe found in the views checked; reached door 1." in res.text

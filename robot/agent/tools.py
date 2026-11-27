@@ -391,8 +391,11 @@ class Tools:
             metres = round(res.moved_m, 2)
             self.done.append(f"moved {metres:g} m {args['direction']}")
         else:
-            # "arrived", "drove for 2 s", "reached door 1" (not "drive finished. reached door 1", six times over)
-            self.done.append(res.text.split(":")[0].split(",")[0].rstrip(".").split(". ")[-1].lower())
+            # "arrived at start", "reached door 1", "no cup found in the views checked": a fruitless search was listed
+            # as "search scope" five times over in A4, and an arrival as "drive finished. reached door 1"
+            first, *rest = res.text.split(":")[0].split(". ")
+            step = rest[0] if first == "Drive finished" and rest else first
+            self.done.append(step.split(",")[0].rstrip(".").lower())
         if res.ok and name not in ("turn", "move", "drive", "orbit") and len(self.done) <= 1:
             return ""
         now = self.robot.pose()
