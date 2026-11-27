@@ -521,6 +521,10 @@ class Agent:
                            problems=list(record.problems))
                 if tools.todo.steps and not {c.name for c in reply.tool_calls} & {"todo", "todo_done"}:
                     messages[-1]["content"] += f"\nTo-do list now:\n{tools.todo.text()}"
+                if turn + 1 >= self.max_turns // 2:
+                    # 47 of 150 cases in three 2D passes used every turn without a word to the user; C3 reached the
+                    # right box first, then drove box to box for 14 more turns, never told how many it had.
+                    messages[-1]["content"] += f"\n{self.max_turns - turn - 1} of {self.max_turns} turns are left."
                 if tools.moved:
                     seen_calls.clear()
                     looks_here = 0

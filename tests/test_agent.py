@@ -155,6 +155,14 @@ def test_the_same_search_again_and_again_is_refused_like_any_other_call():
     assert tool_results(brain.seen[3])[-1].startswith("Not run: you made this exact call 2 times")
 
 
+def test_the_turns_left_are_told_from_halfway():
+    turns = [call("turn", degrees=10 * (i + 1), direction="left") for i in range(3)]
+    brain = Scripted(*turns, say("ok"))
+    Agent(brain, cameras="none", max_turns=6).do("Turn a little, three times.", SimRobot(living_room()))
+    assert "turns are left" not in tool_results(brain.seen[2])[-1]
+    assert tool_results(brain.seen[3])[-1].endswith("3 of 6 turns are left.")
+
+
 def test_observation_marks_only_tracks_from_attached_exposures_and_bounds_the_list(monkeypatch):
     sim = SimRobot(living_room())
     frame = np.zeros((20, 20, 3), dtype=np.uint8)
