@@ -1098,8 +1098,12 @@ class SimRobot:
             if xa >= xb or ya >= yb:
                 continue
             color = np.array(RGB.get(t.color, RGB.get(t.label, (150, 120, 90))), np.uint8)
+            beyond = img[ya:yb, xa:xb].copy()
             img[ya:yb, xa:xb] = color
             img[ya:yb, xa:min(xb, xa + 2)] = img[ya:yb, max(xa, xb - 2):xb] = (color * 0.55).astype(np.uint8)
+            if t.facts.get("open") is True:  # a frame with the room beyond in it: drawn solid, an open door read as
+                fx, fy = max(2, (xb - xa) // 6), max(2, (yb - ya) // 8)  # closed in C1 in 6 of 6 2D passes
+                img[ya + fy:yb, xa + fx:xb - fx] = beyond[fy:, fx:xb - xa - fx]
             owner[ya:yb, xa:xb] = t.id
             if t.person:  # a head on top
                 head = max(2, (x1 - x0) // 3)
