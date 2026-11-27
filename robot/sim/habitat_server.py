@@ -345,6 +345,15 @@ class Home:
         self._place(self.pose)
         return out
 
+    def semantic_at(self, pose: tuple, camera: str) -> bytes:
+        """For the judge: the object id at each pixel of a JUDGE_WIDTH-wide copy of `camera`, as uint32."""
+        self._place(pose)
+        sensor = self.sim._sensors[camera + ":sem"]
+        sensor.draw_observation()
+        out = np.ascontiguousarray(np.asarray(sensor.get_observation(), dtype=np.uint32)).tobytes()
+        self._place(self.pose)
+        return out
+
     def visible(self, pose: tuple, cameras: list) -> dict:
         """For the judge: per camera, each object's pixel count in view (of a JUDGE_WIDTH-wide picture)."""
         self._place(pose)
@@ -381,6 +390,8 @@ def answer(home: Home, req: dict):  # noqa: ANN201
         return picture
     if op == "visible":
         return home.visible(tuple(req["pose"]), list(req["cameras"]))
+    if op == "semantic_at":  # the judge's: which object each pixel shows, to score perception on pictures
+        return home.semantic_at(tuple(req["pose"]), str(req["name"]))
     return {"error": f"unknown op {op!r}"}
 
 
