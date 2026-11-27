@@ -787,22 +787,23 @@ class SimRobot:
         tx, ty = self._reach(target, 0.0)[0]
         self._rotate(wrap(math.atan2(ty - self.y, tx - self.x) - self.yaw))
 
-    def go_to(self, target: Point | Pose | Object | str, distance: float = 0.0, *, side: str = "") -> None:
+    def go_to(self, target: Point | Pose | Object | str, distance: float = 0.0, *, side: str = "", seen_from: Point | Pose | None = None) -> None:
         self._call("go_to", target=target, distance=distance, side=side)
-        self._go(self._target(target), float(distance), side=side)
+        self._go(self._target(target), float(distance), side=side, seen_from=seen_from)
 
-    def _destination(self, target: Point | Pose | Object, distance: float, side: str) -> tuple:
+    def _destination(self, target: Point | Pose | Object, distance: float, side: str,
+                     seen_from: Point | Pose | None = None) -> tuple:
         """Where to drive, and how near is near enough. Closer to an object than a requested distance (its centre to
         the robot's), stand back at that gap on this side of it: "stop one metre from the backpack" after going to it
         stayed 0.3 m away, since being within a metre already counted as arrived."""
         if side:
-            return self.spot(target, side, distance), 0.0
+            return self.spot(target, side, distance, seen_from), 0.0
         if isinstance(target, Object) and distance > 0 and math.dist(xy(target), (self.x, self.y)) < distance - 0.3:
             return self.spot(target, "front", distance - target.radius - RADIUS), 0.0
         return target, distance
 
-    def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
-        target, distance = self._destination(target, distance, side)
+    def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "", seen_from: Point | Pose | None = None) -> None:
+        target, distance = self._destination(target, distance, side, seen_from)
         goal, reach = self._reach(target, distance)
         if math.dist(goal, (self.x, self.y)) <= reach:
             if isinstance(target, Pose):
@@ -1025,14 +1026,17 @@ class SimRobot:
             return (min(CRUISE, 0.8 * (d - distance)) if abs(err) < 0.7 else 0.0), 2.5 * err
         return control, lambda: state["followed"] is False
 
-    def spot(self, target: Point | Pose | Object | str, side: str, distance: float = 0.5) -> Point:
+    def spot(self, target: Point | Pose | Object | str, side: str, distance: float = 0.5, seen_from: Point | Pose | None = None) -> Point:
         self._call()
         target = self._target(target)
         choose(side, ("behind", "front", "left", "right"), "side")
         cx, cy = self._reach(target, 0.0)[0]
         r = (target.radius if isinstance(target, Object) else 0.0) + RADIUS + max(0.05, float(distance))
-        n = math.hypot(cx - self.x, cy - self.y) or 1.0
-        ux, uy = (cx - self.x) / n, (cy - self.y) / n  # from the robot to the target
+        # From where the request began: seen from where the robot stood, a second go_to_side(table, left) at the
+        # table's left went on round it (O10 passed 1 of 6, the model calling it again after arriving).
+        vx, vy = xy(seen_from) if seen_from is not None else (self.x, self.y)
+        n = math.hypot(cx - vx, cy - vy) or 1.0
+        ux, uy = (cx - vx) / n, (cy - vy) / n  # from the viewpoint to the target
         dx, dy = {"behind": (ux, uy), "front": (-ux, -uy), "left": (-uy, ux), "right": (uy, -ux)}[side]
         base = math.atan2(dy, dx)
         for extra in (0.0, 0.15, 0.3, 0.5):

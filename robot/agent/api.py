@@ -180,8 +180,9 @@ class Robot(Protocol):
     def face(self, target: Target, background: bool = False) -> None:
         """Turn toward target."""
 
-    def go_to(self, target: Target, distance: float = 0.0, *, side: str = "") -> None:
-        """Approach within distance of the centre, or choose a side with distance measured edge to edge."""
+    def go_to(self, target: Target, distance: float = 0.0, *, side: str = "", seen_from: Point | Pose | None = None) -> None:
+        """Approach within distance of the centre, or choose a side (as seen from `seen_from`, else from here) with
+        distance measured edge to edge."""
 
     def drive(self, *, metres_per_second: float, degrees_per_second: float = 0.0, seconds: float) -> None:
         """Raw speed; + degrees_per_second turns left."""
@@ -207,8 +208,8 @@ class Robot(Protocol):
     ) -> None:
         """Stay distance m away from person."""
 
-    def spot(self, target: Target, side: str, distance: float = 0.5) -> Point:
-        """A free point next to target."""
+    def spot(self, target: Target, side: str, distance: float = 0.5, seen_from: Point | Pose | None = None) -> Point:
+        """A free point next to target, on the side as seen from `seen_from` (else from here)."""
 
     def express(self, posture: str, chime_kind: str = "", seconds: float = 0.6) -> None:
         """Express posture and procedural chime."""

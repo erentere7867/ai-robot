@@ -436,10 +436,10 @@ class RosRobot(SimRobot):
     def _finish_approach(self, target: Object, distance: float, rejected: set[Point]) -> None:
         """Refine the view without retrying a point Nav2 rejected."""
 
-    def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
+    def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "", seen_from: Point | Pose | None = None) -> None:
         """Nav2 drives there; when it gives up short of the target, so does the robot, and the caller hears why."""
         watch = target if isinstance(target, Object) else None
-        target, distance = self._destination(target, distance, side)
+        target, distance = self._destination(target, distance, side, seen_from)
         goal = xy(target)
         reach = (target.radius if isinstance(target, Object) else 0.0) + max(distance, 0.35)
         rejected: set[Point] = set()

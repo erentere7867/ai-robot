@@ -655,10 +655,10 @@ class RealRobot(RosRobot):
         if where is not None:
             yield where
 
-    def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "") -> None:
+    def _go(self, target: Point | Pose | Object, distance: float, *, side: str = "", seen_from: Point | Pose | None = None) -> None:
         if isinstance(target, Object) and hasattr(getattr(self, "perception", None), "detector"):
             self._watch(target.label)
-        super()._go(target, distance, side=side)
+        super()._go(target, distance, side=side, seen_from=seen_from)
         self._note_place()
 
     def _finish_approach(self, target: Object, distance: float, rejected: set[Point]) -> None:

@@ -537,7 +537,7 @@ class Tools:
             Tool("go_to_side", "Drive to one side of a target, when the user names a side: behind it (its far "
                                "side), in front of it, or its left or right.",
                  {"target": target, "side": {"type": "string", "enum": ["behind", "front", "left", "right", "under"],
-                                             "description": "Relative to the approach. Under is refused without "
+                                             "description": "As seen from where this request began. Under is refused without "
                                                             "verified clearance."},
                   "distance": {"type": "number", "minimum": 0.3, "maximum": 5,
                                "description": "Only if requested: gap in metres from the object's edge."}},
@@ -628,7 +628,8 @@ class Tools:
         t = self._resolve(target)
         person = isinstance(t, Object) and t.label == "person"
         if side:
-            self.robot.go_to(t, distance=distance if distance is not None else (0.8 if person else 0.2), side=side)
+            self.robot.go_to(t, distance=distance if distance is not None else (0.8 if person else 0.2), side=side,
+                             seen_from=self.began)
         else:
             edge = t.radius + ROBOT_RADIUS if isinstance(t, Object) else 0.0
             self.robot.go_to(t, distance=distance + edge if distance is not None else (0.8 if person else 0.0))

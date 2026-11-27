@@ -355,3 +355,12 @@ def test_go_between_parks_in_the_middle_of_the_gap():
     assert res.ok and "Arrived between sofa" in res.text
     gaps = [math.dist((p.x, p.y), (t.x, t.y)) - t.radius for t in (sofa, table)]
     assert abs(gaps[0] - gaps[1]) < 0.3
+
+
+def test_the_same_side_asked_again_is_the_same_spot():
+    sim = SimRobot(living_room())
+    tools = Tools(sim)
+    tools.execute("go_to_side", {"target": "table", "side": "left"})
+    first = sim.pose()
+    again = tools.execute("go_to_side", {"target": "table", "side": "left"})
+    assert again.ok and math.dist((first.x, first.y), (sim.pose().x, sim.pose().y)) < 0.2
