@@ -924,7 +924,8 @@ class Tools:
             self._check_thing(what)
             found = list(self.robot.detect(what))
             matches = (" Seen: " + "; ".join(f"{o.label} {o.id} ({_where_words(o)})" for o in found[:6]) + "."
-                       if found else f" No {what} detected.")
+                       if found else f" No {what} detected; what is in view is listed with the picture.")
+            # "No objects detected" read as an empty room: S5 then described "a red cube" and "a dark panel" (1 of 6).
         self.looked = list(dict.fromkeys([*self.looked, *CAMERAS[direction]]))
         return f"Looking {direction}.{matches}"
 
