@@ -143,7 +143,10 @@ started this way is not listed in Colab's *Manage sessions*: `colab sessions` li
 Level 3 does not run on the runtime itself (Ubuntu 24.04, 2 cores, 12 GB, no Docker for ROS 2 lyrical's 26.04), but
 it runs on any Linux machine with Docker, in the 26.04 container above, with the language model and the vision server
 on the runtime through an SSH tunnel. Measured on 26 November on a 4-core cloud VM: task M1 in 3 minutes at
-`--rtf 0.1`, YOLOE 174 ms and depth 203 ms a frame on the T4, 8 MB/s up the tunnel. With the vision server on the VM's
+`--rtf 0.1`, YOLOE 174 ms and depth 203 ms a frame on the T4, 8 MB/s up the tunnel. On 27 November nine tasks (M3
+N1 N3 P1 Q1 S1 S2 C1 X1) at `--rtf 1.0` took 14 minutes against about 70 at 0.1, with the same five passing and the
+same four failing; the robot's own time per task roughly doubled (it waits for pictures through the tunnel), so use
+1.0 to test what the robot does and 0.1 only to judge its timing. With the vision server on the VM's
 CPU instead it took 3 of the 4 cores, the robot's control loop ran late, and M1 failed.
 
 ```bash
