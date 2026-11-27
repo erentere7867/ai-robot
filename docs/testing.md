@@ -183,6 +183,10 @@ Behind an HTTPS proxy that re-signs traffic, the container needs the proxy's CA 
 ~/sprocket-venv/bin/python -m robot.eval.suite --tag mine          # --only O3 C1 ..., --list
 ```
 
+Since 27 November the 2D world sends what the robot sends with each picture (the ids marked on it and the four scan
+sectors) and draws an open door as open; scores from before are not comparable. Three passes of the same code on a
+T4 ranged 25-30 of 50 that day, so compare the sum of three passes, and read the cases that changed.
+
 ## Level 3: the 3D apartment
 
 ```bash
