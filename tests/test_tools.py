@@ -319,7 +319,7 @@ def test_going_to_the_thing_you_are_at_says_you_did_not_move():
     tools = Tools(SimRobot(living_room()))
     assert "Reached box" in tools.execute("go_to", {"target": "box"}).text
     again = tools.execute("go_to", {"target": "box"})
-    assert again.ok and again.status == "already_there" and "Already at box" in again.text
+    assert again.ok and again.status == "already_there" and "you were already there" in again.text
 
 
 def test_a_blocked_move_says_how_near_the_thing_in_the_way_is():
@@ -371,3 +371,7 @@ def test_request_progress_names_what_each_step_did():
     tools.execute("search", {"what": "giraffe"})
     res = tools.execute("go_to", {"target": "door"})
     assert "This request so far: no giraffe found in the views checked; reached door 1." in res.text
+
+
+def test_a_plural_finds_the_things_named_in_the_singular():
+    assert "Seen: box" in Tools(SimRobot(living_room())).execute("look", {"direction": "behind", "what": "boxes"}).text

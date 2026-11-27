@@ -97,8 +97,9 @@ SYNONYMS = {
 
 
 def _words(text: str) -> set[str]:
-    words = re.findall(r"[a-z]+", text.lower())
-    return {w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in words}
+    words = re.findall(r"[a-z]+", text.lower())  # plurals as one: "boxes" was "boxe", and look(what="boxes") saw none
+    return {w[:-2] if w.endswith(("xes", "ches", "shes", "sses")) else
+            w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in words}
 
 
 def visual_name(description: str) -> str:

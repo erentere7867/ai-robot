@@ -650,7 +650,8 @@ class Tools:
                         False, "partial", moved,
                     )
             if moved < 0.1:
-                return ActionResult(f"Already at {self._name(t)}: you did not move.", True, "already_there", moved)
+                return ActionResult(f"Reached {self._name(t)}: you were already there, so you did not move.", True,
+                                    "already_there", moved)
             return ActionResult(f"Arrived at {self._name(t)}.", True, "reached", moved)
         expected_gap = distance if distance is not None else (0.8 if person else 0.2 if side else 0.0)
         result = self._arrived(t, expected_gap=expected_gap, moved_m=moved, asked=distance)
@@ -703,10 +704,10 @@ class Tools:
                     False, "partial", moved_m,
                 )
             if gap <= 0.6 and moved_m < 0.1:
-                # 300 of 1675 arrivals in 20 2D passes were at the thing just reached, each read "Reached" again
-                # (C3 drove to box 1 eight times); a saved place already said "Already at".
-                return ActionResult(f"Already at {self._name(fresh)}, facing it (gap {gap:.1f} m): you did not move.",
-                                    True, "already_there", moved_m)
+                # 300 of 1675 arrivals in 20 2D passes were at the thing just reached (C3 drove to box 1 eight times):
+                # say so. Not as "Already at lamp 8", read as not visited: O7 went back to the plant to redo the order.
+                return ActionResult(f"Reached {self._name(fresh)}, facing it (gap {gap:.1f} m): you were already "
+                                    "there, so you did not move.", True, "already_there", moved_m)
             if gap <= 0.6:
                 return ActionResult(
                     f"Drive finished. Reached {self._name(fresh)}, facing it "
