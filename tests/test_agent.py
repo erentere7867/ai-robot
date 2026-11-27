@@ -119,7 +119,7 @@ def test_with_no_cameras_the_model_gets_the_list_and_pictures_only_when_it_looks
     Agent(brain, cameras="none").do("What do you see?", sim)
     first = brain.seen[0][1]["content"]
     assert not any(p.get("type") == "image_url" for p in first)
-    assert "call look to see" in first[0]["text"] and "Objects" in first[0]["text"]
+    assert "call look to see" in first[0]["text"] and "Last known" in first[0]["text"]
     assert any(p.get("type") == "image_url" for p in brain.seen[1][-1]["content"])  # after look
 
 
@@ -132,7 +132,8 @@ def test_an_ambiguous_target_is_explained_and_nothing_moves(marked):
     Agent(brain).do("Go to the box.", sim)
     result = tool_results(brain.seen[1])[0]
     if marked:
-        assert [p["text"] for p in result if p.get("text", "").endswith("camera:")] == [
+        captions = [p["text"].split(" (badges")[0].rstrip(":") + ":" for p in result if p.get("text", "").endswith(":")]
+        assert [c for c in captions if c.endswith("camera:")] == [
             cam.removesuffix("_camera").replace("_", "-") + " camera:" for cam in marked]
         assert sum(p["type"] == "image_url" for p in result) == len(marked)
         result = result[0]["text"]
@@ -265,9 +266,9 @@ def test_repeated_look_samples_the_requested_camera_again_while_stationary(monke
 
     def frame(camera, width, height):
         reads.append(camera)
-        return np.full((20, 20, 3), len(reads), dtype=np.uint8)
+        return np.full((20, 20, 3), len(reads), dtype=np.uint8), {}
 
-    monkeypatch.setattr(sim, "camera_view", frame)
+    monkeypatch.setattr(sim, "camera_observation", frame)
     brain = Scripted(*(call("look", direction=d) for d in ("rear right", "rear_left", "front", "front", "front")),
                      say("Done."))
     Agent(brain, review=False).do("Check the cameras.", sim)
@@ -321,10 +322,10 @@ def test_correction_keeps_look_back_frames_beside_a_live_view(monkeypatch, histo
         return frames
 
     monkeypatch.setattr(sim, "past_views", past_views, raising=False)
-    monkeypatch.setattr(sim, "camera_view", lambda camera, *_: None if camera == "front_camera" else current)
+    monkeypatch.setattr(sim, "camera_observation", lambda camera, *_: None if camera == "front_camera" else (current, {}))
     agent.do("What happened in the last five seconds?", sim, speak=False)
     result, = tool_results(brain.seen[1])
-    actual = [(part["text"], image["image_url"]["url"]) for part, image in zip(result[1::2], result[2::2], strict=True)]
+    actual = [(result[i - 1]["text"], part["image_url"]["url"]) for i, part in enumerate(result) if part["type"] == "image_url"]
     assert actual == [(f"front camera {ago} s ago:", data_url(rgb)) for ago, rgb in frames[-2:]]
     correction = brain.seen[1][-1]
     assert correction["role"] == "user" and "Actually, where is it now?" in _text(correction["content"])
@@ -350,21 +351,21 @@ def test_post_move_pictures_are_seen_before_another_batched_action(see_after_mov
 
 def test_unavailable_post_turn_picture_is_reported_without_executing_the_rest_of_the_batch(monkeypatch):
     sim = SimRobot(living_room())
-    camera_view = sim.camera_view
+    camera_observation = sim.camera_observation
 
     def view(*args):
         if not any(event.name == "turn" for event in sim.trace.events):
-            return camera_view(*args)
+            return camera_observation(*args)
         return None
 
-    monkeypatch.setattr(sim, "camera_view", view)
+    monkeypatch.setattr(sim, "camera_observation", view)
     batch = Reply("", tool_calls=[ToolCall("first", "turn", {"degrees": 90, "direction": "left"}),
                                  ToolCall("second", "move", {"metres": 1, "direction": "forward"})])
     brain = Scripted(batch, say("I turned but can't see whether the way is clear."))
     Agent(brain, think_when="news").do("Turn left and move if the way is clear.", sim)
     turned, skipped = tool_results(brain.seen[1])
     assert "Turned 90 degrees left." in _text(turned)
-    assert turned[1]["text"] == "No recent camera pictures attached."
+    assert turned[1]["text"].endswith("No recent camera pictures attached.")
     assert sum(p.get("text", "").count("No recent camera pictures") for p in turned) == 1
     assert "no recent camera pictures were available" in skipped
     assert brain.thinks[1] == 128

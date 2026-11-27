@@ -1061,7 +1061,13 @@ class SimRobot:
         self._halt()
 
     def camera_view(self, camera: str = "front_camera", width: int = 512, height: int = 288) -> np.ndarray:
-        """What one of the three cameras sees: walls, floor and every thing in its view at its size, colour and
+        return self.camera_observation(camera, width, height)[0]
+
+    def camera_observation(self, camera: str, width: int, height: int) -> tuple[np.ndarray, dict[int, float]]:
+        """The picture and the ids marked on it, seen now, as the robot gives them: with bare pictures after a move,
+        the 2D model had no list of what was in view and no scan, which the robot sends with every picture.
+
+        What one of the three cameras sees: walls, floor and every thing in its view at its size, colour and
         bearing, drawn in perspective, with the tracker's ids marked on the things it has detected. Simple shapes,
         but the vision model reads colours, sizes, counts and directions from the picture as it would on the robot."""
         from robot.perception.overlay import draw_set_of_mark
@@ -1121,7 +1127,7 @@ class SimRobot:
             area = max(1, (x1 + 1 - x0) * (y1 + 1 - y0))
             if (owner == tid).sum() >= 0.3 * area:
                 marks.append(((x0, y0, x1, y1), tid))
-        return draw_set_of_mark(img, marks) if marks else img
+        return (draw_set_of_mark(img, marks) if marks else img), {tid: 0.0 for _, tid in marks}
 
     def wait_for(self, description: str, seconds: float | None = None) -> Object | None:
         self._call("wait_for", description=description, seconds=seconds)
@@ -1267,6 +1273,16 @@ class SimRobot:
         self._call()
         offset = {"ahead": 0.0, "left": math.pi / 2, "behind": math.pi, "right": -math.pi / 2}[
             choose(direction, ("ahead", "behind", "left", "right"), "direction")]
+        return self._free(offset)
+
+    def spatial_observation(self) -> tuple[None, dict[str, float | None]]:
+        """The scan sectors the robot reports (from its centre, as its lidar does): without them, "drive until
+        something is less than half a metre in front of you" had nothing to judge by in 2D (F3 0 of 9 passes)."""
+        free = {name: self._free(math.radians(BEARINGS[name])) for name in ("front", "left", "right", "behind")}
+        return None, {name: round(d + RADIUS, 2) if d < 12.0 else None for name, d in free.items()}
+
+    def _free(self, offset: float) -> float:
+        """Free floor from the robot's edge along its heading plus `offset` radians, to 12 m."""
         c, s = math.cos(self.yaw + offset), math.sin(self.yaw + offset)
         people = [p for _, p in self._people()]
         for d in np.arange(RADIUS, 12.0, RES):

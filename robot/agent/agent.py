@@ -178,7 +178,7 @@ class Agent:
                      else "Last known (not marked at capture)")
             groups.setdefault(group, []).append(row)
         sep = "\n  " if full else "; "
-        lines = [f"{group}:{sep}{sep.join(rows)}" for group, rows in groups.items()]
+        lines = [f"{group}:{sep if full else ' '}{sep.join(rows)}" for group, rows in groups.items()]
         if rest:  # names only: "how many chairs" was answered 4 when the second of 2 chairs was cut off
             names = ", ".join(f"{o.id} {o.label}" for o in rest[:MAX_HIDDEN_NAMES])
             lines.append(f"(+{len(rest)} more: {names}{', ...' if len(rest) > MAX_HIDDEN_NAMES else ''})")
@@ -231,17 +231,13 @@ class Agent:
     def _observation(self, robot: Any, tools: Tools, cameras: list[str], header: str, *,
                      include_scene: bool = True, camera_limit: int | None = None) -> dict[str, Any]:
         observe = getattr(robot, "camera_observation", None)
-        view_fn = getattr(robot, "camera_view", None)
         width, height = self.image_width, round(self.image_width * 9 / 16)
         views = []
         for cam in cameras:
             if len(views) == camera_limit:
                 break
-            if observe:
-                view = observe(cam, width, height)
-                frame, ids = view if view is not None else (None, None)
-            else:
-                frame, ids = (view_fn(cam, width, height) if view_fn else None), None
+            view = observe(cam, width, height) if observe else None
+            frame, ids = view if view is not None else (None, None)
             if frame is not None and getattr(frame, "size", 0):
                 views.append((f"{CAMERA_NAMES.get(cam, cam)} camera:", frame, ids))
         recorded = len(tools.pictures)

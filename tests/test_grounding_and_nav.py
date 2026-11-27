@@ -1616,7 +1616,7 @@ def test_location_phrases_rejected_front_feedback_after_move_and_detector_clear(
     tool_content = [m for m in seen_turns[1] if m["role"] == "tool"][-1]["content"]
     assert isinstance(tool_content, list)
     assert sum(p.get("type") == "image_url" for p in tool_content) == 1
-    assert any(p.get("text") == "front camera:" for p in tool_content)
+    assert any(p.get("text", "").startswith("front camera") for p in tool_content)
     assert not any("What you sense now:" in p.get("text", "") for p in tool_content)
 
     # 3. Detector.clear() drops previous request's asked words while preserving `always`
