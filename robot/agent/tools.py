@@ -221,7 +221,8 @@ def _check(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
         if lo is not None and value < 0 <= lo and "direction" in tool.params:
             # move(metres=-1, direction='backward') 31 times in the 2D runs; told only the range, R1 then moved
             # 0.1 m backward for "back up one metre".
-            raise ToolError(f"{tool.name}: {name} is a size and is never negative. Call it again with {name}={-value:g} "
+            raise ToolError(f"{tool.name}: {name} is a size and is never negative. Call it again with "
+                            f"{name}={-value:g} "
                             "and the way to go in direction")
         if lo is not None and value < lo or hi is not None and value > hi:
             raise ToolError(f"{tool.name}: {name} must be between {lo} and {hi}, not {value:g}")
@@ -250,7 +251,8 @@ def _check_visual_name(text: str, *, allow_relation: bool = False) -> None:
     # view") four times, told "a left/right selection needs a viewpoint".
     way = next((w for w in re.findall(r"[a-z]+(?:-[a-z]+)*", low) if w in BEARINGS and ("-" in w or w == low)), None)
     if way:
-        raise ToolError(f"{text!r} names a direction, not a thing. To drive that way, call go_toward(direction={way!r}, "
+        raise ToolError(f"{text!r} names a direction, not a thing. To drive that way, call "
+                        f"go_toward(direction={way!r}, "
                         "metres=...); to face or reach something seen there, pass its ID")
     if RANGE_ORDER.search(text):
         raise ToolError("a distance comparison is not a camera label. Call search with just the object name, "
@@ -540,7 +542,8 @@ class Tools:
             Tool("go_to_side", "Drive to one side of a target, when the user names a side: behind it (its far "
                                "side), in front of it, or its left or right.",
                  {"target": target, "side": {"type": "string", "enum": ["behind", "front", "left", "right", "under"],
-                                             "description": "As seen from where this request began. Under is refused without "
+                                             "description": "As seen from where this request began. Under is "
+                                                            "refused without "
                                                             "verified clearance."},
                   "distance": {"type": "number", "minimum": 0.3, "maximum": 5,
                                "description": "Only if requested: gap in metres from the object's edge."}},
@@ -555,7 +558,7 @@ class Tools:
                  {"metres": {"type": "number", "minimum": 0.05, "maximum": 5},
                   "direction": {"type": "string", "enum": ["forward", "backward"]}},
                  ("metres", "direction"), self.move, moves=True),
-            Tool("turn", "Turn on the spot. 90 is a quarter turn, 180 turns around, 360 is a full spin.",
+            Tool("turn", "Turn on the spot. 90 is a quarter turn, 180 turns around, 360 is a full spin, 720 two.",
                  {"degrees": {"type": "number", "minimum": 1, "maximum": 1800}, "direction": side},
                  ("degrees", "direction"), self.turn, moves=True),
             Tool("drive", "Free motion for anything the other tools don't cover (wiggle, rock, slow spin, arc).",
@@ -577,7 +580,8 @@ class Tools:
                  {"target": {"type": "string", "description": "\"user\", an id, or a description like \"the cat\""},
                   "seconds": {"type": "number", "minimum": 1, "maximum": 3600}},
                  ("target",), self.follow, moves=True),
-            Tool("face", "Turn once to face a target.", {"target": target}, ("target",), self.face, moves=True),
+            Tool("face", "Turn once to face a target. To keep facing it while it moves, use keep_facing.",
+                 {"target": target}, ("target",), self.face, moves=True),
             Tool("keep_facing", "Keep turning to face a target as it moves, until the user says stop.",
                  {"target": target}, ("target",), self.keep_facing, moves=True),
             Tool("search", "Find an unlisted object: check memory, then drive to inspect unseen floor if needed.",
